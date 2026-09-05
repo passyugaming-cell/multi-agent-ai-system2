@@ -21,6 +21,8 @@ from app.api.v1.agents import router as agents_router
 from app.api.v1.owner_ai import router as owner_ai_router
 from app.api.v1.billing import router as billing_router
 from app.api.v1.analytics import router as analytics_router
+from app.api.v1.integrations import router as integrations_router
+from app.api.v1.webhooks import router as webhooks_router
 from app.integrations.whatsapp import whatsapp_router
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -129,3 +131,7 @@ app.include_router(billing_router, prefix="/api/v1")
 
 # Phase 5 Analytics Router
 app.include_router(analytics_router, prefix="/api/v1")
+
+# Phase 6 Integration & Webhook Routers
+app.include_router(integrations_router, prefix="/api/v1")
+app.include_router(webhooks_router, prefix="/api/v1")

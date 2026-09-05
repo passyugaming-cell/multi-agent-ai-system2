@@ -48,6 +48,7 @@ PRO_FEATURES = STARTER_FEATURES + [
     "api_access",
     "webhooks",
     "google_sheets",
+    "rest_api",
     "make_connector",
     "n8n_connector",
     "zapier_connector",
@@ -83,7 +84,7 @@ BUSINESS_FEATURES = PRO_FEATURES + [
     "priority_support",
 ]
 
-TRIAL_FEATURES = STARTER_FEATURES + ["broadcast"]
+TRIAL_FEATURES = STARTER_FEATURES + ["broadcast", "api_access", "webhooks", "google_sheets", "rest_api"]
 
 PLAN_DEFINITIONS = {
     "starter": {
@@ -208,7 +209,7 @@ class PlanService:
             existing_feats_stmt = select(PlanFeature).where(PlanFeature.plan_id == plan.id)
             existing_feats = {f.feature_key: f for f in (await self.session.execute(existing_feats_stmt)).scalars().all()}
 
-            for feat_key in defn["features"]:
+            for feat_key in set(defn["features"]):
                 if feat_key not in existing_feats:
                     pf = PlanFeature(plan_id=plan.id, feature_key=feat_key, is_enabled=True)
                     self.session.add(pf)
