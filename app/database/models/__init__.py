@@ -7,6 +7,11 @@ from app.database.models.conversation import Conversation
 from app.database.models.message import Message
 from app.database.models.order import Order, OrderItem
 from app.database.models.ai_usage import AIUsageRecord
+from app.database.models.onboarding import OnboardingChecklist
+from app.database.models.knowledge import KnowledgeCategory
+from app.database.models.guardrail import AIGuardrail
+from app.database.models.workflow import WorkflowConfiguration
+from app.database.models.audit import ProvisioningAudit
 
 __all__ = [
     "Tenant",
@@ -19,4 +24,9 @@ __all__ = [
     "Order",
     "OrderItem",
     "AIUsageRecord",
+    "OnboardingChecklist",
+    "KnowledgeCategory",
+    "AIGuardrail",
+    "WorkflowConfiguration",
+    "ProvisioningAudit",
 ]

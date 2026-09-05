@@ -11,6 +11,7 @@ from app.api.v1.products import router as products_router
 from app.api.v1.customers import router as customers_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.orders import router as orders_router
+from app.api.v1.onboarding import router as onboarding_router
 from app.integrations.whatsapp import whatsapp_router
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -98,4 +99,5 @@ app.include_router(products_router, prefix="/api/v1")
 app.include_router(customers_router, prefix="/api/v1")
 app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
+app.include_router(onboarding_router, prefix="/api/v1")
 app.include_router(whatsapp_router, prefix="/api/v1")
