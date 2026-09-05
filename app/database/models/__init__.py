@@ -10,9 +10,11 @@ from app.database.models.ai_usage import AIUsageRecord
 from app.database.models.onboarding import OnboardingChecklist
 from app.database.models.knowledge import KnowledgeCategory
 from app.database.models.guardrail import AIGuardrail
-from app.database.models.workflow import WorkflowConfiguration
+from app.database.models.workflow import WorkflowConfiguration, WorkflowExecution, WorkflowExecutionHistory, Task, Approval, EventRecord
 from app.database.models.audit import ProvisioningAudit
 from app.database.models.agent import AgentExecution
+from app.database.models.memory import BusinessMemory, ClientMemory, MemoryChangeProposal
+from app.database.models.owner_ai import OwnerAIExecution, Recommendation
 
 __all__ = [
     "Tenant",
@@ -29,6 +31,16 @@ __all__ = [
     "KnowledgeCategory",
     "AIGuardrail",
     "WorkflowConfiguration",
+    "WorkflowExecution",
+    "WorkflowExecutionHistory",
+    "Task",
+    "Approval",
+    "EventRecord",
     "ProvisioningAudit",
     "AgentExecution",
+    "BusinessMemory",
+    "ClientMemory",
+    "MemoryChangeProposal",
+    "OwnerAIExecution",
+    "Recommendation",
 ]

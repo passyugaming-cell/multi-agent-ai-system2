@@ -12,7 +12,7 @@ async def get_revenue_analytics_tool(tool_req: ToolRequest, session: AsyncSessio
     """Calculate actual historical revenue and order count from database."""
     stmt = select(
         func.count(Order.id).label("total_orders"),
-        func.coalesce(func.sum(Order.total_amount), 0.0).label("total_revenue"),
+        func.coalesce(func.sum(Order.total), 0.0).label("total_revenue"),
     ).where(and_(Order.tenant_id == tool_req.tenant_id, Order.status != "CANCELLED"))
 
     res = (await session.execute(stmt)).one()
