@@ -76,7 +76,6 @@ def mock_google_http(monkeypatch):
 
         # 5. Create Event
         if "/events" in url_str and request.method == "POST":
-            req_json = httpx.Response(200, json={}, request=request).request.read()
             return httpx.Response(
                 200,
                 json={
@@ -265,6 +264,64 @@ async def test_check_availability_freebusy(mock_google_http, db_session: AsyncSe
     )
     assert res_avail.status == "COMPLETED"
     assert res_avail.result["available"] is True
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_on_401_error(monkeypatch, db_session: AsyncSession, tenant_a):
+    """Test 401 response triggers automatic token refresh, updates vault, and retries request."""
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    integration = Integration(
+        integration_key="google_calendar",
+        provider_key="google_calendar",
+        display_name="Google Calendar",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+
+    service = IntegrationService(db_session)
+    conn = await service.connect_integration(
+        tenant_id=tenant_a.id,
+        integration_key="google_calendar",
+        credentials={"access_token": "expired_access_token", "refresh_token": "valid_refresh_token"},
+    )
+
+    token_refreshed = False
+
+    async def mock_send_refresh(self, request: httpx.Request, *args, **kwargs):
+        nonlocal token_refreshed
+        url_str = str(request.url)
+
+        if "oauth2.googleapis.com/token" in url_str:
+            token_refreshed = True
+            return httpx.Response(200, json={"access_token": "new_refreshed_access_token_999"}, request=request)
+
+        if "/users/me/calendarList" in url_str:
+            auth_header = request.headers.get("Authorization", "")
+            if "expired_access_token" in auth_header:
+                return httpx.Response(401, json={"error": "invalid_grant"}, request=request)
+            if "new_refreshed_access_token_999" in auth_header:
+                return httpx.Response(200, json={"items": [{"id": "primary", "summary": "Refreshed Calendar"}]}, request=request)
+
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", mock_send_refresh)
+
+    res = await service.execute_operation(
+        tenant_id=tenant_a.id,
+        connection_id=conn.id,
+        operation="list_calendars",
+        params={},
+    )
+
+    assert res.status == "COMPLETED"
+    assert token_refreshed is True
+    assert res.result["calendars"][0]["summary"] == "Refreshed Calendar"
 
 
 @pytest.mark.asyncio
@@ -498,20 +555,31 @@ async def test_google_calendar_api_routes(mock_google_http, async_client: AsyncC
     assert resp_auth.status_code == 200
     state = resp_auth.json()["state"]
 
-    # Lacks MANAGE_INTEGRATIONS permission test
-    bad_headers = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": "VIEW_INTEGRATIONS"}
-    resp_unauth = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=bad_headers)
-    assert resp_unauth.status_code == 403
+    # 2. Permission Negative Tests for Authorize Route
+    # Case A: Missing header / permissions = None
+    headers_no_perm = {"X-Tenant-ID": str(tenant_a.id)}
+    resp_none = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_no_perm)
+    assert resp_none.status_code == 403
 
-    # 2. Callback route
+    # Case B: Empty permissions string
+    headers_empty = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": ""}
+    resp_empty = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_empty)
+    assert resp_empty.status_code == 403
+
+    # Case C: Lacks MANAGE_INTEGRATIONS permission
+    headers_wrong = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": "VIEW_INTEGRATIONS"}
+    resp_wrong = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_wrong)
+    assert resp_wrong.status_code == 403
+
+    # 3. Callback route
     resp_cb = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=testcode&state={state}", headers=headers)
     assert resp_cb.status_code == 200
 
-    # 3. Calendars route
+    # 4. Calendars route
     resp_cal = await async_client.get(f"/api/v1/integrations/google-calendar/calendars?connection_id={conn.id}", headers=headers)
     assert resp_cal.status_code == 200
 
-    # 4. Availability route
+    # 5. Availability route
     resp_avail = await async_client.post(
         f"/api/v1/integrations/google-calendar/availability?connection_id={conn.id}",
         json={
