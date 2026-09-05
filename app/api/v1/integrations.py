@@ -115,6 +115,9 @@ async def google_calendar_callback(
     permissions: set[str] | None = Depends(get_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+
     import httpx
     from app.core.config import settings
     service = IntegrationService(db)
@@ -354,6 +357,9 @@ async def google_sheets_callback(
     permissions: set[str] | None = Depends(get_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+
     import httpx
     from app.core.config import settings
     service = IntegrationService(db)

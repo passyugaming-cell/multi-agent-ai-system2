@@ -176,7 +176,7 @@ async def test_03_missing_configuration_connect_fails(db_session: AsyncSession, 
 
 
 @pytest.mark.asyncio
-async def test_04_health_check():
+async def test_04_health_check(mock_sheets_http):
     adapter = GoogleSheetsAdapter()
     conn_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -586,6 +586,7 @@ async def test_27_none_permissions_allowed_internal(mock_sheets_http, db_session
         operation="get_spreadsheet",
         params={"spreadsheet_id": "s123"},
         actor_permissions=None,
+        allow_internal=True,
     )
     assert res.status == "COMPLETED"
 

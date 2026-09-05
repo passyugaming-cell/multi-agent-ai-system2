@@ -2,6 +2,7 @@ import uuid
 import logging
 import httpx
 from typing import Any
+from urllib.parse import quote
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
@@ -11,6 +12,7 @@ from app.integrations.exceptions import (
     TransientIntegrationError,
 )
 from app.integrations.registry import integration_registry
+from app.integrations.credentials import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ GOOGLE_SHEETS_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets"
 GOOGLE_DRIVE_BASE_URL = "https://www.googleapis.com/drive/v3"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# Selected Google OAuth scopes required for Google Sheets Provider
+# Selected Google OAuth scopes required for Google Sheets Provider (least privilege)
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
@@ -26,7 +28,7 @@ GOOGLE_SHEETS_SCOPES = [
 
 
 class GoogleSheetsAdapter:
-    """Provider adapter for Google Sheets API operations with real HTTP client, OAuth token refresh, spreadsheet discovery, values read/append/update, and error normalization."""
+    """Provider adapter for Google Sheets API operations with real HTTP client, OAuth 2.0 token refresh, real connectivity health check, spreadsheet discovery, values read/append/update, and error normalization."""
 
     provider_key = "google_sheets"
 
@@ -41,13 +43,13 @@ class GoogleSheetsAdapter:
         refresh_token = credentials.get("refresh_token")
         api_key = credentials.get("api_key")
 
-        # Check if access token needs to be retrieved via refresh_token
+        # Refresh access token if expired/missing when refresh_token is available
         if not access_token and refresh_token:
             access_token = await self._refresh_access_token(tenant_id, connection_id, refresh_token, session)
 
         if not access_token and not api_key:
             raise PermanentIntegrationError(
-                "Google Sheets requires valid access_token, refresh_token, or api_key",
+                "Google Sheets requires valid OAuth credentials (access_token or refresh_token) or api_key",
                 error_code="AUTHENTICATION_ERROR",
             )
 
@@ -79,12 +81,11 @@ class GoogleSheetsAdapter:
             try:
                 resp = await client.post(GOOGLE_TOKEN_URL, data=payload)
                 if resp.status_code != 200:
-                    raise PermanentIntegrationError(f"Token refresh failed: {resp.text}", error_code="AUTHENTICATION_ERROR")
+                    raise PermanentIntegrationError("Token refresh failed", error_code="AUTHENTICATION_ERROR")
                 data = resp.json()
                 new_access_token = data.get("access_token")
 
                 if session and new_access_token:
-                    # Persist updated encrypted credentials in Vault
                     from app.database.models.integrations import IntegrationCredential
                     from app.integrations.credentials import CredentialVault
                     vault = CredentialVault()
@@ -102,8 +103,10 @@ class GoogleSheetsAdapter:
                         await session.flush()
 
                 return new_access_token
+            except PermanentIntegrationError:
+                raise
             except Exception as e:
-                raise PermanentIntegrationError(f"Failed to refresh Google OAuth token: {e}", error_code="AUTHENTICATION_ERROR")
+                raise PermanentIntegrationError(f"Failed to refresh Google OAuth token: {redact_secrets(str(e))}", error_code="AUTHENTICATION_ERROR")
 
     async def connect(
         self,
@@ -117,16 +120,16 @@ class GoogleSheetsAdapter:
         access_token = credentials.get("access_token")
         refresh_token = credentials.get("refresh_token")
         api_key = credentials.get("api_key")
-        service_account = credentials.get("service_account_json")
+        service_account_json = credentials.get("service_account_json")
 
-        if not (access_token or refresh_token or api_key or service_account):
+        if not (access_token or refresh_token or api_key or service_account_json):
             await publish_integration_event(
                 tenant_id=tenant_id,
                 event_type="integration.google_sheets.connection_failed",
-                payload={"connection_id": str(connection_id), "reason": "Missing credentials"},
+                payload={"connection_id": str(connection_id), "reason": "Missing OAuth tokens or API key"},
             )
             raise PermanentIntegrationError(
-                "Google Sheets requires access_token, refresh_token, service_account_json, or api_key",
+                "Google Sheets requires access_token, refresh_token, or api_key",
                 error_code="INVALID_CREDENTIALS",
             )
 
@@ -160,12 +163,22 @@ class GoogleSheetsAdapter:
         credentials: dict[str, Any],
         session: AsyncSession | None = None,
     ) -> bool:
-        return bool(
-            credentials.get("access_token")
-            or credentials.get("refresh_token")
-            or credentials.get("api_key")
-            or credentials.get("service_account_json")
-        )
+        """Performs a real authenticated Google API connectivity check to verify provider health."""
+        if not (credentials.get("access_token") or credentials.get("refresh_token") or credentials.get("api_key")):
+            return False
+
+        try:
+            client, headers = await self._get_authenticated_client(tenant_id, connection_id, credentials, session)
+            try:
+                # Issue lightweight drive files list query to verify credentials & network reachability
+                url = f"{GOOGLE_DRIVE_BASE_URL}/files"
+                resp = await client.get(url, headers=headers, params={"pageSize": 1, "fields": "files(id)"})
+                return resp.status_code == 200
+            finally:
+                await client.aclose()
+        except Exception as e:
+            logger.warning("Health check failed for Google Sheets connection %s: %s", connection_id, redact_secrets(str(e)))
+            return False
 
     async def execute(
         self,
@@ -187,7 +200,7 @@ class GoogleSheetsAdapter:
             return res
         except PermanentIntegrationError as e:
             if e.error_code == "AUTHENTICATION_ERROR" and credentials.get("refresh_token"):
-                # Retry once after token refresh
+                # Single bounded retry after token refresh
                 refresh_token = credentials["refresh_token"]
                 new_token = await self._refresh_access_token(tenant_id, connection_id, refresh_token, session)
                 credentials["access_token"] = new_token
@@ -205,7 +218,7 @@ class GoogleSheetsAdapter:
                     await publish_integration_event(
                         tenant_id=tenant_id,
                         event_type="integration.google_sheets.operation_failed",
-                        payload={"connection_id": str(connection_id), "operation": operation, "error": str(retry_exc)},
+                        payload={"connection_id": str(connection_id), "operation": operation, "error": redact_secrets(str(retry_exc))},
                     )
                     raise retry_exc
 
@@ -213,7 +226,7 @@ class GoogleSheetsAdapter:
             await publish_integration_event(
                 tenant_id=tenant_id,
                 event_type="integration.google_sheets.operation_failed",
-                payload={"connection_id": str(connection_id), "operation": operation, "error": str(e)},
+                payload={"connection_id": str(connection_id), "operation": operation, "error": redact_secrets(str(e))},
             )
             raise e
         except Exception as e:
@@ -221,7 +234,7 @@ class GoogleSheetsAdapter:
             await publish_integration_event(
                 tenant_id=tenant_id,
                 event_type="integration.google_sheets.operation_failed",
-                payload={"connection_id": str(connection_id), "operation": operation, "error": str(e)},
+                payload={"connection_id": str(connection_id), "operation": operation, "error": redact_secrets(str(e))},
             )
             raise e
 
@@ -242,7 +255,8 @@ class GoogleSheetsAdapter:
                 if not spreadsheet_id:
                     raise PermanentIntegrationError("Missing spreadsheet_id parameter", error_code="MISSING_SPREADSHEET_ID")
 
-                url = f"{GOOGLE_SHEETS_BASE_URL}/{spreadsheet_id}"
+                encoded_id = quote(str(spreadsheet_id), safe="")
+                url = f"{GOOGLE_SHEETS_BASE_URL}/{encoded_id}"
                 resp = await client.get(url, headers=headers)
                 self._handle_http_error(resp)
                 data = resp.json()
@@ -260,7 +274,7 @@ class GoogleSheetsAdapter:
 
                 return {
                     "status": "success",
-                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_id": str(spreadsheet_id),
                     "title": data.get("properties", {}).get("title"),
                     "locale": data.get("properties", {}).get("locale"),
                     "time_zone": data.get("properties", {}).get("timeZone"),
@@ -273,14 +287,17 @@ class GoogleSheetsAdapter:
                     raise PermanentIntegrationError("Missing spreadsheet_id parameter", error_code="MISSING_SPREADSHEET_ID")
 
                 range_name = params.get("range", "Sheet1!A1:Z100")
-                url = f"{GOOGLE_SHEETS_BASE_URL}/{spreadsheet_id}/values/{range_name}"
+                encoded_id = quote(str(spreadsheet_id), safe="")
+                encoded_range = quote(str(range_name), safe="!:$")
+
+                url = f"{GOOGLE_SHEETS_BASE_URL}/{encoded_id}/values/{encoded_range}"
                 resp = await client.get(url, headers=headers)
                 self._handle_http_error(resp)
                 data = resp.json()
 
                 return {
                     "status": "success",
-                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_id": str(spreadsheet_id),
                     "range": data.get("range", range_name),
                     "major_dimension": data.get("majorDimension", "ROWS"),
                     "values": data.get("values", []),
@@ -293,8 +310,10 @@ class GoogleSheetsAdapter:
 
                 range_name = params.get("range", "Sheet1!A1")
                 rows = params.get("values") or params.get("rows") or []
+                encoded_id = quote(str(spreadsheet_id), safe="")
+                encoded_range = quote(str(range_name), safe="!:$")
 
-                url = f"{GOOGLE_SHEETS_BASE_URL}/{spreadsheet_id}/values/{range_name}:append"
+                url = f"{GOOGLE_SHEETS_BASE_URL}/{encoded_id}/values/{encoded_range}:append"
                 query_params = {"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"}
                 body = {
                     "range": range_name,
@@ -309,7 +328,7 @@ class GoogleSheetsAdapter:
                 updates = data.get("updates", {})
                 return {
                     "status": "success",
-                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_id": str(spreadsheet_id),
                     "table_range": updates.get("tableRange"),
                     "updated_range": updates.get("updatedRange"),
                     "updated_rows": updates.get("updatedRows", len(rows)),
@@ -325,8 +344,10 @@ class GoogleSheetsAdapter:
 
                 range_name = params.get("range", "Sheet1!A1")
                 rows = params.get("values") or params.get("rows") or []
+                encoded_id = quote(str(spreadsheet_id), safe="")
+                encoded_range = quote(str(range_name), safe="!:$")
 
-                url = f"{GOOGLE_SHEETS_BASE_URL}/{spreadsheet_id}/values/{range_name}"
+                url = f"{GOOGLE_SHEETS_BASE_URL}/{encoded_id}/values/{encoded_range}"
                 query_params = {"valueInputOption": "USER_ENTERED"}
                 body = {
                     "range": range_name,
@@ -340,7 +361,7 @@ class GoogleSheetsAdapter:
 
                 return {
                     "status": "success",
-                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_id": str(spreadsheet_id),
                     "updated_range": data.get("updatedRange", range_name),
                     "updated_rows": data.get("updatedRows", len(rows)),
                     "updated_columns": data.get("updatedColumns", 0),
@@ -348,7 +369,6 @@ class GoogleSheetsAdapter:
                 }
 
             elif operation == "list_spreadsheets":
-                # Uses Google Drive API to list spreadsheets owned/accessible by the tenant's connection
                 url = f"{GOOGLE_DRIVE_BASE_URL}/files"
                 query_params = {
                     "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
@@ -399,7 +419,10 @@ class GoogleSheetsAdapter:
                     ])
 
                 range_name = params.get("range", "Sheet1!A1")
-                url = f"{GOOGLE_SHEETS_BASE_URL}/{spreadsheet_id}/values/{range_name}:append"
+                encoded_id = quote(str(spreadsheet_id), safe="")
+                encoded_range = quote(str(range_name), safe="!:$")
+
+                url = f"{GOOGLE_SHEETS_BASE_URL}/{encoded_id}/values/{encoded_range}:append"
                 query_params = {"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"}
                 body = {
                     "range": range_name,
@@ -412,7 +435,7 @@ class GoogleSheetsAdapter:
 
                 return {
                     "status": "success",
-                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_id": str(spreadsheet_id),
                     "exported_orders_count": len(orders),
                     "rows_appended": len(rows),
                 }
@@ -426,18 +449,22 @@ class GoogleSheetsAdapter:
     def _handle_http_error(self, resp: httpx.Response) -> None:
         if resp.status_code in (200, 201, 204):
             return
+        if resp.status_code == 400:
+            raise PermanentIntegrationError("Invalid request or parameters", error_code="INVALID_REQUEST")
         if resp.status_code == 401:
             raise PermanentIntegrationError("Invalid or expired OAuth access token", error_code="AUTHENTICATION_ERROR")
         if resp.status_code == 403:
             raise PermanentIntegrationError("Permission denied by Google API", error_code="AUTHORIZATION_ERROR")
         if resp.status_code == 404:
             raise PermanentIntegrationError("Spreadsheet or range not found on Google Sheets", error_code="NOT_FOUND")
+        if resp.status_code == 409:
+            raise PermanentIntegrationError("Conflict in Google API request", error_code="CONFLICT")
         if resp.status_code == 429:
             raise TransientIntegrationError("Rate limit exceeded by Google API", error_code="RATE_LIMITED")
-        if resp.status_code >= 500:
+        if resp.status_code in (500, 502, 503, 504):
             raise TransientIntegrationError(f"Google Sheets API internal server error ({resp.status_code})", error_code="PROVIDER_ERROR")
 
-        raise PermanentIntegrationError(f"Google API request failed: {resp.text}", error_code="PROVIDER_ERROR")
+        raise PermanentIntegrationError(f"Google API request failed with status {resp.status_code}", error_code="PROVIDER_ERROR")
 
     async def normalize_event(
         self,
@@ -446,7 +473,7 @@ class GoogleSheetsAdapter:
     ) -> dict[str, Any]:
         return {
             "event_type": f"google_sheets.{event_type}",
-            "payload": raw_payload,
+            "payload": redact_secrets(raw_payload),
         }
 
 

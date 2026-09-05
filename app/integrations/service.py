@@ -58,14 +58,23 @@ class IntegrationService:
         self.entitlement = EntitlementResolver(db_session)
         self.idempotency = IntegrationIdempotencyChecker(db_session)
 
-    def _check_permission(self, actor_permissions: set[str] | list[str] | None, required_permission: str) -> None:
-        if actor_permissions is not None:
-            perms_set = set(actor_permissions)
-            if required_permission not in perms_set:
-                raise PermissionDeniedError(required_permission)
+    def _check_permission(
+        self,
+        actor_permissions: set[str] | list[str] | None,
+        required_permission: str,
+    ) -> None:
+        if actor_permissions is None:
+            # None indicates internal direct service invocation
+            return
+
+        perms_set = set(actor_permissions)
+        if required_permission not in perms_set:
+            raise PermissionDeniedError(required_permission)
 
     async def list_integrations(
-        self, tenant_id: uuid.UUID, actor_permissions: set[str] | list[str] | None = None
+        self,
+        tenant_id: uuid.UUID,
+        actor_permissions: set[str] | list[str] | None = None,
     ) -> list[Integration]:
         """List all available integrations for tenant."""
         self._check_permission(actor_permissions, VIEW_INTEGRATIONS)

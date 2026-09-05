@@ -469,6 +469,7 @@ async def tool_execute_integration_operation(request: ToolRequest, db_session: A
             operation=operation,
             params=params,
             idempotency_key=request.parameters.get("idempotency_key"),
+            allow_internal=True,
         )
 
         return ToolResult(
@@ -495,7 +496,7 @@ async def tool_get_whatsapp_connection_status(request: ToolRequest, db_session: 
         service = IntegrationService(db_session)
         tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
 
-        conn = await service.get_connection_by_provider(tenant_id, "whatsapp_cloud_api") or await service.get_connection_by_provider(tenant_id, "whatsapp")
+        conn = await service.get_connection_by_provider(tenant_id, "whatsapp_cloud_api", allow_internal=True) or await service.get_connection_by_provider(tenant_id, "whatsapp", allow_internal=True)
 
         if not conn:
             data = {
@@ -536,7 +537,7 @@ async def tool_get_sheets_connection_status(request: ToolRequest, db_session: As
         service = IntegrationService(db_session)
         tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
 
-        conn = await service.get_connection_by_provider(tenant_id, "google_sheets")
+        conn = await service.get_connection_by_provider(tenant_id, "google_sheets", allow_internal=True)
 
         if not conn:
             data = {
