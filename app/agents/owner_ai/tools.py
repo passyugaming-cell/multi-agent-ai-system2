@@ -488,6 +488,47 @@ async def tool_execute_integration_operation(request: ToolRequest, db_session: A
         )
 
 
+async def tool_get_whatsapp_connection_status(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    """Read-only tool for Owner AI to inspect WhatsApp Cloud API connection status without direct mutation capability."""
+    try:
+        from app.integrations import IntegrationService
+        service = IntegrationService(db_session)
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+
+        conn = await service.get_connection_by_provider(tenant_id, "whatsapp_cloud_api") or await service.get_connection_by_provider(tenant_id, "whatsapp")
+
+        if not conn:
+            data = {
+                "is_connected": False,
+                "status": "DISCONNECTED",
+                "phone_number_id": None,
+            }
+        else:
+            data = {
+                "is_connected": conn.status in ("ACTIVE", "CONNECTED"),
+                "status": conn.status,
+                "connection_id": str(conn.id),
+                "external_account_id": conn.external_account_id,
+                "last_connected_at": conn.last_connected_at.isoformat() if conn.last_connected_at else None,
+                "last_error_at": conn.last_error_at.isoformat() if conn.last_error_at else None,
+            }
+
+        return ToolResult(
+            success=True,
+            tool_name="get_whatsapp_connection_status",
+            data=data,
+            evidence=["Retrieved read-only WhatsApp Cloud API connection status."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_whatsapp_connection_status",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
 async def tool_get_midtrans_payment_status(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     """Read-only tool for Owner AI to inspect Midtrans payment status without direct mutation capability."""
     try:

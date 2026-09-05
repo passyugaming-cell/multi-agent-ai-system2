@@ -24,6 +24,7 @@ STARTER_FEATURES = [
     "admin_inbox",
     "basic_analytics",
     "basic_automation",
+    "whatsapp_cloud_api",
 ]
 
 PRO_FEATURES = STARTER_FEATURES + [
@@ -88,7 +89,7 @@ BUSINESS_FEATURES = PRO_FEATURES + [
     "priority_support",
 ]
 
-TRIAL_FEATURES = STARTER_FEATURES + ["broadcast", "api_access", "webhooks", "google_sheets", "google_calendar", "midtrans", "midtrans_payment", "payments", "rest_api"]
+TRIAL_FEATURES = STARTER_FEATURES + ["broadcast", "api_access", "webhooks", "google_sheets", "google_calendar", "midtrans", "midtrans_payment", "payments", "rest_api", "whatsapp_cloud_api"]
 
 PLAN_DEFINITIONS = {
     "starter": {
