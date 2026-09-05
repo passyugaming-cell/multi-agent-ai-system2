@@ -27,5 +27,13 @@ class Settings(BaseSettings):
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_RATE_LIMIT: int = 60
 
+    # Phase 2 Event Bus & Workflow Configuration
+    EVENT_BUS_BACKEND: Literal["in_memory", "redis"] = "in_memory"
+    REDIS_URL: str = "redis://localhost:6379/0"
+    WORKFLOWS_ENABLED: bool = True
+    WORKFLOW_MAX_STEPS: int = 50
+    WORKFLOW_MAX_RETRIES: int = 3
+    WORKFLOW_TIMEOUT_SECONDS: int = 300
+
 
 settings = Settings()

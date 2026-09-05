@@ -18,6 +18,24 @@ class AppException(Exception):
         super().__init__(message)
 
 
+class AppError(AppException):
+    """Generic application error with default status code."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        code: str = "APPLICATION_ERROR",
+        details: Optional[dict[str, Any]] = None,
+    ):
+        super().__init__(
+            code=code,
+            message=message,
+            status_code=status_code,
+            details=details,
+        )
+
+
 class MissingTenantHeaderException(AppException):
     def __init__(self) -> None:
         super().__init__(
