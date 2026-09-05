@@ -40,7 +40,7 @@ VALID_TRANSITIONS = {
     "DISCONNECTED": {"CONNECTING", "DISABLED"},
     "CONNECTING": {"CONNECTED", "ERROR", "DISCONNECTED"},
     "CONNECTED": {"ACTIVE", "ERROR", "RECONNECTING", "DISCONNECTED", "EXPIRED", "REVOKED", "DISABLED"},
-    "ACTIVE": {"CONNECTED", "ERROR", "RECONNECTING", "DISCONNECTED", "EXPIRED", "REVOKED", "DISABLED"},
+    "ACTIVE": {"CONNECTED", "CONNECTING", "ERROR", "RECONNECTING", "DISCONNECTED", "EXPIRED", "REVOKED", "DISABLED"},
     "ERROR": {"RECONNECTING", "DISCONNECTED", "CONNECTED", "DISABLED"},
     "RECONNECTING": {"CONNECTED", "ACTIVE", "ERROR", "DISCONNECTED"},
     "EXPIRED": {"RECONNECTING", "DISCONNECTED", "DISABLED"},
@@ -94,6 +94,7 @@ class IntegrationService:
             "rest_api": "api_access",
             "webhook": "webhooks",
             "google_sheets": "google_sheets",
+            "google_calendar": "google_calendar",
         }
         required_feature = feature_map.get(integration_key.lower(), "api_access")
         if not await self.entitlement.has_feature(tenant_id, required_feature):

@@ -43,6 +43,7 @@ ACTION_RISK_MAP = {
     "update_order": RiskLevel.MEDIUM,
     "call_ai": RiskLevel.MEDIUM,
     "call_agent": RiskLevel.MEDIUM,
+    "google_calendar_create_event": RiskLevel.MEDIUM,
     "change_product_price": RiskLevel.HIGH,
     "issue_refund": RiskLevel.HIGH,
     "request_approval": RiskLevel.HIGH,
@@ -202,7 +203,7 @@ class ActionExecutor:
                 },
             )
 
-        elif action_type in ("execute_integration", "google_sheets_append"):
+        elif action_type in ("execute_integration", "google_sheets_append", "google_calendar_create_event"):
             from app.integrations import IntegrationService
             service = IntegrationService(session)
             conn_id_str = params.get("connection_id")
@@ -212,12 +213,19 @@ class ActionExecutor:
             try:
                 conn_id = conn_id_str if isinstance(conn_id_str, uuid.UUID) else uuid.UUID(str(conn_id_str))
                 tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
-                op = "append_rows" if action_type == "google_sheets_append" else params.get("operation", "ping")
+                if action_type == "google_calendar_create_event":
+                    op = "create_event"
+                elif action_type == "google_sheets_append":
+                    op = "append_rows"
+                else:
+                    op = params.get("operation", "ping")
+
                 res = await service.execute_operation(
                     tenant_id=tenant_uuid,
                     connection_id=conn_id,
                     operation=op,
                     params=params,
+                    idempotency_key=params.get("idempotency_key"),
                 )
                 if res.status == "COMPLETED":
                     return ActionResult(success=True, output=res.result or {})
