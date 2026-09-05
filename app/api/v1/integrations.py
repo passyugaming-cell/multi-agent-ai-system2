@@ -89,7 +89,7 @@ async def google_calendar_authorize(
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
     permissions: set[str] | None = Depends(get_actor_permissions),
 ) -> dict[str, str]:
-    if permissions is not None and MANAGE_INTEGRATIONS not in permissions:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
 
     from app.core.config import settings
@@ -103,23 +103,45 @@ async def google_calendar_authorize(
 async def google_calendar_callback(
     code: str,
     state: str,
+    redirect_uri: str | None = None,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
     permissions: set[str] | None = Depends(get_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    import httpx
+    from app.core.config import settings
     service = IntegrationService(db)
     try:
         validate_oauth_state(state, expected_tenant_id=tenant_id)
+
+        token_payload = {
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": redirect_uri or "http://localhost/callback",
+            "grant_type": "authorization_code",
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
+            tokens = resp.json()
+
         conn = await service.connect_integration(
             tenant_id=tenant_id,
             integration_key="google_calendar",
             credentials={
-                "access_token": f"mock_access_token_{code}",
-                "refresh_token": f"mock_refresh_token_{code}",
+                "access_token": tokens.get("access_token"),
+                "refresh_token": tokens.get("refresh_token"),
+                "expires_in": tokens.get("expires_in"),
+                "token_type": tokens.get("token_type"),
             },
             actor_permissions=permissions,
         )
         return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
+    except HTTPException:
+        raise
     except IntegrationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
