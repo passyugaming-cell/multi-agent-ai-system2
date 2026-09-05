@@ -12,6 +12,11 @@ from app.api.v1.customers import router as customers_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.orders import router as orders_router
 from app.api.v1.onboarding import router as onboarding_router
+from app.api.v1.events import router as events_router
+from app.api.v1.workflows import router as workflows_router
+from app.api.v1.workflow_executions import router as workflow_executions_router
+from app.api.v1.tasks import router as tasks_router
+from app.api.v1.approvals import router as approvals_router
 from app.integrations.whatsapp import whatsapp_router
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -101,3 +106,10 @@ app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(onboarding_router, prefix="/api/v1")
 app.include_router(whatsapp_router, prefix="/api/v1")
+
+# Phase 2 Routers
+app.include_router(events_router, prefix="/api/v1")
+app.include_router(workflows_router, prefix="/api/v1")
+app.include_router(workflow_executions_router, prefix="/api/v1")
+app.include_router(tasks_router, prefix="/api/v1")
+app.include_router(approvals_router, prefix="/api/v1")
