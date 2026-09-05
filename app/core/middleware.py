@@ -26,8 +26,13 @@ class TenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
 
-        # Skip tenant check for system and documentation endpoints
-        if path in EXCLUDED_PATHS or path.startswith("/docs") or path.startswith("/openapi.json"):
+        # Skip tenant check for system, docs, and external provider webhooks
+        if (
+            path in EXCLUDED_PATHS
+            or path.startswith("/docs")
+            or path.startswith("/openapi.json")
+            or path.startswith("/api/v1/billing/webhooks")
+        ):
             return await call_next(request)
 
         tenant_header = request.headers.get("X-Tenant-ID")

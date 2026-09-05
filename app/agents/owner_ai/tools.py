@@ -11,6 +11,56 @@ from app.memory.service import MemoryService
 from app.core.tasks.service import TaskService
 from app.core.approvals.service import ApprovalService
 from app.core.exceptions import AppError
+from app.billing.subscription import SubscriptionService
+from app.billing.usage import UsageService, UsageMetric
+from app.billing.invoices import InvoiceService
+from app.billing.payments import PaymentService
+
+
+async def tool_get_billing_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        sub_service = SubscriptionService(db_session)
+        usage_service = UsageService(db_session)
+        invoice_service = InvoiceService(db_session)
+        payment_service = PaymentService(db_session)
+
+        sub = await sub_service.get_subscription_or_none(tenant_id)
+        plan_code = sub.plan.code if sub and sub.plan else "unknown"
+        status = sub.status if sub else "NONE"
+
+        ai_credits_used = await usage_service.get_current_usage(tenant_id, UsageMetric.AI_CREDITS) if sub else 0
+        ai_credits_limit = await usage_service.entitlement_resolver.get_limit(tenant_id, UsageMetric.AI_CREDITS) if sub else 0
+
+        invoices = await invoice_service.list_invoices(tenant_id) if sub else []
+        payments = await payment_service.list_payments(tenant_id) if sub else []
+
+        data = {
+            "subscription_status": status,
+            "plan_code": plan_code,
+            "billing_cycle": sub.billing_cycle if sub else None,
+            "ai_credits_used": ai_credits_used,
+            "ai_credits_limit": ai_credits_limit,
+            "total_invoices": len(invoices),
+            "total_payments": len(payments),
+            "latest_invoice_status": invoices[0].status if invoices else None,
+            "latest_payment_status": payments[0].status if payments else None,
+        }
+
+        return ToolResult(
+            success=True,
+            tool_name="get_billing_summary",
+            data=data,
+            evidence=[f"Billing summary read-only facts retrieved for plan {plan_code} ({status})."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_billing_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
 
 
 async def tool_evaluate_business_health(request: ToolRequest, db_session: AsyncSession) -> ToolResult:

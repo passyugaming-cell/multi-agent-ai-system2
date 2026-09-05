@@ -1,10 +1,12 @@
 from decimal import Decimal
 import logging
+import uuid
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_gateway.schemas import AIResponse, AIRequest
 from app.repositories.domain import AIUsageRepository
+from app.billing.usage import UsageService, UsageMetric, calculate_ai_credits
 
 logger = logging.getLogger("ai_gateway.usage")
 
@@ -24,7 +26,7 @@ def calculate_estimated_cost(
 
 
 class UsageTracker:
-    """Tracks and records AI usage and token costs."""
+    """Tracks and records AI usage and token costs, integrating with billing usage engine."""
 
     async def record_usage(
         self,
@@ -62,3 +64,28 @@ class UsageTracker:
             )
         except Exception as e:
             logger.error(f"Failed to persist AI usage record for request {request_id}: {e}")
+
+        # Integrate with billing usage engine
+        if request.tenant_id and error is None:
+            try:
+                credits_consumed = calculate_ai_credits(total_tokens)
+                tenant_uuid = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+                usage_service = UsageService(db_session)
+                await usage_service.check_and_increment_usage(
+                    tenant_id=tenant_uuid,
+                    metric=UsageMetric.AI_CREDITS,
+                    quantity=credits_consumed,
+                    source="AIGateway",
+                    metadata={
+                        "request_id": request_id,
+                        "task_type": request.task_type,
+                        "model": model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                        "estimated_provider_cost": str(cost) if cost is not None else None,
+                    },
+                    policy="WARN",  # Warn or allow execution record
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record billing AI credits for tenant {request.tenant_id}: {e}")

@@ -1,3 +1,4 @@
+import uuid
 from typing import AsyncGenerator
 import pytest
 import pytest_asyncio
@@ -128,8 +129,9 @@ async def client(
 async def tenant_a(db_session: AsyncSession) -> Tenant:
     """Fixture for active Tenant A."""
     repo = TenantRepository(db_session)
+    slug = f"tenant-alpha-{uuid.uuid4().hex[:6]}"
     tenant = await repo.create(
-        TenantCreate(name="Tenant Alpha", slug="tenant-alpha", is_active=True)
+        TenantCreate(name="Tenant Alpha", slug=slug, is_active=True)
     )
     await db_session.commit()
     return tenant
@@ -139,8 +141,9 @@ async def tenant_a(db_session: AsyncSession) -> Tenant:
 async def tenant_b(db_session: AsyncSession) -> Tenant:
     """Fixture for active Tenant B."""
     repo = TenantRepository(db_session)
+    slug = f"tenant-beta-{uuid.uuid4().hex[:6]}"
     tenant = await repo.create(
-        TenantCreate(name="Tenant Beta", slug="tenant-beta", is_active=True)
+        TenantCreate(name="Tenant Beta", slug=slug, is_active=True)
     )
     await db_session.commit()
     return tenant
@@ -150,8 +153,9 @@ async def tenant_b(db_session: AsyncSession) -> Tenant:
 async def inactive_tenant(db_session: AsyncSession) -> Tenant:
     """Fixture for inactive Tenant."""
     repo = TenantRepository(db_session)
+    slug = f"tenant-inactive-{uuid.uuid4().hex[:6]}"
     tenant = await repo.create(
-        TenantCreate(name="Tenant Inactive", slug="tenant-inactive", is_active=False)
+        TenantCreate(name="Tenant Inactive", slug=slug, is_active=False)
     )
     await db_session.commit()
     return tenant

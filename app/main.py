@@ -19,6 +19,7 @@ from app.api.v1.tasks import router as tasks_router
 from app.api.v1.approvals import router as approvals_router
 from app.api.v1.agents import router as agents_router
 from app.api.v1.owner_ai import router as owner_ai_router
+from app.api.v1.billing import router as billing_router
 from app.integrations.whatsapp import whatsapp_router
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -121,3 +122,6 @@ app.include_router(agents_router, prefix="/api/v1")
 
 # Phase 4 Routers
 app.include_router(owner_ai_router, prefix="/api/v1")
+
+# Phase 1.75 Billing Router
+app.include_router(billing_router, prefix="/api/v1")
