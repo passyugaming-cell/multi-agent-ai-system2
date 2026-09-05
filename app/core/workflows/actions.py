@@ -44,6 +44,8 @@ ACTION_RISK_MAP = {
     "call_ai": RiskLevel.MEDIUM,
     "call_agent": RiskLevel.MEDIUM,
     "google_calendar_create_event": RiskLevel.MEDIUM,
+    "google_sheets_append": RiskLevel.MEDIUM,
+    "google_sheets_update": RiskLevel.MEDIUM,
     "whatsapp_send_message": RiskLevel.MEDIUM,
     "midtrans_check_status": RiskLevel.LOW,
     "midtrans_create_payment": RiskLevel.MEDIUM,
@@ -283,7 +285,7 @@ class ActionExecutor:
                 )
                 return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
-        elif action_type in ("execute_integration", "google_sheets_append", "google_calendar_create_event"):
+        elif action_type in ("execute_integration", "google_sheets_append", "google_sheets_update", "google_calendar_create_event"):
             from app.integrations import IntegrationService
             service = IntegrationService(session)
             conn_id_str = params.get("connection_id")
@@ -296,7 +298,9 @@ class ActionExecutor:
                 if action_type == "google_calendar_create_event":
                     op = "create_event"
                 elif action_type == "google_sheets_append":
-                    op = "append_rows"
+                    op = "append_values"
+                elif action_type == "google_sheets_update":
+                    op = "update_values"
                 else:
                     op = params.get("operation", "ping")
 

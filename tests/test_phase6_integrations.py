@@ -4,6 +4,7 @@ import hashlib
 import time
 import pytest
 import pytest_asyncio
+import httpx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -189,7 +190,7 @@ async def test_strict_tenant_isolation(db_session: AsyncSession, tenant_a, tenan
 
 
 @pytest.mark.asyncio
-async def test_google_sheets_adapter_order_export(db_session: AsyncSession, tenant_a):
+async def test_google_sheets_adapter_order_export(monkeypatch, db_session: AsyncSession, tenant_a):
     plan_srv = PlanService(db_session)
     await plan_srv.seed_plans()
 
@@ -218,6 +219,11 @@ async def test_google_sheets_adapter_order_export(db_session: AsyncSession, tena
     )
     db_session.add(integration)
     await db_session.commit()
+
+    async def mock_send(self, request: httpx.Request, *args, **kwargs):
+        return httpx.Response(200, json={"updates": {"updatedRows": 2}}, request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
     service = IntegrationService(db_session)
     conn = await service.connect_integration(
