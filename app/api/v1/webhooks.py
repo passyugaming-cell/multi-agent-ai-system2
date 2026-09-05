@@ -112,3 +112,144 @@ async def receive_inbound_webhook(
     )
 
     return {"status": "accepted", "provider": provider}
+
+
+@router.post("/midtrans")
+async def receive_midtrans_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Dedicated Midtrans Webhook Endpoint.
+    1. Parses raw JSON.
+    2. Derives tenant_id strictly from internal Invoice record matching order_id.
+    3. Verifies SHA-512 signature using connection's server_key with constant-time comparison.
+    4. Enforces idempotency.
+    5. Normalizes status and updates Invoice/Payment billing state.
+    6. Emits EventBus events and executes workflows where appropriate.
+    """
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
+
+    order_id_str = payload.get("order_id")
+    if not order_id_str:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="order_id is required in webhook payload")
+
+    try:
+        invoice_id = uuid.UUID(order_id_str)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid order_id format")
+
+    from sqlalchemy import select
+    from app.database.models.billing import Invoice
+    stmt = select(Invoice).where(Invoice.id == invoice_id)
+    invoice = (await db.execute(stmt)).scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Internal Invoice record not found for order_id")
+
+    tenant_id = invoice.tenant_id
+
+    service = IntegrationService(db)
+    conn = await service.get_connection_by_provider(tenant_id, "midtrans")
+    if not conn:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Midtrans integration connection not found for tenant")
+
+    from app.database.models.integrations import IntegrationCredential
+    c_stmt = select(IntegrationCredential).where(
+        IntegrationCredential.tenant_id == tenant_id,
+        IntegrationCredential.connection_id == conn.id,
+        IntegrationCredential.revoked_at == None,
+    )
+    cred = (await db.execute(c_stmt)).scalar_one_or_none()
+    if not cred:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Midtrans credentials not found")
+
+    creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+    server_key = creds.get("server_key")
+    if not server_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Server key missing")
+
+    from app.integrations.adapters.midtrans import MidtransAdapter
+    adapter = MidtransAdapter()
+    if not adapter.verify_notification(payload, server_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid SHA-512 signature_key")
+
+    transaction_id = payload.get("transaction_id") or order_id_str
+    norm_status = adapter.normalize_notification(payload)
+
+    # Idempotency check via IntegrationIdempotencyChecker
+    idempotency_key = f"midtrans_webhook_{transaction_id}_{payload.get('transaction_status')}"
+    existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
+    if existing_exec:
+        return {"status": "PROCESSED", "idempotent": True, "transaction_status": norm_status}
+
+    # Update Payment/Invoice billing state
+    from app.billing.payments import PaymentService
+    pay_service = PaymentService(db)
+
+    from app.database.models.billing import Payment
+    p_stmt = select(Payment).where(Payment.tenant_id == tenant_id, Payment.invoice_id == invoice_id)
+    payment = (await db.execute(p_stmt)).scalars().first()
+
+    if not payment:
+        payment = await pay_service.create_payment_intent(
+            tenant_id=tenant_id,
+            invoice_id=invoice_id,
+            amount=invoice.total,
+        )
+
+    if norm_status == "SUCCEEDED" and payment.status != "SUCCEEDED":
+        await pay_service.confirm_payment_success(
+            tenant_id=tenant_id,
+            payment_id=payment.id,
+            provider_payment_id=transaction_id,
+        )
+    elif norm_status == "FAILED" and payment.status != "FAILED":
+        await pay_service.record_payment_failure(
+            tenant_id=tenant_id,
+            payment_id=payment.id,
+            reason=payload.get("status_message") or "Midtrans payment failed",
+        )
+    elif norm_status == "CANCELLED" and payment.status != "CANCELLED":
+        payment.status = "CANCELLED"
+        await db.commit()
+    elif norm_status == "EXPIRED" and payment.status != "EXPIRED":
+        payment.status = "EXPIRED"
+        await db.commit()
+    elif norm_status == "REFUNDED" and payment.status != "REFUNDED":
+        payment.status = "REFUNDED"
+        await db.commit()
+
+    # Save idempotency record
+    from app.database.models.integrations import IntegrationExecution
+    exec_record = IntegrationExecution(
+        tenant_id=tenant_id,
+        connection_id=conn.id,
+        operation="webhook_notification",
+        status="COMPLETED",
+        idempotency_key=idempotency_key,
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+        response_payload={"normalized_status": norm_status},
+    )
+    db.add(exec_record)
+    await db.commit()
+
+    # Publish EventBus event
+    await publish_integration_event(
+        tenant_id=tenant_id,
+        event_type=f"payment.midtrans.{norm_status.lower()}",
+        payload={
+            "invoice_id": str(invoice_id),
+            "payment_id": str(payment.id),
+            "transaction_id": transaction_id,
+            "status": norm_status,
+            "gross_amount": str(payload.get("gross_amount", "0")),
+        },
+        idempotency_key=idempotency_key,
+    )
+
+    return {"status": "PROCESSED", "normalized_status": norm_status, "invoice_id": str(invoice_id)}

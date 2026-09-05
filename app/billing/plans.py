@@ -49,6 +49,9 @@ PRO_FEATURES = STARTER_FEATURES + [
     "webhooks",
     "google_sheets",
     "google_calendar",
+    "midtrans",
+    "midtrans_payment",
+    "payments",
     "rest_api",
     "make_connector",
     "n8n_connector",
@@ -85,7 +88,7 @@ BUSINESS_FEATURES = PRO_FEATURES + [
     "priority_support",
 ]
 
-TRIAL_FEATURES = STARTER_FEATURES + ["broadcast", "api_access", "webhooks", "google_sheets", "google_calendar", "rest_api"]
+TRIAL_FEATURES = STARTER_FEATURES + ["broadcast", "api_access", "webhooks", "google_sheets", "google_calendar", "midtrans", "midtrans_payment", "payments", "rest_api"]
 
 PLAN_DEFINITIONS = {
     "starter": {

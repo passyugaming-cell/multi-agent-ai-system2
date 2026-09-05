@@ -69,6 +69,113 @@ class PaymentProvider(ABC):
         pass
 
 
+class MidtransPaymentProvider(PaymentProvider):
+    """Real PaymentProvider implementation wrapping Midtrans Adapter."""
+
+    def __init__(self, server_key: str, is_sandbox: bool = True) -> None:
+        self.server_key = server_key
+        self.is_sandbox = is_sandbox
+        from app.integrations.adapters.midtrans import MidtransAdapter
+        self.adapter = MidtransAdapter(is_sandbox=is_sandbox)
+
+    def _get_credentials(self) -> dict[str, Any]:
+        return {"server_key": self.server_key, "is_sandbox": self.is_sandbox}
+
+    async def create_payment(
+        self,
+        tenant_id: uuid.UUID,
+        invoice_id: uuid.UUID,
+        amount: Decimal,
+        currency: str = "IDR",
+        metadata: dict[str, Any] | None = None,
+    ) -> PaymentResult:
+        if amount <= Decimal("0"):
+            return PaymentResult(
+                success=False,
+                provider_payment_id="",
+                status="FAILED",
+                error_message="Payment amount must be greater than zero.",
+            )
+
+        params = {
+            "order_id": str(invoice_id),
+            "gross_amount": amount,
+            "currency": currency,
+        }
+        if metadata:
+            params.update(metadata)
+
+        res = await self.adapter.create_payment(self._get_credentials(), params)
+        return PaymentResult(
+            success=res.get("success", False),
+            provider_payment_id=res.get("transaction_id") or str(invoice_id),
+            status=res.get("transaction_status", "pending").upper(),
+            error_message=res.get("error_message"),
+            raw_response=res.get("raw_response"),
+        )
+
+    async def verify_payment(self, provider_payment_id: str) -> PaymentResult:
+        try:
+            res = await self.adapter.get_payment_status(self._get_credentials(), provider_payment_id)
+            norm_status = res.get("normalized_status", "FAILED")
+            return PaymentResult(
+                success=norm_status == "SUCCEEDED",
+                provider_payment_id=provider_payment_id,
+                status=norm_status,
+                raw_response=res.get("raw_response"),
+            )
+        except Exception as e:
+            return PaymentResult(
+                success=False,
+                provider_payment_id=provider_payment_id,
+                status="FAILED",
+                error_message=str(e),
+            )
+
+    async def refund(
+        self,
+        provider_payment_id: str,
+        amount: Decimal,
+        reason: str | None = None,
+    ) -> RefundResult:
+        res = await self.adapter.refund_payment(
+            self._get_credentials(), provider_payment_id, amount, reason or "Refund requested"
+        )
+        return RefundResult(
+            success=res.get("success", False),
+            refund_id=res.get("transaction_id") or f"ref_{uuid.uuid4().hex[:8]}",
+            amount=amount,
+            error_message=res.get("error_message"),
+        )
+
+    async def handle_webhook(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        secret: str | None = None,
+    ) -> WebhookResult:
+        srv_key = secret or self.server_key
+        if not self.adapter.verify_notification(payload, srv_key):
+            from app.billing.exceptions import WebhookVerificationError
+            raise WebhookVerificationError("Invalid Midtrans notification signature.")
+
+        order_id = payload.get("order_id")
+        amount = Decimal(str(payload.get("gross_amount", "0.00")))
+        norm_status = self.adapter.normalize_notification(payload)
+
+        tenant_id = uuid.UUID(payload.get("tenant_id")) if "tenant_id" in payload else uuid.UUID(int=0)
+        invoice_id = uuid.UUID(order_id) if order_id else uuid.UUID(int=0)
+
+        return WebhookResult(
+            event_type=f"payment.{norm_status.lower()}",
+            provider_payment_id=payload.get("transaction_id") or str(order_id),
+            amount=amount,
+            status=norm_status,
+            tenant_id=tenant_id,
+            invoice_id=invoice_id,
+        )
+
+
 class FakePaymentProvider(PaymentProvider):
     """Fake Payment Provider for testing and local development."""
 

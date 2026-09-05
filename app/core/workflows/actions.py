@@ -44,6 +44,10 @@ ACTION_RISK_MAP = {
     "call_ai": RiskLevel.MEDIUM,
     "call_agent": RiskLevel.MEDIUM,
     "google_calendar_create_event": RiskLevel.MEDIUM,
+    "midtrans_check_status": RiskLevel.LOW,
+    "midtrans_create_payment": RiskLevel.MEDIUM,
+    "midtrans_cancel_payment": RiskLevel.HIGH,
+    "midtrans_request_refund": RiskLevel.HIGH,
     "change_product_price": RiskLevel.HIGH,
     "issue_refund": RiskLevel.HIGH,
     "request_approval": RiskLevel.HIGH,
@@ -202,6 +206,64 @@ class ActionExecutor:
                     "status": agent_res.status.value,
                 },
             )
+
+        elif action_type in ("midtrans_create_payment", "midtrans_check_status", "midtrans_cancel_payment", "midtrans_request_refund"):
+            from app.integrations import IntegrationService
+            from app.billing.payments import PaymentService
+            service = IntegrationService(session)
+            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+
+            conn = await service.get_connection_by_provider(tenant_uuid, "midtrans")
+            if not conn:
+                return ActionResult(success=False, error="Midtrans integration connection not active")
+
+            if action_type == "midtrans_check_status":
+                order_id = params.get("order_id")
+                if not order_id:
+                    return ActionResult(success=False, error="order_id is required")
+                res = await service.execute_operation(
+                    tenant_id=tenant_uuid,
+                    connection_id=conn.id,
+                    operation="get_payment_status",
+                    params={"order_id": str(order_id)},
+                )
+                return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
+
+            elif action_type == "midtrans_create_payment":
+                inv_id_str = params.get("invoice_id")
+                if not inv_id_str:
+                    return ActionResult(success=False, error="invoice_id is required")
+                pay_srv = PaymentService(session)
+                from app.billing.invoices import InvoiceService
+                inv_srv = InvoiceService(session)
+                inv = await inv_srv.get_invoice(tenant_uuid, uuid.UUID(str(inv_id_str)))
+                pmt = await pay_srv.create_payment_intent(
+                    tenant_id=tenant_uuid,
+                    invoice_id=inv.id,
+                    amount=inv.total,
+                )
+                return ActionResult(success=True, output={"payment_id": str(pmt.id), "status": pmt.status})
+
+            elif action_type == "midtrans_cancel_payment":
+                order_id = params.get("order_id")
+                res = await service.execute_operation(
+                    tenant_id=tenant_uuid,
+                    connection_id=conn.id,
+                    operation="cancel_payment",
+                    params={"order_id": str(order_id)},
+                )
+                return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
+
+            elif action_type == "midtrans_request_refund":
+                order_id = params.get("order_id")
+                amount = params.get("amount")
+                res = await service.execute_operation(
+                    tenant_id=tenant_uuid,
+                    connection_id=conn.id,
+                    operation="refund_payment",
+                    params={"order_id": str(order_id), "amount": str(amount), "reason": params.get("reason", "Refund")},
+                )
+                return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
         elif action_type in ("execute_integration", "google_sheets_append", "google_calendar_create_event"):
             from app.integrations import IntegrationService

@@ -32,6 +32,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
             or path.startswith("/docs")
             or path.startswith("/openapi.json")
             or path.startswith("/api/v1/billing/webhooks")
+            or path.startswith("/api/v1/webhooks")
         ):
             return await call_next(request)
 

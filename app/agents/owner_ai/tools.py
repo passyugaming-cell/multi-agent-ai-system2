@@ -488,6 +488,62 @@ async def tool_execute_integration_operation(request: ToolRequest, db_session: A
         )
 
 
+async def tool_get_midtrans_payment_status(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    """Read-only tool for Owner AI to inspect Midtrans payment status without direct mutation capability."""
+    try:
+        from app.integrations import IntegrationService
+        from app.billing.payments import PaymentService
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        payment_id_str = request.parameters.get("payment_id")
+
+        pay_service = PaymentService(db_session)
+        if payment_id_str:
+            pmt = await pay_service.get_payment(tenant_id, uuid.UUID(str(payment_id_str)))
+            if not pmt:
+                return ToolResult(
+                    success=False,
+                    tool_name="get_midtrans_payment_status",
+                    error="Payment not found for tenant",
+                    correlation_id=request.correlation_id,
+                )
+            data = {
+                "payment_id": str(pmt.id),
+                "invoice_id": str(pmt.invoice_id),
+                "status": pmt.status,
+                "amount": str(pmt.amount),
+                "provider_payment_id": pmt.provider_payment_id,
+            }
+        else:
+            payments = await pay_service.list_payments(tenant_id)
+            data = {
+                "total_payments": len(payments),
+                "recent_payments": [
+                    {
+                        "payment_id": str(p.id),
+                        "status": p.status,
+                        "amount": str(p.amount),
+                        "provider_payment_id": p.provider_payment_id,
+                    }
+                    for p in payments[:5]
+                ],
+            }
+
+        return ToolResult(
+            success=True,
+            tool_name="get_midtrans_payment_status",
+            data=data,
+            evidence=["Retrieved read-only Midtrans payment status information."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_midtrans_payment_status",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
 async def tool_create_recommendation(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     try:
         rec_service = RecommendationService(db_session)
