@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Any, Callable, Awaitable
 import logging
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_gateway import AIGateway, GeminiProvider, AIRequest
@@ -41,6 +42,7 @@ ACTION_RISK_MAP = {
     "update_customer": RiskLevel.MEDIUM,
     "update_order": RiskLevel.MEDIUM,
     "call_ai": RiskLevel.MEDIUM,
+    "call_agent": RiskLevel.MEDIUM,
     "change_product_price": RiskLevel.HIGH,
     "issue_refund": RiskLevel.HIGH,
     "request_approval": RiskLevel.HIGH,
@@ -123,7 +125,6 @@ class ActionExecutor:
         elif action_type == "emit_event":
             from app.core.events.publisher import get_event_bus
             from app.core.events.schemas import EventSchema
-            import uuid
 
             event = EventSchema(
                 event_id=f"evt_{uuid.uuid4().hex[:12]}",
@@ -137,21 +138,71 @@ class ActionExecutor:
             return ActionResult(success=True, output={"emitted_event": event.event_id})
 
         elif action_type == "call_ai":
-            # Mandatory AI Gateway usage
             ai_gateway = AIGateway(provider=GeminiProvider())
             task_type = params.get("task_type", "general_reasoning")
             system_inst = params.get("system_instruction", "Analyze the input context.")
 
             req = AIRequest(
+                tenant_id=uuid.UUID(tenant_id),
                 task_type=task_type,
                 system_instruction=system_inst,
-                prompt=str(context),
+                user_message=str(context),
             )
-            ai_res = await ai_gateway.generate_text(req, tenant_id=tenant_id)
-            return ActionResult(success=True, output={"ai_response": ai_res.content})
+            ai_res = await ai_gateway.generate(req, db_session=session)
+            return ActionResult(success=True, output={"ai_response": ai_res.text})
+
+        elif action_type == "call_agent":
+            from app.agents import agent_registry, AgentRequest, AgentRequestStatus
+
+            target_agent = params.get("agent_name") or params.get("agent", "ai_sales")
+            task_type = params.get("task_type", "workflow_execution")
+            objective = params.get("objective") or params.get("prompt", "Analyze workflow context")
+
+            agent_context = dict(context)
+            if params.get("_already_approved"):
+                agent_context["_already_approved"] = True
+
+            agent_req = AgentRequest(
+                tenant_id=uuid.UUID(tenant_id),
+                source="workflow",
+                target_agent=target_agent,
+                task_type=task_type,
+                objective=objective,
+                context=agent_context,
+                constraints=params.get("constraints", {}),
+                requested_action=params.get("requested_action"),
+                correlation_id=params.get("correlation_id"),
+            )
+
+            agent_res = await agent_registry.delegate_task(agent_req, session)
+
+            if not params.get("_already_approved") and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
+                return ActionResult(
+                    success=True,
+                    requires_approval=True,
+                    approval_data={
+                        "action_type": "call_agent",
+                        "target": target_agent,
+                        "reason": agent_res.recommendation or f"Specialist agent {target_agent} requested approval.",
+                        "risk_level": "HIGH",
+                        "params": params,
+                    },
+                )
+
+            if agent_res.status == AgentRequestStatus.FAILED:
+                return ActionResult(success=False, error=agent_res.error or "Agent execution failed.")
+
+            return ActionResult(
+                success=True,
+                output={
+                    "agent_result": agent_res.model_dump(mode="json"),
+                    "finding": agent_res.finding,
+                    "recommendation": agent_res.recommendation,
+                    "status": agent_res.status.value,
+                },
+            )
 
         elif action_type in ("update_customer", "update_order", "change_product_price", "issue_refund"):
-            # Application validation and mutation logic
             return ActionResult(success=True, output={"status": "updated", "action": action_type, "params": params})
 
         else:

@@ -12,6 +12,7 @@ from app.database.models.knowledge import KnowledgeCategory
 from app.database.models.guardrail import AIGuardrail
 from app.database.models.workflow import WorkflowConfiguration
 from app.database.models.audit import ProvisioningAudit
+from app.database.models.agent import AgentExecution
 
 __all__ = [
     "Tenant",
@@ -29,4 +30,5 @@ __all__ = [
     "AIGuardrail",
     "WorkflowConfiguration",
     "ProvisioningAudit",
+    "AgentExecution",
 ]

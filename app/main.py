@@ -17,6 +17,7 @@ from app.api.v1.workflows import router as workflows_router
 from app.api.v1.workflow_executions import router as workflow_executions_router
 from app.api.v1.tasks import router as tasks_router
 from app.api.v1.approvals import router as approvals_router
+from app.api.v1.agents import router as agents_router
 from app.integrations.whatsapp import whatsapp_router
 from app.core.config import settings
 from app.core.exceptions import AppException
@@ -113,3 +114,6 @@ app.include_router(workflows_router, prefix="/api/v1")
 app.include_router(workflow_executions_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(approvals_router, prefix="/api/v1")
+
+# Phase 3 Routers
+app.include_router(agents_router, prefix="/api/v1")
