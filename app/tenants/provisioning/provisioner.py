@@ -11,6 +11,7 @@ from app.database.models.guardrail import AIGuardrail
 from app.database.models.workflow import WorkflowConfiguration
 from app.database.models.audit import ProvisioningAudit
 from app.core.exceptions import TenantNotFoundException, TenantInactiveException
+from app.billing.subscription import SubscriptionService
 from app.tenants.provisioning.templates import (
     DEFAULT_CHECKLIST_TEMPLATES,
     DEFAULT_KNOWLEDGE_CATEGORIES,
@@ -135,9 +136,16 @@ class TenantProvisioner:
             if wf_added:
                 initialized_components.append("workflow_configurations")
 
+            # E. Idempotently Auto-Provision 7-day Trial Subscription
+            sub_service = SubscriptionService(self.session)
+            sub = await sub_service.get_subscription_or_none(tenant_id)
+            if not sub:
+                await sub_service.create_trial_subscription(tenant_id, trial_days=7)
+                initialized_components.append("trial_subscription")
+
             await self.session.flush()
 
-        # E. Run Deterministic Validation & Update Checklist Statuses
+        # F. Run Deterministic Validation & Update Checklist Statuses
         validator = TenantValidatorEngine(self.session)
         val_results = await validator.validate_all(tenant_id)
 
@@ -161,10 +169,10 @@ class TenantProvisioner:
 
         await self.session.flush()
 
-        # F. Calculate Readiness Score
+        # G. Calculate Readiness Score
         readiness = ReadinessCalculator.calculate(checklist_items, val_results)
 
-        # G. Update Client Lifecycle State
+        # H. Update Client Lifecycle State
         prev_state = tenant.lifecycle_state
         new_state = prev_state
 
@@ -180,7 +188,7 @@ class TenantProvisioner:
             tenant.state_transition_at = utc_now()
             tenant.transition_reason = f"Provisioning completed with readiness status {readiness.readiness_status}"
 
-        # H. Log Provisioning Audit
+        # I. Log Provisioning Audit
         audit = ProvisioningAudit(
             tenant_id=tenant_id,
             action="PROVISION_TENANT",

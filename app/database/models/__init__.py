@@ -15,6 +15,19 @@ from app.database.models.audit import ProvisioningAudit
 from app.database.models.agent import AgentExecution
 from app.database.models.memory import BusinessMemory, ClientMemory, MemoryChangeProposal
 from app.database.models.owner_ai import OwnerAIExecution, Recommendation
+from app.database.models.billing import (
+    Plan,
+    PlanFeature,
+    PlanLimit,
+    Subscription,
+    SubscriptionHistory,
+    UsageRecord,
+    Invoice,
+    InvoiceItem,
+    Payment,
+    Addon,
+    TenantAddon,
+)
 
 __all__ = [
     "Tenant",
@@ -43,4 +56,15 @@ __all__ = [
     "MemoryChangeProposal",
     "OwnerAIExecution",
     "Recommendation",
+    "Plan",
+    "PlanFeature",
+    "PlanLimit",
+    "Subscription",
+    "SubscriptionHistory",
+    "UsageRecord",
+    "Invoice",
+    "InvoiceItem",
+    "Payment",
+    "Addon",
+    "TenantAddon",
 ]
