@@ -57,12 +57,46 @@ async def patch_middleware_session_factory(
 
 
 @pytest_asyncio.fixture
+async def test_session(
+    test_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[AsyncSession, None]:
+    """Alias for test session."""
+    async with test_session_factory() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
 async def db_session(
     test_session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncGenerator[AsyncSession, None]:
     """Provide a clean async database session for test fixture setup."""
     async with test_session_factory() as session:
         yield session
+
+
+@pytest_asyncio.fixture
+async def async_client(
+    test_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[AsyncClient, None]:
+    """Provide httpx AsyncClient with database dependency override."""
+    from app.main import app as fastapi_app
+
+    async def _get_test_db() -> AsyncGenerator[AsyncSession, None]:
+        async with test_session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    fastapi_app.dependency_overrides[session_module.get_db] = _get_test_db
+
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest_asyncio.fixture

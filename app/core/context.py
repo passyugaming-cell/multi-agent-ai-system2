@@ -10,6 +10,10 @@ def get_tenant_context() -> Optional[UUID]:
     return _tenant_context.get()
 
 
+# Alias for backward compatibility across modules
+get_tenant_id = get_tenant_context
+
+
 def set_tenant_context(tenant_id: UUID) -> Token[Optional[UUID]]:
     """Set the current tenant ID in request context and return the reset token."""
     return _tenant_context.set(tenant_id)

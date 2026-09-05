@@ -22,5 +22,10 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "dev_secret_jwt_key_32_characters_long_for_security"
     ENCRYPTION_KEY: str = "dev_encryption_key_32_bytes_long_secret"
 
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
+    AI_TIMEOUT_SECONDS: float = 30.0
+    AI_RATE_LIMIT: int = 60
+
 
 settings = Settings()
