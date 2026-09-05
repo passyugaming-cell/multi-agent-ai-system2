@@ -6,12 +6,19 @@ import hashlib
 from typing import Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
+from fastapi.responses import Response, PlainTextResponse
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
+from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential, IntegrationExecution
 from app.integrations.service import IntegrationService
+from app.integrations.adapters.whatsapp_cloud_api import WhatsAppCloudApiAdapter
+from app.integrations.whatsapp.parser import WhatsAppParser
 from app.integrations.events import publish_integration_event
 from app.integrations.exceptions import WebhookVerificationError, IntegrationNotFoundError
+from app.core.router.router import MessageRouter
+from app.repositories.domain import CustomerRepository, ConversationRepository, MessageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +36,6 @@ async def receive_inbound_webhook(
     x_timestamp: str | None = Header(None, alias="X-Timestamp"),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    # 1. Resolve tenant context safely
     try:
         tenant_id = uuid.UUID(x_tenant_id)
     except ValueError:
@@ -38,7 +44,6 @@ async def receive_inbound_webhook(
             detail="X-Tenant-ID header must be a valid UUID",
         )
 
-    # 2. Replay protection: check timestamp freshness if present
     if x_timestamp:
         try:
             ts = float(x_timestamp)
@@ -55,7 +60,6 @@ async def receive_inbound_webhook(
                 detail="X-Timestamp header must be a valid numeric unix timestamp",
             )
 
-    # 3. Read raw payload
     raw_body = await request.body()
     try:
         body_str = raw_body.decode("utf-8")
@@ -66,7 +70,6 @@ async def receive_inbound_webhook(
 
     service = IntegrationService(db)
 
-    # 4. Resolve WebhookConfig or Connection Secret securely for tenant
     webhook_secret = await service.get_webhook_secret(tenant_id, provider)
     if not webhook_secret:
         logger.warning("No active WebhookConfig or secret found for tenant %s provider %s", tenant_id, provider)
@@ -75,7 +78,6 @@ async def receive_inbound_webhook(
             detail=f"Webhook secret not configured for provider {provider}",
         )
 
-    # 5. Mandatory signature verification prior to accepting/normalizing payload
     if not x_signature:
         logger.warning("Missing X-Signature header for tenant %s provider %s", tenant_id, provider)
         raise HTTPException(
@@ -97,7 +99,6 @@ async def receive_inbound_webhook(
             detail="Invalid HMAC-SHA256 webhook signature",
         )
 
-    # 6. Normalize event payload & publish to Phase 2 EventBus
     normalized = {
         "event_type": f"webhook.{provider}.received",
         "payload": payload,
@@ -119,15 +120,6 @@ async def receive_midtrans_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """
-    Dedicated Midtrans Webhook Endpoint.
-    1. Parses raw JSON.
-    2. Derives tenant_id strictly from internal Invoice record matching order_id.
-    3. Verifies SHA-512 signature using connection's server_key with constant-time comparison.
-    4. Enforces idempotency.
-    5. Normalizes status and updates Invoice/Payment billing state.
-    6. Emits EventBus events and executes workflows where appropriate.
-    """
     raw_body = await request.body()
     try:
         payload = json.loads(raw_body.decode("utf-8"))
@@ -143,7 +135,6 @@ async def receive_midtrans_webhook(
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid order_id format")
 
-    from sqlalchemy import select
     from app.database.models.billing import Invoice
     stmt = select(Invoice).where(Invoice.id == invoice_id)
     invoice = (await db.execute(stmt)).scalar_one_or_none()
@@ -157,7 +148,6 @@ async def receive_midtrans_webhook(
     if not conn:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Midtrans integration connection not found for tenant")
 
-    from app.database.models.integrations import IntegrationCredential
     c_stmt = select(IntegrationCredential).where(
         IntegrationCredential.tenant_id == tenant_id,
         IntegrationCredential.connection_id == conn.id,
@@ -180,13 +170,11 @@ async def receive_midtrans_webhook(
     transaction_id = payload.get("transaction_id") or order_id_str
     norm_status = adapter.normalize_notification(payload)
 
-    # Idempotency check via IntegrationIdempotencyChecker
     idempotency_key = f"midtrans_webhook_{transaction_id}_{payload.get('transaction_status')}"
     existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
     if existing_exec:
         return {"status": "PROCESSED", "idempotent": True, "transaction_status": norm_status}
 
-    # Update Payment/Invoice billing state
     from app.billing.payments import PaymentService
     pay_service = PaymentService(db)
 
@@ -223,8 +211,6 @@ async def receive_midtrans_webhook(
         payment.status = "REFUNDED"
         await db.commit()
 
-    # Save idempotency record
-    from app.database.models.integrations import IntegrationExecution
     exec_record = IntegrationExecution(
         tenant_id=tenant_id,
         connection_id=conn.id,
@@ -238,7 +224,6 @@ async def receive_midtrans_webhook(
     db.add(exec_record)
     await db.commit()
 
-    # Publish EventBus event
     await publish_integration_event(
         tenant_id=tenant_id,
         event_type=f"payment.midtrans.{norm_status.lower()}",
@@ -253,3 +238,315 @@ async def receive_midtrans_webhook(
     )
 
     return {"status": "PROCESSED", "normalized_status": norm_status, "invoice_id": str(invoice_id)}
+
+
+@router.get("/whatsapp")
+async def verify_whatsapp_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """
+    WhatsApp Webhook Verification Handshake (GET).
+    Validates hub.mode, hub.challenge, and hub.verify_token against stored connection credentials.
+    """
+    params = request.query_params
+    mode = params.get("hub.mode")
+    challenge = params.get("hub.challenge")
+    verify_token = params.get("hub.verify_token")
+
+    if mode != "subscribe" or not verify_token or not challenge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification parameters",
+        )
+
+    stmt = (
+        select(IntegrationConnection)
+        .join(Integration, IntegrationConnection.integration_id == Integration.id)
+        .where(
+            and_(
+                IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
+                Integration.provider_key.in_(["whatsapp_cloud_api", "whatsapp"]),
+            )
+        )
+    )
+    connections = (await db.execute(stmt)).scalars().all()
+    service = IntegrationService(db)
+    adapter = WhatsAppCloudApiAdapter()
+
+    for conn in connections:
+        c_stmt = select(IntegrationCredential).where(
+            and_(
+                IntegrationCredential.tenant_id == conn.tenant_id,
+                IntegrationCredential.connection_id == conn.id,
+                IntegrationCredential.revoked_at == None,
+            )
+        )
+        cred = (await db.execute(c_stmt)).scalar_one_or_none()
+        if not cred:
+            continue
+        creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+        expected_token = creds.get("verify_token") or creds.get("webhook_secret") or creds.get("secret")
+        if expected_token:
+            result = adapter.verify_handshake(mode, challenge, verify_token, expected_token)
+            if result is not None:
+                return Response(content=result, media_type="text/plain", status_code=200)
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Webhook verification failed: invalid verify_token",
+    )
+
+
+@router.post("/whatsapp")
+async def receive_whatsapp_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Official WhatsApp Webhook Endpoint (POST).
+    1. Parses raw JSON.
+    2. Derives tenant_id strictly from active IntegrationConnection matching phone_number_id.
+    3. Verifies X-Hub-Signature-256 using stored app_secret in constant time.
+    4. Enforces idempotency on messages and status updates.
+    5. Normalizes messages and status events, creating/updating Universal Message, Customer, and Conversation.
+    6. Routes inbound messages via MessageRouter and executes outbound reply via adapter.
+    7. Emits EventBus events.
+    """
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
+
+    phone_number_id = None
+    entries = payload.get("entry", [])
+    for entry in entries:
+        for change in entry.get("changes", []):
+            val = change.get("value", {})
+            metadata = val.get("metadata", {})
+            if metadata.get("phone_number_id"):
+                phone_number_id = metadata.get("phone_number_id")
+                break
+        if phone_number_id:
+            break
+
+    if not phone_number_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="phone_number_id missing from webhook payload",
+        )
+
+    service = IntegrationService(db)
+    stmt = (
+        select(IntegrationConnection)
+        .join(Integration, IntegrationConnection.integration_id == Integration.id)
+        .where(
+            and_(
+                IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
+                Integration.provider_key.in_(["whatsapp_cloud_api", "whatsapp"]),
+            )
+        )
+    )
+    connections = (await db.execute(stmt)).scalars().all()
+
+    target_connection = None
+    target_credentials = None
+
+    for conn in connections:
+        if conn.external_account_id == phone_number_id:
+            target_connection = conn
+            c_stmt = select(IntegrationCredential).where(
+                and_(
+                    IntegrationCredential.tenant_id == conn.tenant_id,
+                    IntegrationCredential.connection_id == conn.id,
+                    IntegrationCredential.revoked_at == None,
+                )
+            )
+            cred = (await db.execute(c_stmt)).scalar_one_or_none()
+            if cred:
+                target_credentials = service.vault.decrypt_credentials(cred.encrypted_secret)
+            break
+
+    if not target_connection:
+        for conn in connections:
+            c_stmt = select(IntegrationCredential).where(
+                and_(
+                    IntegrationCredential.tenant_id == conn.tenant_id,
+                    IntegrationCredential.connection_id == conn.id,
+                    IntegrationCredential.revoked_at == None,
+                )
+            )
+            cred = (await db.execute(c_stmt)).scalar_one_or_none()
+            if cred:
+                creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+                if creds.get("phone_number_id") == phone_number_id:
+                    target_connection = conn
+                    target_credentials = creds
+                    break
+
+    if not target_connection or not target_credentials:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No active WhatsApp connection mapped to phone_number_id '{phone_number_id}'",
+        )
+
+    tenant_id = target_connection.tenant_id
+    app_secret = target_credentials.get("app_secret") or target_credentials.get("secret")
+
+    x_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Signature")
+    adapter = WhatsAppCloudApiAdapter()
+    if app_secret:
+        if not x_signature or not adapter.verify_webhook_signature(raw_body, x_signature, app_secret):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing X-Hub-Signature-256 signature",
+            )
+
+    processed_results = []
+    msg_repo = MessageRepository(db)
+    cust_repo = CustomerRepository(db)
+    conv_repo = ConversationRepository(db)
+    message_router = MessageRouter()
+
+    for entry in entries:
+        for change in entry.get("changes", []):
+            val = change.get("value", {})
+
+            messages_list = val.get("messages", [])
+            if messages_list:
+                universal_messages = WhatsAppParser.parse_payload(tenant_id, payload)
+                for un_msg in universal_messages:
+                    if un_msg.external_message_id:
+                        existing_msg = await msg_repo.get_by_external_id(tenant_id, un_msg.external_message_id)
+                        if existing_msg:
+                            processed_results.append({
+                                "external_message_id": un_msg.external_message_id,
+                                "status": "duplicate",
+                            })
+                            continue
+
+                    sender_phone = un_msg.metadata.get("sender_phone")
+                    sender_name = un_msg.metadata.get("sender_name") or "WhatsApp Customer"
+
+                    customer = None
+                    if sender_phone:
+                        customer = await cust_repo.get_by_phone(tenant_id, sender_phone)
+
+                    if not customer:
+                        customer = await cust_repo.create(
+                            tenant_id=tenant_id,
+                            name=sender_name,
+                            phone=sender_phone,
+                            external_id=sender_phone,
+                        )
+
+                    conversation = await conv_repo.get_active_by_customer(tenant_id, customer.id)
+                    if not conversation:
+                        conversation = await conv_repo.create(
+                            tenant_id=tenant_id,
+                            customer_id=customer.id,
+                            channel="whatsapp",
+                            status="OPEN",
+                        )
+
+                    inbound_db_msg = await msg_repo.create(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation.id,
+                        direction="INBOUND",
+                        message_type=un_msg.message_type,
+                        text=un_msg.text,
+                        external_message_id=un_msg.external_message_id,
+                        metadata_=un_msg.metadata,
+                    )
+
+                    route_result = await message_router.route_message(
+                        tenant_id=tenant_id,
+                        conversation=conversation,
+                        message=inbound_db_msg,
+                        session=db,
+                    )
+
+                    outbound_db_msg = await msg_repo.create(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation.id,
+                        direction="OUTBOUND",
+                        message_type="TEXT",
+                        text=route_result.response_text,
+                    )
+
+                    if sender_phone and not conversation.human_handoff:
+                        try:
+                            await service.execute_operation(
+                                tenant_id=tenant_id,
+                                connection_id=target_connection.id,
+                                operation="send_message",
+                                params={"recipient_phone": sender_phone, "text": route_result.response_text},
+                            )
+                        except Exception as send_err:
+                            logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+
+                    await publish_integration_event(
+                        tenant_id=tenant_id,
+                        event_type="whatsapp.message_received",
+                        payload={
+                            "external_message_id": un_msg.external_message_id,
+                            "customer_id": str(customer.id),
+                            "conversation_id": str(conversation.id),
+                            "message_type": un_msg.message_type,
+                            "text": un_msg.text,
+                        },
+                    )
+
+                    processed_results.append({
+                        "external_message_id": un_msg.external_message_id,
+                        "status": "processed",
+                        "was_ai_called": route_result.was_ai_called,
+                    })
+
+            statuses = val.get("statuses", [])
+            for st in statuses:
+                status_id = st.get("id")
+                status_val = st.get("status", "").lower()
+                idempotency_key = f"wa_status_{status_id}_{status_val}"
+
+                existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
+                if existing_exec:
+                    processed_results.append({"status_id": status_id, "status": "duplicate_event"})
+                    continue
+
+                if status_id:
+                    existing_msg = await msg_repo.get_by_external_id(tenant_id, status_id)
+                    if existing_msg:
+                        meta = dict(existing_msg.metadata_ or {})
+                        meta["delivery_status"] = status_val
+                        meta["status_timestamp"] = st.get("timestamp")
+                        existing_msg.metadata_ = meta
+
+                exec_rec = IntegrationExecution(
+                    tenant_id=tenant_id,
+                    connection_id=target_connection.id,
+                    operation=f"status_{status_val}",
+                    status="COMPLETED",
+                    idempotency_key=idempotency_key,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                    response_payload={"status": status_val, "status_id": status_id},
+                )
+                db.add(exec_rec)
+
+                await publish_integration_event(
+                    tenant_id=tenant_id,
+                    event_type=f"whatsapp.message_{status_val}",
+                    payload={
+                        "status_id": status_id,
+                        "status": status_val,
+                        "recipient_id": st.get("recipient_id"),
+                    },
+                    idempotency_key=idempotency_key,
+                )
+
+                processed_results.append({"status_id": status_id, "status": status_val})
+
+    await db.commit()
+    return {"status": "success", "tenant_id": str(tenant_id), "processed": processed_results}

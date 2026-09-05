@@ -44,6 +44,7 @@ ACTION_RISK_MAP = {
     "call_ai": RiskLevel.MEDIUM,
     "call_agent": RiskLevel.MEDIUM,
     "google_calendar_create_event": RiskLevel.MEDIUM,
+    "whatsapp_send_message": RiskLevel.MEDIUM,
     "midtrans_check_status": RiskLevel.LOW,
     "midtrans_create_payment": RiskLevel.MEDIUM,
     "midtrans_cancel_payment": RiskLevel.HIGH,
@@ -206,6 +207,23 @@ class ActionExecutor:
                     "status": agent_res.status.value,
                 },
             )
+
+        elif action_type == "whatsapp_send_message":
+            from app.integrations import IntegrationService
+            service = IntegrationService(session)
+            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+            conn = await service.get_connection_by_provider(tenant_uuid, "whatsapp_cloud_api") or await service.get_connection_by_provider(tenant_uuid, "whatsapp")
+            if not conn:
+                return ActionResult(success=False, error="WhatsApp integration connection not active")
+
+            res = await service.execute_operation(
+                tenant_id=tenant_uuid,
+                connection_id=conn.id,
+                operation="send_message",
+                params=params,
+                idempotency_key=params.get("idempotency_key"),
+            )
+            return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
         elif action_type in ("midtrans_create_payment", "midtrans_check_status", "midtrans_cancel_payment", "midtrans_request_refund"):
             from app.integrations import IntegrationService
