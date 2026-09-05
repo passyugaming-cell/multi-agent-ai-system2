@@ -15,6 +15,7 @@ from app.billing.subscription import SubscriptionService
 from app.billing.usage import UsageService, UsageMetric
 from app.billing.invoices import InvoiceService
 from app.billing.payments import PaymentService
+from app.analytics.services import AnalyticsService
 
 
 async def tool_get_billing_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
@@ -58,6 +59,220 @@ async def tool_get_billing_summary(request: ToolRequest, db_session: AsyncSessio
         return ToolResult(
             success=False,
             tool_name="get_billing_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_financial_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.financial.get_financial_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_financial_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved deterministic financial summary for revenue {res.total_revenue} IDR and MRR {res.mrr} IDR."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_financial_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_client_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.clients.get_client_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_client_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved client summary for {res.active_clients} active clients."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_client_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_sales_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.sales.get_sales_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_sales_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved sales analytics for {res.total_leads} leads with overall conversion {res.overall_conversion_rate}%."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_sales_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_ai_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.ai.get_ai_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_ai_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved AI analytics for {res.total_requests} requests costing ${res.ai_cost}."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_ai_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_automation_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.automation.get_automation_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_automation_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved automation analytics for {res.workflow_executions} executions with success rate {res.success_rate}%."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_automation_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_subscription_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        res = await analytics.subscriptions.get_subscription_analytics(tenant_id)
+        return ToolResult(
+            success=True,
+            tool_name="get_subscription_summary",
+            data=res.model_dump(mode="json"),
+            evidence=[f"Retrieved subscription analytics for {res.active_subscriptions} active subscriptions."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_subscription_summary",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_kpis(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        period = request.parameters.get("period", "30d")
+        res = await analytics.kpi.get_kpis(tenant_id, period)
+        return ToolResult(
+            success=True,
+            tool_name="get_kpis",
+            data=[kpi.model_dump(mode="json") for kpi in res],
+            evidence=[f"Retrieved {len(res)} core KPIs."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_kpis",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_trends(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        period_days = int(request.parameters.get("period_days", 30))
+        res = await analytics.trends.detect_trends(tenant_id, period_days)
+        return ToolResult(
+            success=True,
+            tool_name="get_trends",
+            data=[t.model_dump(mode="json") for t in res],
+            evidence=[f"Retrieved trend analysis for {len(res)} metrics."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_trends",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_anomalies(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        period_days = int(request.parameters.get("period_days", 30))
+        res = await analytics.anomalies.detect_anomalies(tenant_id, period_days)
+        return ToolResult(
+            success=True,
+            tool_name="get_anomalies",
+            data=[a.model_dump(mode="json") for a in res],
+            evidence=[f"Retrieved {len(res)} anomaly signals."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_anomalies",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
+async def tool_get_forecast(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        analytics = AnalyticsService(db_session)
+        period_days = int(request.parameters.get("period_days", 30))
+        res = await analytics.forecasting.generate_forecasts(tenant_id, period_days)
+        return ToolResult(
+            success=True,
+            tool_name="get_forecast",
+            data=[f.model_dump(mode="json") for f in res],
+            evidence=[f"Generated forecast projections for {len(res)} key metrics."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_forecast",
             error=str(exc),
             correlation_id=request.correlation_id,
         )
@@ -190,13 +405,14 @@ async def tool_create_orchestration_task(request: ToolRequest, db_session: Async
 
 async def tool_generate_daily_brief(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     try:
-        generator = ReportGenerator(db_session)
-        brief = await generator.generate_daily_brief(request.tenant_id)
+        analytics = AnalyticsService(db_session)
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        brief = await analytics.reports.generate_daily_brief(tenant_id)
         return ToolResult(
             success=True,
             tool_name="generate_daily_brief",
             data=brief.model_dump(mode="json"),
-            evidence=["Daily Business Brief generated successfully."],
+            evidence=["Daily Business Brief generated successfully based on deterministic analytics."],
             correlation_id=request.correlation_id,
         )
     except Exception as exc:
@@ -210,13 +426,14 @@ async def tool_generate_daily_brief(request: ToolRequest, db_session: AsyncSessi
 
 async def tool_generate_weekly_review(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     try:
-        generator = ReportGenerator(db_session)
-        review = await generator.generate_weekly_review(request.tenant_id)
+        analytics = AnalyticsService(db_session)
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        review = await analytics.reports.generate_weekly_review(tenant_id)
         return ToolResult(
             success=True,
             tool_name="generate_weekly_review",
             data=review.model_dump(mode="json"),
-            evidence=["Weekly Strategic Review generated successfully."],
+            evidence=["Weekly Strategic Review generated successfully based on deterministic analytics."],
             correlation_id=request.correlation_id,
         )
     except Exception as exc:
