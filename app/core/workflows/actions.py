@@ -202,6 +202,30 @@ class ActionExecutor:
                 },
             )
 
+        elif action_type in ("execute_integration", "google_sheets_append"):
+            from app.integrations import IntegrationService
+            service = IntegrationService(session)
+            conn_id_str = params.get("connection_id")
+            if not conn_id_str:
+                return ActionResult(success=False, error="Missing connection_id for integration action")
+
+            try:
+                conn_id = conn_id_str if isinstance(conn_id_str, uuid.UUID) else uuid.UUID(str(conn_id_str))
+                tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+                op = "append_rows" if action_type == "google_sheets_append" else params.get("operation", "ping")
+                res = await service.execute_operation(
+                    tenant_id=tenant_uuid,
+                    connection_id=conn_id,
+                    operation=op,
+                    params=params,
+                )
+                if res.status == "COMPLETED":
+                    return ActionResult(success=True, output=res.result or {})
+                else:
+                    return ActionResult(success=False, error=res.safe_error_message or "Integration action failed")
+            except Exception as e:
+                return ActionResult(success=False, error=str(e))
+
         elif action_type in ("update_customer", "update_order", "change_product_price", "issue_refund"):
             return ActionResult(success=True, output={"status": "updated", "action": action_type, "params": params})
 
