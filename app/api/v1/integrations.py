@@ -327,6 +327,197 @@ async def google_calendar_check_availability(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
+# Dedicated Google Sheets API Endpoints
+@router.get("/google-sheets/authorize")
+async def google_sheets_authorize(
+    redirect_uri: str | None = None,
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+) -> dict[str, str]:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
+
+    from app.core.config import settings
+    client_id = settings.GOOGLE_CLIENT_ID
+    state = generate_oauth_state(tenant_id=tenant_id, redirect_uri=redirect_uri)
+    scope = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly"
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={redirect_uri or 'http://localhost/callback'}&scope={scope}&state={state}&access_type=offline&prompt=consent"
+    return {"authorization_url": auth_url, "state": state}
+
+
+@router.get("/google-sheets/callback")
+async def google_sheets_callback(
+    code: str,
+    state: str,
+    redirect_uri: str | None = None,
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    import httpx
+    from app.core.config import settings
+    service = IntegrationService(db)
+    try:
+        validate_oauth_state(state, expected_tenant_id=tenant_id)
+
+        token_payload = {
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": redirect_uri or "http://localhost/callback",
+            "grant_type": "authorization_code",
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
+            tokens = resp.json()
+
+        conn = await service.connect_integration(
+            tenant_id=tenant_id,
+            integration_key="google_sheets",
+            credentials={
+                "access_token": tokens.get("access_token"),
+                "refresh_token": tokens.get("refresh_token"),
+                "expires_in": tokens.get("expires_in"),
+                "token_type": tokens.get("token_type"),
+            },
+            actor_permissions=permissions,
+        )
+        return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
+    except HTTPException:
+        raise
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/google-sheets/spreadsheets")
+async def google_sheets_list_spreadsheets(
+    connection_id: uuid.UUID,
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            operation="list_spreadsheets",
+            params={},
+            actor_permissions=permissions,
+        )
+        return res.result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/google-sheets/spreadsheets/{spreadsheet_id}")
+async def google_sheets_get_spreadsheet(
+    spreadsheet_id: str,
+    connection_id: uuid.UUID,
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            operation="get_spreadsheet",
+            params={"spreadsheet_id": spreadsheet_id},
+            actor_permissions=permissions,
+        )
+        return res.result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.get("/google-sheets/spreadsheets/{spreadsheet_id}/values")
+async def google_sheets_read_values(
+    spreadsheet_id: str,
+    connection_id: uuid.UUID,
+    range: str = "Sheet1!A1:Z100",
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            operation="read_values",
+            params={"spreadsheet_id": spreadsheet_id, "range": range},
+            actor_permissions=permissions,
+        )
+        return res.result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/google-sheets/spreadsheets/{spreadsheet_id}/append")
+async def google_sheets_append_values(
+    spreadsheet_id: str,
+    connection_id: uuid.UUID,
+    payload: dict[str, Any],
+    idempotency_key: str | None = Header(None, alias="X-Idempotency-Key"),
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        params = {**payload, "spreadsheet_id": spreadsheet_id}
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            operation="append_values",
+            params=params,
+            idempotency_key=idempotency_key,
+            actor_permissions=permissions,
+        )
+        return res.result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.put("/google-sheets/spreadsheets/{spreadsheet_id}/values")
+async def google_sheets_update_values(
+    spreadsheet_id: str,
+    connection_id: uuid.UUID,
+    payload: dict[str, Any],
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] | None = Depends(get_actor_permissions),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        params = {**payload, "spreadsheet_id": spreadsheet_id}
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            operation="update_values",
+            params=params,
+            actor_permissions=permissions,
+        )
+        return res.result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
 # Dedicated Midtrans Payment Gateway Endpoints
 @router.post("/midtrans/payments")
 async def midtrans_create_payment(
