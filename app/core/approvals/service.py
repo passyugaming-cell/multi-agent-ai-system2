@@ -153,7 +153,7 @@ class ApprovalService:
                 tenant_id=str(execution.tenant_id),
             )
 
-            if res.success:
+            if res.success and not res.requires_approval:
                 execution.context.update(res.output)
                 execution.current_step += 1
                 execution.status = "RUNNING"
