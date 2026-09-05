@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     AI_TIMEOUT_SECONDS: float = 30.0
     AI_RATE_LIMIT: int = 60
 
+    # Google OAuth Credentials
+    GOOGLE_CLIENT_ID: str = "mock_google_client_id.apps.googleusercontent.com"
+    GOOGLE_CLIENT_SECRET: str = "mock_google_client_secret"
+
     # Phase 2 Event Bus & Workflow Configuration
     EVENT_BUS_BACKEND: Literal["in_memory", "redis"] = "in_memory"
     REDIS_URL: str = "redis://localhost:6379/0"

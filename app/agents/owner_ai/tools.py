@@ -445,6 +445,49 @@ async def tool_generate_weekly_review(request: ToolRequest, db_session: AsyncSes
         )
 
 
+async def tool_execute_integration_operation(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    try:
+        from app.integrations import IntegrationService
+        service = IntegrationService(db_session)
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        conn_id_str = request.parameters.get("connection_id")
+        operation = request.parameters.get("operation")
+        params = request.parameters.get("params", {})
+
+        if not conn_id_str or not operation:
+            return ToolResult(
+                success=False,
+                tool_name="execute_integration_operation",
+                error="connection_id and operation are required parameters",
+                correlation_id=request.correlation_id,
+            )
+
+        conn_id = uuid.UUID(str(conn_id_str))
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=conn_id,
+            operation=operation,
+            params=params,
+            idempotency_key=request.parameters.get("idempotency_key"),
+        )
+
+        return ToolResult(
+            success=res.status == "COMPLETED",
+            tool_name="execute_integration_operation",
+            data=res.result or {},
+            error=res.safe_error_message,
+            evidence=[f"Executed integration operation '{operation}' with status {res.status}"],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="execute_integration_operation",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
 async def tool_create_recommendation(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     try:
         rec_service = RecommendationService(db_session)
