@@ -2,6 +2,29 @@ from typing import Any
 
 
 AGENT_PERMISSIONS: dict[str, dict[str, Any]] = {
+    "owner_ai": {
+        "allowed_tools": [
+            "evaluate_business_health",
+            "evaluate_client_health",
+            "get_memory_context",
+            "delegate_task_to_agent",
+            "create_orchestration_task",
+            "route_approval_request",
+            "generate_daily_brief",
+            "generate_weekly_review",
+            "create_recommendation",
+        ],
+        "forbidden_actions": [
+            "self_approve_high_risk",
+            "change_security_policy",
+            "change_platform_policy",
+            "delete_critical_data",
+            "change_official_price_unauthorized",
+            "issue_refund_unauthorized",
+            "direct_db_mutation",
+        ],
+        "read_only": False,
+    },
     "ai_sales": {
         "allowed_tools": [
             "get_products",

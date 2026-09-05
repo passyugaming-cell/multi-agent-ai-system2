@@ -9,8 +9,8 @@ from app.core.exceptions import AppError
 
 
 VALID_TASK_TRANSITIONS = {
-    "CREATED": {"ASSIGNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"},
-    "ASSIGNED": {"IN_PROGRESS", "COMPLETED", "CANCELLED"},
+    "CREATED": {"ASSIGNED", "IN_PROGRESS", "WAITING_APPROVAL", "WAITING_DATA", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
+    "ASSIGNED": {"IN_PROGRESS", "WAITING_APPROVAL", "WAITING_DATA", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
     "IN_PROGRESS": {"WAITING_DATA", "WAITING_APPROVAL", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
     "WAITING_DATA": {"IN_PROGRESS", "CANCELLED"},
     "WAITING_APPROVAL": {"IN_PROGRESS", "CANCELLED"},
@@ -46,7 +46,7 @@ class TaskService:
             description=description,
             task_type=task_type,
             priority=priority,
-            status="ASSIGNED" if assigned_to else "CREATED",
+            status="ASSIGNED" if (assigned_to or assigned_agent) else "CREATED",
             source=source,
             assigned_to=assigned_to,
             assigned_agent=assigned_agent,
