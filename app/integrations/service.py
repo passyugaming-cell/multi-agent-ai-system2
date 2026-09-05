@@ -95,6 +95,7 @@ class IntegrationService:
             "webhook": "webhooks",
             "google_sheets": "google_sheets",
             "google_calendar": "google_calendar",
+            "midtrans": "midtrans_payment",
         }
         required_feature = feature_map.get(integration_key.lower(), "api_access")
         if not await self.entitlement.has_feature(tenant_id, required_feature):
@@ -407,6 +408,31 @@ class IntegrationService:
                 started_at=execution.started_at,
                 completed_at=execution.completed_at,
             )
+
+    async def get_connection_by_provider(
+        self,
+        tenant_id: uuid.UUID,
+        provider_key: str,
+        actor_permissions: set[str] | list[str] | None = None,
+    ) -> IntegrationConnection | None:
+        """Retrieves active connection for tenant and provider key securely."""
+        self._check_permission(actor_permissions, VIEW_INTEGRATIONS)
+        stmt = (
+            select(IntegrationConnection)
+            .join(Integration, IntegrationConnection.integration_id == Integration.id)
+            .where(
+                and_(
+                    IntegrationConnection.tenant_id == tenant_id,
+                    IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
+                    Integration.provider_key == provider_key.lower().strip(),
+                )
+            )
+        )
+        conn = (await self.session.execute(stmt)).scalars().first()
+        if conn:
+            stmt_int = select(Integration).where(Integration.id == conn.integration_id)
+            conn.integration = (await self.session.execute(stmt_int)).scalar_one()
+        return conn
 
     async def get_webhook_secret(self, tenant_id: uuid.UUID, provider: str) -> str | None:
         """Resolves active webhook secret for tenant and provider safely."""
