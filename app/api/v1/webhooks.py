@@ -144,7 +144,7 @@ async def receive_midtrans_webhook(
     tenant_id = invoice.tenant_id
 
     service = IntegrationService(db)
-    conn = await service.get_connection_by_provider(tenant_id, "midtrans")
+    conn = await service.get_connection_by_provider(tenant_id, "midtrans", allow_internal=True)
     if not conn:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Midtrans integration connection not found for tenant")
 
@@ -482,6 +482,7 @@ async def receive_whatsapp_webhook(
                                 connection_id=target_connection.id,
                                 operation="send_message",
                                 params={"recipient_phone": sender_phone, "text": route_result.response_text},
+                                allow_internal=True,
                             )
                         except Exception as send_err:
                             logger.error("Failed to send WhatsApp response via adapter: %s", send_err)

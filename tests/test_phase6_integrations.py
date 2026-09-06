@@ -45,7 +45,7 @@ async def test_integration_seeding_and_list(db_session: AsyncSession, tenant_a):
     db_session.add(int_a)
     await db_session.commit()
 
-    integrations = await service.list_integrations(tenant_a.id)
+    integrations = await service.list_integrations(tenant_a.id, allow_internal=True)
     assert len(integrations) >= 1
     assert any(i.integration_key == "rest_api" for i in integrations)
 
@@ -72,15 +72,16 @@ async def test_connection_lifecycle_and_entitlement_gating(db_session: AsyncSess
     conn = await service.connect_integration(
         tenant_id=tenant_a.id,
         integration_key="google_sheets",
-        credentials={"service_account_json": "{\"type\": \"service_account\"}"},
+        credentials={"access_token": "valid_token"},
         external_account_id="sheet_acc_1",
+        allow_internal=True,
     )
 
     assert conn.status == "ACTIVE"
     assert conn.external_account_id == "sheet_acc_1"
     assert conn.last_connected_at is not None
 
-    disconnected = await service.disconnect_integration(tenant_a.id, conn.id)
+    disconnected = await service.disconnect_integration(tenant_a.id, conn.id, allow_internal=True)
     assert disconnected.status == "DISCONNECTED"
 
 
@@ -178,6 +179,7 @@ async def test_strict_tenant_isolation(db_session: AsyncSession, tenant_a, tenan
         tenant_id=tenant_a.id,
         integration_key="rest_api",
         credentials={"api_key": "tenant_a_secret_key"},
+        allow_internal=True,
     )
 
     with pytest.raises(ConnectionNotFoundError):
@@ -186,6 +188,7 @@ async def test_strict_tenant_isolation(db_session: AsyncSession, tenant_a, tenan
             connection_id=conn_a.id,
             operation="ping",
             params={},
+            allow_internal=True,
         )
 
 
@@ -229,7 +232,8 @@ async def test_google_sheets_adapter_order_export(monkeypatch, db_session: Async
     conn = await service.connect_integration(
         tenant_id=tenant_a.id,
         integration_key="google_sheets",
-        credentials={"api_key": "fake_google_api_key"},
+        credentials={"access_token": "fake_access_token"},
+        allow_internal=True,
     )
 
     res = await service.execute_operation(
@@ -237,6 +241,7 @@ async def test_google_sheets_adapter_order_export(monkeypatch, db_session: Async
         connection_id=conn.id,
         operation="export_orders",
         params={"spreadsheet_id": "sheet_xyz_123"},
+        allow_internal=True,
     )
 
     assert res.status == "COMPLETED"
@@ -270,6 +275,7 @@ async def test_webhook_security_negative_tests(async_client: AsyncClient, db_ses
         tenant_id=tenant_a.id,
         integration_key="stripe",
         credentials={"webhook_secret": "tenant_a_stripe_secret"},
+        allow_internal=True,
     )
 
     headers = {"X-Tenant-ID": str(tenant_a.id)}
@@ -332,6 +338,7 @@ async def test_webhook_replay_protection(async_client: AsyncClient, db_session: 
         tenant_id=tenant_a.id,
         integration_key="stripe",
         credentials={"webhook_secret": "tenant_a_secret"},
+        allow_internal=True,
     )
 
     headers = {"X-Tenant-ID": str(tenant_a.id)}
@@ -370,6 +377,7 @@ async def test_operation_idempotency_and_retries(db_session: AsyncSession, tenan
         tenant_id=tenant_a.id,
         integration_key="rest_api",
         credentials={"api_key": "key_1"},
+        allow_internal=True,
     )
 
     idem_key = f"idem_{uuid.uuid4().hex}"
@@ -379,6 +387,7 @@ async def test_operation_idempotency_and_retries(db_session: AsyncSession, tenan
         operation="ping",
         params={},
         idempotency_key=idem_key,
+        allow_internal=True,
     )
     assert res1.status == "COMPLETED"
 
@@ -389,6 +398,7 @@ async def test_operation_idempotency_and_retries(db_session: AsyncSession, tenan
         operation="ping",
         params={},
         idempotency_key=idem_key,
+        allow_internal=True,
     )
     assert res2.execution_id == res1.execution_id
     assert res2.status == "COMPLETED"

@@ -1512,7 +1512,7 @@ async def test_63_malicious_tenant_id_ignored(async_client: AsyncClient, active_
 async def test_64_invalid_provider_id_rejected(test_session: AsyncSession):
     service = IntegrationService(test_session)
     tenant_id = uuid.uuid4()
-    conn = await service.get_connection_by_provider(tenant_id, "non_existent_provider_xyz")
+    conn = await service.get_connection_by_provider(tenant_id, "non_existent_provider_xyz", allow_internal=True)
     assert conn is None
 
 

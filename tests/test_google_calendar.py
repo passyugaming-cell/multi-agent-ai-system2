@@ -150,12 +150,13 @@ async def test_google_calendar_connection_and_entitlement(db_session: AsyncSessi
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123", "refresh_token": "mock_refresh_123"},
+        allow_internal=True,
     )
 
     assert conn.status == "ACTIVE"
     assert conn.last_connected_at is not None
 
-    disc = await service.disconnect_integration(tenant_a.id, conn.id)
+    disc = await service.disconnect_integration(tenant_a.id, conn.id, allow_internal=True)
     assert disc.status == "DISCONNECTED"
 
 
@@ -207,6 +208,7 @@ async def test_timezone_handling_and_asia_jakarta(mock_google_http, db_session: 
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     start_str = "2026-09-10T14:00:00+07:00"
@@ -221,6 +223,7 @@ async def test_timezone_handling_and_asia_jakarta(mock_google_http, db_session: 
             "start": {"dateTime": start_str, "timeZone": "Asia/Jakarta"},
             "end": {"dateTime": end_str, "timeZone": "Asia/Jakarta"},
         },
+        allow_internal=True,
     )
 
     assert res.status == "COMPLETED"
@@ -250,6 +253,7 @@ async def test_check_availability_freebusy(mock_google_http, db_session: AsyncSe
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     res_avail = await service.execute_operation(
@@ -261,6 +265,7 @@ async def test_check_availability_freebusy(mock_google_http, db_session: AsyncSe
             "time_max": "2026-09-10T15:00:00+07:00",
             "timezone": "Asia/Jakarta",
         },
+        allow_internal=True,
     )
     assert res_avail.status == "COMPLETED"
     assert res_avail.result["available"] is True
@@ -289,6 +294,7 @@ async def test_token_refresh_on_401_error(monkeypatch, db_session: AsyncSession,
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "expired_access_token", "refresh_token": "valid_refresh_token"},
+        allow_internal=True,
     )
 
     token_refreshed = False
@@ -317,6 +323,7 @@ async def test_token_refresh_on_401_error(monkeypatch, db_session: AsyncSession,
         connection_id=conn.id,
         operation="list_calendars",
         params={},
+        allow_internal=True,
     )
 
     assert res.status == "COMPLETED"
@@ -346,6 +353,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     # 1. Create
@@ -360,6 +368,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
             "end": {"dateTime": "2026-09-10T11:00:00Z"},
         },
         idempotency_key=idem_key,
+        allow_internal=True,
     )
     assert res_create.status == "COMPLETED"
     event_id = res_create.result["event_id"]
@@ -375,6 +384,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
             "end": {"dateTime": "2026-09-10T11:00:00Z"},
         },
         idempotency_key=idem_key,
+        allow_internal=True,
     )
     assert res_create_dup.execution_id == res_create.execution_id
 
@@ -384,6 +394,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
         connection_id=conn.id,
         operation="get_event",
         params={"event_id": event_id},
+        allow_internal=True,
     )
     assert res_get.status == "COMPLETED"
 
@@ -393,6 +404,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
         connection_id=conn.id,
         operation="update_event",
         params={"event_id": event_id, "summary": "Updated Team Sync"},
+        allow_internal=True,
     )
     assert res_update.status == "COMPLETED"
 
@@ -402,6 +414,7 @@ async def test_google_calendar_crud_and_idempotency(mock_google_http, db_session
         connection_id=conn.id,
         operation="delete_event",
         params={"event_id": event_id},
+        allow_internal=True,
     )
     assert res_del.status == "COMPLETED"
     assert res_del.result["deleted"] is True
@@ -430,6 +443,7 @@ async def test_tenant_isolation_cross_tenant_gcal(db_session: AsyncSession, tena
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "tenant_a_token"},
+        allow_internal=True,
     )
 
     with pytest.raises(ConnectionNotFoundError):
@@ -438,6 +452,7 @@ async def test_tenant_isolation_cross_tenant_gcal(db_session: AsyncSession, tena
             connection_id=conn_a.id,
             operation="list_calendars",
             params={},
+            allow_internal=True,
         )
 
 
@@ -463,6 +478,7 @@ async def test_workflow_engine_google_calendar_action(mock_google_http, db_sessi
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     res = await ActionExecutor.execute(
@@ -503,6 +519,7 @@ async def test_owner_ai_tool_google_calendar(mock_google_http, db_session: Async
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     from app.agents.owner_ai.tools import tool_execute_integration_operation
@@ -543,6 +560,7 @@ async def test_google_calendar_api_routes(mock_google_http, async_client: AsyncC
         tenant_id=tenant_a.id,
         integration_key="google_calendar",
         credentials={"access_token": "mock_access_123"},
+        allow_internal=True,
     )
 
     headers = {

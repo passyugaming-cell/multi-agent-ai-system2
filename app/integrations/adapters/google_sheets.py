@@ -120,9 +120,8 @@ class GoogleSheetsAdapter:
         access_token = credentials.get("access_token")
         refresh_token = credentials.get("refresh_token")
         api_key = credentials.get("api_key")
-        service_account_json = credentials.get("service_account_json")
 
-        if not (access_token or refresh_token or api_key or service_account_json):
+        if not (access_token or refresh_token or api_key):
             await publish_integration_event(
                 tenant_id=tenant_id,
                 event_type="integration.google_sheets.connection_failed",

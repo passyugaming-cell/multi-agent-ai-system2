@@ -545,7 +545,7 @@ async def midtrans_create_payment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid invoice_id UUID")
 
     service = IntegrationService(db)
-    conn = await service.get_connection_by_provider(tenant_id, "midtrans")
+    conn = await service.get_connection_by_provider(tenant_id, "midtrans", allow_internal=True)
     if not conn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Midtrans integration is not connected for this tenant.")
 
@@ -618,7 +618,7 @@ async def midtrans_cancel_payment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
 
     service = IntegrationService(db)
-    conn = await service.get_connection_by_provider(tenant_id, "midtrans")
+    conn = await service.get_connection_by_provider(tenant_id, "midtrans", allow_internal=True)
     if not conn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Midtrans connection not active")
 
