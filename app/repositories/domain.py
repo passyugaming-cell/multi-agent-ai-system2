@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 from typing import Sequence
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,8 @@ from app.database.models import (
     User,
     BusinessProfile,
     Product,
+    ProductVariant,
+    KnowledgeItem,
     Customer,
     Conversation,
     Message,
@@ -43,15 +45,113 @@ class ProductRepository(BaseRepository[Product]):
     def __init__(self, session: AsyncSession):
         super().__init__(Product, session)
 
+    async def get_by_id(self, tenant_id: uuid.UUID, entity_id: uuid.UUID) -> Product | None:
+        stmt = select(Product).options(selectinload(Product.variants)).where(Product.tenant_id == tenant_id, Product.id == entity_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_all(
+        self, tenant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> Sequence[Product]:
+        stmt = (
+            select(Product)
+            .options(selectinload(Product.variants))
+            .where(Product.tenant_id == tenant_id)
+            .offset(skip)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
     async def get_by_sku(self, tenant_id: uuid.UUID, sku: str) -> Product | None:
-        stmt = select(Product).where(Product.tenant_id == tenant_id, Product.sku == sku)
+        stmt = (
+            select(Product)
+            .options(selectinload(Product.variants))
+            .where(Product.tenant_id == tenant_id, Product.sku == sku)
+        )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def search_by_name(self, tenant_id: uuid.UUID, query: str) -> Sequence[Product]:
-        stmt = select(Product).where(
-            Product.tenant_id == tenant_id,
-            Product.name.ilike(f"%{query}%"),
+        stmt = (
+            select(Product)
+            .options(selectinload(Product.variants))
+            .where(
+                Product.tenant_id == tenant_id,
+                Product.name.ilike(f"%{query}%"),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+
+class ProductVariantRepository(BaseRepository[ProductVariant]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(ProductVariant, session)
+
+    async def list_by_product(
+        self, tenant_id: uuid.UUID, product_id: uuid.UUID
+    ) -> Sequence[ProductVariant]:
+        stmt = select(ProductVariant).where(
+            ProductVariant.tenant_id == tenant_id,
+            ProductVariant.product_id == product_id,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def get_by_sku(self, tenant_id: uuid.UUID, sku: str) -> ProductVariant | None:
+        stmt = select(ProductVariant).where(
+            ProductVariant.tenant_id == tenant_id,
+            ProductVariant.sku == sku,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+class KnowledgeItemRepository(BaseRepository[KnowledgeItem]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(KnowledgeItem, session)
+
+    async def list_by_tenant(
+        self,
+        tenant_id: uuid.UUID,
+        category_key: str | None = None,
+        status: str | None = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> Sequence[KnowledgeItem]:
+        stmt = select(KnowledgeItem).where(KnowledgeItem.tenant_id == tenant_id)
+        if category_key:
+            stmt = stmt.where(KnowledgeItem.category_key == category_key)
+        if status:
+            stmt = stmt.where(KnowledgeItem.status == status)
+        stmt = stmt.offset(skip).limit(limit)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def list_active_and_approved(
+        self, tenant_id: uuid.UUID, category_key: str | None = None
+    ) -> Sequence[KnowledgeItem]:
+        stmt = select(KnowledgeItem).where(
+            KnowledgeItem.tenant_id == tenant_id,
+            KnowledgeItem.status.in_(["APPROVED", "ACTIVE"]),
+        )
+        if category_key:
+            stmt = stmt.where(KnowledgeItem.category_key == category_key)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def search_active_knowledge(
+        self, tenant_id: uuid.UUID, query: str
+    ) -> Sequence[KnowledgeItem]:
+        stmt = select(KnowledgeItem).where(
+            KnowledgeItem.tenant_id == tenant_id,
+            KnowledgeItem.status.in_(["APPROVED", "ACTIVE"]),
+            or_(
+                KnowledgeItem.title.ilike(f"%{query}%"),
+                KnowledgeItem.content.ilike(f"%{query}%"),
+                KnowledgeItem.category_key.ilike(f"%{query}%"),
+            ),
         )
         result = await self.session.execute(stmt)
         return result.scalars().all()

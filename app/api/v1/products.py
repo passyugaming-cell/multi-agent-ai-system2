@@ -1,13 +1,21 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Sequence
+from fastapi import APIRouter, Depends, Header, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
-from app.repositories.domain import ProductRepository
-from app.schemas.domain import ProductCreate, ProductUpdate, ProductResponse
+from app.tenants.business_service import BusinessDataService
+from app.schemas.domain import (
+    ProductCreate,
+    ProductUpdate,
+    ProductResponse,
+    ProductVariantCreate,
+    ProductVariantUpdate,
+    ProductVariantResponse,
+)
 
-router = APIRouter(prefix="/products", tags=["Products"])
+router = APIRouter(prefix="/products", tags=["Products & Catalog"])
 
 
 def _get_tenant_id_or_400() -> UUID:
@@ -20,43 +28,101 @@ def _get_tenant_id_or_400() -> UUID:
     return tenant_id
 
 
+def _get_actor_permissions(x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions")) -> set[str] | None:
+    if x_actor_permissions is None:
+        return None
+    return set(p.strip() for p in x_actor_permissions.split(",") if p.strip())
+
+
 @router.get("", response_model=list[ProductResponse])
 async def list_products(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
-    repo = ProductRepository(db)
-    return await repo.list_all(tenant_id=tenant_id, skip=skip, limit=limit)
+    service = BusinessDataService(db)
+    return await service.list_products(tenant_id, skip=skip, limit=limit, actor_permissions=actor_permissions)
 
 
 @router.post("", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 async def create_product(
     payload: ProductCreate,
     db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
-    repo = ProductRepository(db)
-    data = payload.model_dump()
-    if "metadata" in data:
-        data["metadata_"] = data.pop("metadata")
-    product = await repo.create(tenant_id=tenant_id, **data)
-    await db.commit()
-    return product
+    service = BusinessDataService(db)
+    return await service.create_product(tenant_id, payload, actor_permissions=actor_permissions)
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
 async def get_product(
     product_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
-    repo = ProductRepository(db)
-    product = await repo.get_by_id(tenant_id=tenant_id, entity_id=product_id)
-    if not product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product not found.",
-        )
-    return product
+    service = BusinessDataService(db)
+    return await service.get_product(tenant_id, product_id, actor_permissions=actor_permissions)
+
+
+@router.put("/{product_id}", response_model=ProductResponse)
+async def update_product(
+    product_id: UUID,
+    payload: ProductUpdate,
+    db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+):
+    tenant_id = _get_tenant_id_or_400()
+    service = BusinessDataService(db)
+    return await service.update_product(tenant_id, product_id, payload, actor_permissions=actor_permissions)
+
+
+@router.delete("/{product_id}", status_code=status.HTTP_200_OK)
+async def delete_product(
+    product_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+):
+    tenant_id = _get_tenant_id_or_400()
+    service = BusinessDataService(db)
+    await service.delete_product(tenant_id, product_id, actor_permissions=actor_permissions)
+    return {"message": "Product deleted successfully", "id": str(product_id)}
+
+
+@router.post("/{product_id}/variants", response_model=ProductVariantResponse, status_code=status.HTTP_201_CREATED)
+async def create_product_variant(
+    product_id: UUID,
+    payload: ProductVariantCreate,
+    db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+):
+    tenant_id = _get_tenant_id_or_400()
+    service = BusinessDataService(db)
+    return await service.create_product_variant(tenant_id, product_id, payload, actor_permissions=actor_permissions)
+
+
+@router.put("/variants/{variant_id}", response_model=ProductVariantResponse)
+async def update_product_variant(
+    variant_id: UUID,
+    payload: ProductVariantUpdate,
+    db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+):
+    tenant_id = _get_tenant_id_or_400()
+    service = BusinessDataService(db)
+    return await service.update_product_variant(tenant_id, variant_id, payload, actor_permissions=actor_permissions)
+
+
+@router.delete("/variants/{variant_id}", status_code=status.HTTP_200_OK)
+async def delete_product_variant(
+    variant_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+):
+    tenant_id = _get_tenant_id_or_400()
+    service = BusinessDataService(db)
+    await service.delete_product_variant(tenant_id, variant_id, actor_permissions=actor_permissions)
+    return {"message": "Variant deleted successfully", "id": str(variant_id)}

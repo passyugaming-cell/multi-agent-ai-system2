@@ -10,12 +10,11 @@ from app.core.ai_gateway.prompts import (
 )
 from app.core.router.intent import StructuredIntent
 from app.core.router.deterministic import DeterministicRouter
-from app.database.models import Conversation, Message, Customer, Product
+from app.database.models import Conversation, Message, Product
 from app.repositories.domain import (
-    ConversationRepository,
-    MessageRepository,
-    CustomerRepository,
+    BusinessProfileRepository,
     ProductRepository,
+    KnowledgeItemRepository,
 )
 
 logger = logging.getLogger("core.router")
@@ -138,18 +137,63 @@ class MessageRouter:
         except Exception as exc:
             logger.warning(f"AI Intent classification failed or unavailable: {exc}")
 
-        # 4. Fallback: Call Gemini for conversational assistance with factual context
+        # 4. Fallback: Call Gemini for conversational assistance with factual context (catalog, business profile, approved knowledge)
         try:
             product_repo = ProductRepository(session)
+            bp_repo = BusinessProfileRepository(session)
+            know_repo = KnowledgeItemRepository(session)
+
             all_products = await product_repo.list_all(tenant_id=tenant_id, limit=50)
+            bp = await bp_repo.get_by_tenant(tenant_id)
+            approved_knowledge = await know_repo.list_active_and_approved(tenant_id)
+
             catalog_context = [
                 {
                     "name": p.name,
+                    "type": p.type,
                     "sku": p.sku,
                     "price": float(p.price),
+                    "currency": p.currency,
                     "stock": p.stock,
+                    "stock_status": p.stock_status,
+                    "variants": [
+                        {
+                            "name": v.name,
+                            "sku": v.sku,
+                            "price_override": float(v.price_override) if v.price_override is not None else None,
+                            "stock": v.stock,
+                        }
+                        for v in (p.variants or [])
+                        if v.is_active
+                    ],
                 }
                 for p in all_products
+                if p.is_active
+            ]
+
+            business_context = {}
+            if bp:
+                business_context = {
+                    "name": bp.business_name,
+                    "description": bp.description,
+                    "phone": bp.phone,
+                    "email": bp.email,
+                    "website": bp.website,
+                    "operating_hours": bp.operating_hours,
+                    "payment_methods": bp.payment_methods,
+                    "shipping_information": bp.shipping_information,
+                    "return_policy": bp.return_policy,
+                    "exchange_policy": bp.exchange_policy,
+                    "refund_policy": bp.refund_policy,
+                }
+
+            knowledge_context = [
+                {
+                    "title": k.title,
+                    "category": k.category_key,
+                    "content": k.content,
+                }
+                for k in approved_knowledge
             ]
 
             gen_request = AIRequest(
@@ -157,7 +201,11 @@ class MessageRouter:
                 task_type="customer_service_response",
                 system_instruction=CUSTOMER_SERVICE_SYSTEM_PROMPT,
                 user_message=text,
-                context={"product_catalog": catalog_context},
+                context={
+                    "product_catalog": catalog_context,
+                    "business_profile": business_context,
+                    "approved_knowledge": knowledge_context,
+                },
             )
             ai_response = await self.ai_gateway.generate(
                 request=gen_request, db_session=session

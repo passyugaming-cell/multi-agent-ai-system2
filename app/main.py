@@ -6,8 +6,10 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
+from app.api.v1.business import router as business_router
 from app.api.v1.business_profile import router as business_profile_router
 from app.api.v1.products import router as products_router
+from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.customers import router as customers_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.orders import router as orders_router
@@ -105,8 +107,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Include Routers
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(health_router)  # Also expose /health and /health/db at root
+app.include_router(business_router, prefix="/api/v1")
 app.include_router(business_profile_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
+app.include_router(knowledge_router, prefix="/api/v1")
 app.include_router(customers_router, prefix="/api/v1")
 app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
