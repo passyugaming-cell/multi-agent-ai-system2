@@ -176,7 +176,7 @@ async def test_03_missing_configuration_connect_fails(db_session: AsyncSession, 
 
 
 @pytest.mark.asyncio
-async def test_04_health_check():
+async def test_04_health_check(mock_sheets_http):
     adapter = GoogleSheetsAdapter()
     conn_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
@@ -586,6 +586,7 @@ async def test_27_none_permissions_allowed_internal(mock_sheets_http, db_session
         operation="get_spreadsheet",
         params={"spreadsheet_id": "s123"},
         actor_permissions=None,
+        allow_internal=True,
     )
     assert res.status == "COMPLETED"
 
@@ -952,3 +953,148 @@ async def test_40_api_update_values_route(mock_sheets_http, async_client: AsyncC
 async def test_41_no_secret_leakage_in_error_message():
     err = PermanentIntegrationError("Secret access_token=secret_123 in error", error_code="ERROR")
     assert "secret_123" in str(err)
+
+
+# ==============================================================================
+# J. EXPLICIT REGRESSION TESTS (FINAL BLOCKER VERIFICATION)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_42_check_permission_fail_closed_when_actor_permissions_none(db_session: AsyncSession):
+    service = IntegrationService(db_session)
+    with pytest.raises(PermissionDeniedError):
+        service._check_permission(actor_permissions=None, required_permission=EXECUTE_INTEGRATION, allow_internal=False)
+
+
+@pytest.mark.asyncio
+async def test_43_check_permission_allowed_when_allow_internal_true(db_session: AsyncSession):
+    service = IntegrationService(db_session)
+    # Should not raise exception when allow_internal=True
+    service._check_permission(actor_permissions=None, required_permission=EXECUTE_INTEGRATION, allow_internal=True)
+
+
+@pytest.mark.asyncio
+async def test_44_sheets_callback_without_permissions_returns_403(async_client: AsyncClient, tenant_a):
+    state = generate_oauth_state(tenant_id=tenant_a.id)
+    response = await async_client.get(
+        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+        headers={"X-Tenant-ID": str(tenant_a.id)},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_45_sheets_callback_with_only_manage_integrations_returns_403(async_client: AsyncClient, tenant_a):
+    state = generate_oauth_state(tenant_id=tenant_a.id)
+    response = await async_client.get(
+        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": MANAGE_INTEGRATIONS},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_46_sheets_callback_with_both_required_permissions_allowed(mock_sheets_http, async_client: AsyncClient, db_session: AsyncSession, tenant_a):
+    await seed_sheets_catalog(db_session)
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+    await db_session.commit()
+
+    state = generate_oauth_state(tenant_id=tenant_a.id)
+    perms = f"{MANAGE_INTEGRATIONS},{MANAGE_CREDENTIALS}"
+    response = await async_client.get(
+        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": perms},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_47_invalid_credentials_rejected_without_broken_headers(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await adapter.connect(tenant_a.id, conn_id, {"invalid_key": "123"}, session=db_session)
+    assert exc_info.value.error_code == "INVALID_CREDENTIALS"
+
+
+@pytest.mark.asyncio
+async def test_48_api_key_only_credentials_rejected(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await adapter.connect(tenant_a.id, conn_id, {"api_key": "fake_api_key"}, session=db_session)
+    assert exc_info.value.error_code == "INVALID_CREDENTIALS"
+
+
+@pytest.mark.asyncio
+async def test_49_service_account_json_only_credentials_rejected(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await adapter.connect(tenant_a.id, conn_id, {"service_account_json": "{\"type\":\"service_account\"}"}, session=db_session)
+    assert exc_info.value.error_code == "INVALID_CREDENTIALS"
+
+
+@pytest.mark.asyncio
+async def test_50_empty_credentials_rejected(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await adapter.connect(tenant_a.id, conn_id, {}, session=db_session)
+    assert exc_info.value.error_code == "INVALID_CREDENTIALS"
+
+
+@pytest.mark.asyncio
+async def test_51_access_token_only_accepted(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    res = await adapter.connect(tenant_a.id, conn_id, {"access_token": "valid_tok"}, session=db_session)
+    assert res is True
+
+
+@pytest.mark.asyncio
+async def test_52_refresh_token_only_accepted(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    res = await adapter.connect(tenant_a.id, conn_id, {"refresh_token": "valid_refresh"}, session=db_session)
+    assert res is True
+
+
+@pytest.mark.asyncio
+async def test_53_access_token_and_refresh_token_accepted(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    res = await adapter.connect(tenant_a.id, conn_id, {"access_token": "tok", "refresh_token": "ref"}, session=db_session)
+    assert res is True
+
+
+@pytest.mark.asyncio
+async def test_54_no_bearer_none_header_constructed(db_session: AsyncSession, tenant_a):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await adapter._get_authenticated_client(tenant_a.id, conn_id, {"api_key": "some_key"})
+    assert exc_info.value.error_code == "AUTHENTICATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_55_health_check_with_valid_oauth(mock_sheets_http):
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    res = await adapter.health_check(tenant_id, conn_id, {"access_token": "tok_123"})
+    assert res is True
+
+
+@pytest.mark.asyncio
+async def test_56_health_check_with_invalid_credentials():
+    adapter = GoogleSheetsAdapter()
+    conn_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    res_empty = await adapter.health_check(tenant_id, conn_id, {})
+    assert res_empty is False
+
+    res_api_key = await adapter.health_check(tenant_id, conn_id, {"api_key": "key"})
+    assert res_api_key is False

@@ -58,17 +58,29 @@ class IntegrationService:
         self.entitlement = EntitlementResolver(db_session)
         self.idempotency = IntegrationIdempotencyChecker(db_session)
 
-    def _check_permission(self, actor_permissions: set[str] | list[str] | None, required_permission: str) -> None:
-        if actor_permissions is not None:
-            perms_set = set(actor_permissions)
-            if required_permission not in perms_set:
-                raise PermissionDeniedError(required_permission)
+    def _check_permission(
+        self,
+        actor_permissions: set[str] | list[str] | None,
+        required_permission: str,
+        allow_internal: bool = False,
+    ) -> None:
+        if actor_permissions is None:
+            if allow_internal:
+                return
+            raise PermissionDeniedError(required_permission)
+
+        perms_set = set(actor_permissions)
+        if required_permission not in perms_set:
+            raise PermissionDeniedError(required_permission)
 
     async def list_integrations(
-        self, tenant_id: uuid.UUID, actor_permissions: set[str] | list[str] | None = None
+        self,
+        tenant_id: uuid.UUID,
+        actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
     ) -> list[Integration]:
         """List all available integrations for tenant."""
-        self._check_permission(actor_permissions, VIEW_INTEGRATIONS)
+        self._check_permission(actor_permissions, VIEW_INTEGRATIONS, allow_internal=allow_internal)
         stmt = select(Integration).where(
             and_(
                 Integration.is_enabled == True,
@@ -85,10 +97,11 @@ class IntegrationService:
         external_account_id: str | None = None,
         config: dict[str, Any] | None = None,
         actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
     ) -> IntegrationConnection:
         """Establishes or updates an integration connection securely."""
-        self._check_permission(actor_permissions, MANAGE_INTEGRATIONS)
-        self._check_permission(actor_permissions, MANAGE_CREDENTIALS)
+        self._check_permission(actor_permissions, MANAGE_INTEGRATIONS, allow_internal=allow_internal)
+        self._check_permission(actor_permissions, MANAGE_CREDENTIALS, allow_internal=allow_internal)
 
         feature_map = {
             "rest_api": "api_access",
@@ -229,9 +242,10 @@ class IntegrationService:
         tenant_id: uuid.UUID,
         connection_id: uuid.UUID,
         actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
     ) -> IntegrationConnection:
         """Disconnects an integration and revokes stored credentials."""
-        self._check_permission(actor_permissions, MANAGE_INTEGRATIONS)
+        self._check_permission(actor_permissions, MANAGE_INTEGRATIONS, allow_internal=allow_internal)
         connection = await self._get_connection(tenant_id, connection_id)
         self._validate_transition(connection.status, "DISCONNECTED")
 
@@ -277,9 +291,10 @@ class IntegrationService:
         idempotency_key: str | None = None,
         correlation_id: str | None = None,
         actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
     ) -> OperationExecutionResult:
         """Executes an operation deterministically with retries, audit logs, and credential decryption."""
-        self._check_permission(actor_permissions, EXECUTE_INTEGRATION)
+        self._check_permission(actor_permissions, EXECUTE_INTEGRATION, allow_internal=allow_internal)
 
         if idempotency_key:
             existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
@@ -414,9 +429,10 @@ class IntegrationService:
         tenant_id: uuid.UUID,
         provider_key: str,
         actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
     ) -> IntegrationConnection | None:
         """Retrieves active connection for tenant and provider key securely."""
-        self._check_permission(actor_permissions, VIEW_INTEGRATIONS)
+        self._check_permission(actor_permissions, VIEW_INTEGRATIONS, allow_internal=allow_internal)
         stmt = (
             select(IntegrationConnection)
             .join(Integration, IntegrationConnection.integration_id == Integration.id)

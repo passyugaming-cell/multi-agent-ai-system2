@@ -214,7 +214,7 @@ class ActionExecutor:
             from app.integrations import IntegrationService
             service = IntegrationService(session)
             tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
-            conn = await service.get_connection_by_provider(tenant_uuid, "whatsapp_cloud_api") or await service.get_connection_by_provider(tenant_uuid, "whatsapp")
+            conn = await service.get_connection_by_provider(tenant_uuid, "whatsapp_cloud_api", allow_internal=True) or await service.get_connection_by_provider(tenant_uuid, "whatsapp", allow_internal=True)
             if not conn:
                 return ActionResult(success=False, error="WhatsApp integration connection not active")
 
@@ -224,6 +224,7 @@ class ActionExecutor:
                 operation="send_message",
                 params=params,
                 idempotency_key=params.get("idempotency_key"),
+                allow_internal=True,
             )
             return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
@@ -233,7 +234,7 @@ class ActionExecutor:
             service = IntegrationService(session)
             tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
 
-            conn = await service.get_connection_by_provider(tenant_uuid, "midtrans")
+            conn = await service.get_connection_by_provider(tenant_uuid, "midtrans", allow_internal=True)
             if not conn:
                 return ActionResult(success=False, error="Midtrans integration connection not active")
 
@@ -246,6 +247,7 @@ class ActionExecutor:
                     connection_id=conn.id,
                     operation="get_payment_status",
                     params={"order_id": str(order_id)},
+                    allow_internal=True,
                 )
                 return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
@@ -271,6 +273,7 @@ class ActionExecutor:
                     connection_id=conn.id,
                     operation="cancel_payment",
                     params={"order_id": str(order_id)},
+                    allow_internal=True,
                 )
                 return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
@@ -282,6 +285,7 @@ class ActionExecutor:
                     connection_id=conn.id,
                     operation="refund_payment",
                     params={"order_id": str(order_id), "amount": str(amount), "reason": params.get("reason", "Refund")},
+                    allow_internal=True,
                 )
                 return ActionResult(success=res.status == "COMPLETED", output=res.result or {}, error=res.safe_error_message)
 
@@ -310,6 +314,7 @@ class ActionExecutor:
                     operation=op,
                     params=params,
                     idempotency_key=params.get("idempotency_key"),
+                    allow_internal=True,
                 )
                 if res.status == "COMPLETED":
                     return ActionResult(success=True, output=res.result or {})
