@@ -114,9 +114,13 @@ class WorkflowEngine:
         now = datetime.now(timezone.utc)
         execution.started_at = execution.started_at or now
 
+        started_at = execution.started_at
+        if started_at and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+
         # Max execution time timeout check
         max_time = workflow.max_execution_time or settings.WORKFLOW_TIMEOUT_SECONDS
-        if execution.started_at and (now - execution.started_at).total_seconds() > max_time:
+        if started_at and (now - started_at).total_seconds() > max_time:
             execution.status = "TIMED_OUT"
             execution.failed_at = now
             execution.error = f"Workflow execution timed out after exceeding max_execution_time ({max_time}s)."

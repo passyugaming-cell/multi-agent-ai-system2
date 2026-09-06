@@ -11,6 +11,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
+from app.database.models.tenant import Tenant
 from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential, IntegrationExecution
 from app.integrations.service import IntegrationService
 from app.integrations.adapters.whatsapp_cloud_api import WhatsAppCloudApiAdapter
@@ -19,6 +20,8 @@ from app.integrations.events import publish_integration_event
 from app.integrations.exceptions import WebhookVerificationError, IntegrationNotFoundError
 from app.core.router.router import MessageRouter
 from app.repositories.domain import CustomerRepository, ConversationRepository, MessageRepository
+from app.billing.subscription import SubscriptionService
+from app.billing.entitlement import EntitlementResolver
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +397,7 @@ async def receive_whatsapp_webhook(
     tenant_id = target_connection.tenant_id
     app_secret = target_credentials.get("app_secret") or target_credentials.get("secret")
 
+    # 1. VERIFY SIGNATURE FIRST (SECURITY FIRST)
     x_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Signature")
     adapter = WhatsAppCloudApiAdapter()
     if app_secret:
@@ -401,6 +405,35 @@ async def receive_whatsapp_webhook(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing X-Hub-Signature-256 signature",
+            )
+
+    # 2. ACTIVE TENANT GATE
+    tenant_obj = await db.get(Tenant, tenant_id)
+    if not tenant_obj or not tenant_obj.is_active or tenant_obj.lifecycle_state in ("SUSPENDED", "ARCHIVED", "INACTIVE"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tenant '{tenant_id}' is inactive, suspended, or archived",
+        )
+
+    sub_service = SubscriptionService(db)
+    sub = await sub_service.get_subscription_or_none(tenant_id)
+    if not sub:
+        sub = await sub_service.create_trial_subscription(tenant_id)
+
+    if sub.status in ("EXPIRED", "SUSPENDED", "ARCHIVED", "CANCELLED"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tenant '{tenant_id}' does not have an active subscription (status: {sub.status})",
+        )
+
+    ent_resolver = EntitlementResolver(db)
+    ent_res = await ent_resolver.can_use(tenant_id, "whatsapp_cloud_api")
+    if not ent_res.allowed:
+        ent_res_alt = await ent_resolver.can_use(tenant_id, "whatsapp")
+        if not ent_res_alt.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Tenant '{tenant_id}' is not entitled to WhatsApp messaging: {ent_res.reason}",
             )
 
     processed_results = []
@@ -440,6 +473,17 @@ async def receive_whatsapp_webhook(
                             phone=sender_phone,
                             external_id=sender_phone,
                         )
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type="customer.created",
+                            payload={
+                                "customer_id": str(customer.id),
+                                "phone": sender_phone,
+                                "name": sender_name,
+                                "channel": "whatsapp",
+                            },
+                            source="whatsapp_webhook",
+                        )
 
                     conversation = await conv_repo.get_active_by_customer(tenant_id, customer.id)
                     if not conversation:
@@ -448,6 +492,17 @@ async def receive_whatsapp_webhook(
                             customer_id=customer.id,
                             channel="whatsapp",
                             status="OPEN",
+                        )
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type="conversation.created",
+                            payload={
+                                "conversation_id": str(conversation.id),
+                                "customer_id": str(customer.id),
+                                "channel": "whatsapp",
+                                "status": "OPEN",
+                            },
+                            source="whatsapp_webhook",
                         )
 
                     inbound_db_msg = await msg_repo.create(
@@ -467,25 +522,47 @@ async def receive_whatsapp_webhook(
                         session=db,
                     )
 
-                    outbound_db_msg = await msg_repo.create(
-                        tenant_id=tenant_id,
-                        conversation_id=conversation.id,
-                        direction="OUTBOUND",
-                        message_type="TEXT",
-                        text=route_result.response_text,
-                    )
+                    if route_result.handsoff_to_human and not conversation.human_handoff:
+                        conversation.human_handoff = True
+                        conversation.status = "WAITING_HUMAN"
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type="human_handoff_requested",
+                            payload={
+                                "conversation_id": str(conversation.id),
+                                "customer_id": str(customer.id),
+                                "reason": "Human handoff triggered by router or explicit customer request",
+                            },
+                            source="message_router",
+                        )
 
+                    send_result_id = None
                     if sender_phone and not conversation.human_handoff:
                         try:
-                            await service.execute_operation(
+                            send_res = await service.execute_operation(
                                 tenant_id=tenant_id,
                                 connection_id=target_connection.id,
                                 operation="send_message",
                                 params={"recipient_phone": sender_phone, "text": route_result.response_text},
                                 allow_internal=True,
                             )
+                            if isinstance(send_res, dict):
+                                send_result_id = (
+                                    send_res.get("data", {}).get("message_id")
+                                    if isinstance(send_res.get("data"), dict)
+                                    else None
+                                ) or send_res.get("message_id")
                         except Exception as send_err:
                             logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+
+                    outbound_db_msg = await msg_repo.create(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation.id,
+                        direction="OUTBOUND",
+                        message_type="TEXT",
+                        text=route_result.response_text,
+                        external_message_id=send_result_id,
+                    )
 
                     await publish_integration_event(
                         tenant_id=tenant_id,
@@ -497,6 +574,19 @@ async def receive_whatsapp_webhook(
                             "message_type": un_msg.message_type,
                             "text": un_msg.text,
                         },
+                    )
+
+                    await publish_integration_event(
+                        tenant_id=tenant_id,
+                        event_type="whatsapp.message_sent",
+                        payload={
+                            "external_message_id": send_result_id,
+                            "message_id": str(outbound_db_msg.id),
+                            "customer_id": str(customer.id),
+                            "conversation_id": str(conversation.id),
+                            "text": route_result.response_text,
+                        },
+                        source="whatsapp_webhook",
                     )
 
                     processed_results.append({

@@ -61,6 +61,16 @@ class MessageRouter:
 
         text = message.text or ""
 
+        # Check explicit human handoff request from customer
+        if DeterministicRouter.is_human_handoff_query(text):
+            conversation.human_handoff = True
+            conversation.status = "WAITING_HUMAN"
+            return RouterResult(
+                response_text="Pesan Anda telah diteruskan ke tim support kami. Mohon tunggu sejenak.",
+                was_ai_called=False,
+                handsoff_to_human=True,
+            )
+
         # 2. Attempt Deterministic Matching (Price / Stock lookup)
         is_price = DeterministicRouter.is_price_query(text)
         is_stock = DeterministicRouter.is_stock_query(text)
@@ -161,5 +171,5 @@ class MessageRouter:
             return RouterResult(
                 response_text="Maaf, sistem kami sedang mengalami gangguan. Pesan Anda telah diteruskan ke tim support kami.",
                 was_ai_called=False,
-                handsoff_to_human=True,
+                handsoff_to_human=False,
             )

@@ -11,6 +11,11 @@ class DeterministicRouter:
 
     PRICE_KEYWORDS = ["harga", "price", "berapa", "cost", "harganya"]
     STOCK_KEYWORDS = ["stok", "stock", "ada", "ready", "sisa", "tersedia"]
+    HANDOFF_KEYWORDS = [
+        "human", "agent", "admin", "cs", "customer service",
+        "operator", "bantuan manusia", "hubungi cs", "bicara dengan cs",
+        "human agent", "live agent", "bicarakan dengan cs"
+    ]
 
     @staticmethod
     def is_price_query(text: str) -> bool:
@@ -21,6 +26,11 @@ class DeterministicRouter:
     def is_stock_query(text: str) -> bool:
         lower = text.lower()
         return any(kw in lower for kw in DeterministicRouter.STOCK_KEYWORDS)
+
+    @staticmethod
+    def is_human_handoff_query(text: str) -> bool:
+        lower = text.lower()
+        return any(kw in lower for kw in DeterministicRouter.HANDOFF_KEYWORDS)
 
     @staticmethod
     async def match_product(
