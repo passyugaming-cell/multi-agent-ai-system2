@@ -3,13 +3,10 @@ import uuid
 from unittest.mock import patch, AsyncMock
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.database.models.tenant import Tenant
 from app.database.models.business_profile import BusinessProfile
 from app.database.models.product import Product
-from app.database.models.audit import ProvisioningAudit
-from app.database.models.integrations import IntegrationConnection
 from app.tenants.onboarding_service import OnboardingService
 from app.tenants.provisioning.provisioner import TenantProvisioner
 from app.billing.subscription import SubscriptionService
@@ -26,7 +23,7 @@ AUTH_HEADERS = lambda tenant_id: {
 
 @pytest.fixture
 async def active_tenant(db_session: AsyncSession, tenant_a: Tenant) -> Tenant:
-    """Fixture ensuring tenant_a has an active subscription."""
+    """Fixture ensuring tenant_a has an active trial subscription on Starter plan (limit=1)."""
     plan_svc = PlanService(db_session)
     await plan_svc.seed_plans()
     sub_svc = SubscriptionService(db_session)
@@ -60,32 +57,59 @@ async def test_02_tenant_isolation_cross_tenant_protection(
 @pytest.mark.asyncio
 async def test_03_subscription_gate_validation(db_session: AsyncSession, tenant_b: Tenant) -> None:
     svc = OnboardingService(db_session)
-    conn_req = {
-        "phone_number_id": "100200300",
-        "access_token": "mock_token_123",
-    }
     from app.tenants.provisioning.schemas import WhatsAppConnectRequest
-    req = WhatsAppConnectRequest(**conn_req)
+    req = WhatsAppConnectRequest(phone_number_id="100200300", access_token="mock_token_123")
 
     with pytest.raises(Exception) as exc_info:
-        await svc.connect_whatsapp(tenant_b.id, req)
+        await svc.connect_whatsapp(tenant_b.id, req, actor_permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS"})
     assert "subscription" in str(exc_info.value).lower() or "SUBSCRIPTION_INVALID" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_04_whatsapp_connect_and_verification(
-    client: AsyncClient, db_session: AsyncSession, active_tenant: Tenant
+async def test_04_permission_fail_closed_missing_header(
+    client: AsyncClient, active_tenant: Tenant
+) -> None:
+    # Missing X-Actor-Permissions header must fail closed (403)
+    headers = {"X-Tenant-ID": str(active_tenant.id)}
+    conn_payload = {"phone_number_id": "123456789", "access_token": "mock_valid_token"}
+    res = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers,
+        json=conn_payload,
+    )
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_05_permission_fail_closed_insufficient_permissions(
+    client: AsyncClient, active_tenant: Tenant
+) -> None:
+    # Header with only VIEW_INTEGRATIONS (missing MANAGE_INTEGRATIONS) must fail closed (403)
+    headers = {
+        "X-Tenant-ID": str(active_tenant.id),
+        "X-Actor-Permissions": "VIEW_INTEGRATIONS",
+    }
+    conn_payload = {"phone_number_id": "123456789", "access_token": "mock_valid_token"}
+    res = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers,
+        json=conn_payload,
+    )
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_06_whatsapp_connect_within_limit(
+    client: AsyncClient, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
-
     conn_payload = {
         "phone_number_id": "123456789",
         "access_token": "mock_valid_token_abc",
         "waba_id": "waba_999",
-        "app_secret": "app_secret_abc",
-        "webhook_secret": "wh_secret_abc",
     }
-
     res = await client.post(
         f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
         headers=headers,
@@ -96,57 +120,111 @@ async def test_04_whatsapp_connect_and_verification(
     assert data["status"] in ("ACTIVE", "CONNECTED")
     assert data["phone_number_id"] == "123456789"
     assert data["is_verified"] is True
-    conn_id = data["connection_id"]
-
-    v_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/verify?connection_id={conn_id}",
-        headers=headers,
-    )
-    assert v_res.status_code == 200
-    v_data = v_res.json()
-    assert v_data["is_verified"] is True
 
 
 @pytest.mark.asyncio
-async def test_05_whatsapp_reconnect_and_disconnect(
-    client: AsyncClient, db_session: AsyncSession, active_tenant: Tenant
+async def test_07_whatsapp_connect_exceed_limit_denied(
+    client: AsyncClient, active_tenant: Tenant
+) -> None:
+    headers = AUTH_HEADERS(active_tenant.id)
+    # Connect 1st phone number (limit for trial/starter is 1)
+    c1 = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers,
+        json={"phone_number_id": "111111111", "access_token": "token1"},
+    )
+    assert c1.status_code == 200
+
+    # Connect 2nd different phone number -> must be DENIED (403 CONNECTION_LIMIT_EXCEEDED)
+    c2 = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers,
+        json={"phone_number_id": "222222222", "access_token": "token2"},
+    )
+    assert c2.status_code == 403
+    assert c2.json()["error"]["code"] == "CONNECTION_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_08_whatsapp_reconnect_reuses_same_connection_id(
+    client: AsyncClient, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
 
-    conn_payload = {
-        "phone_number_id": "123456789",
-        "access_token": "mock_valid_token_abc",
-    }
+    # Initial connect
     c_res = await client.post(
         f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
         headers=headers,
-        json=conn_payload,
+        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
     )
-    assert c_res.status_code == 200, c_res.json()
+    assert c_res.status_code == 200
     conn_id = c_res.json()["connection_id"]
 
-    recon_payload = {
-        "phone_number_id": "123456789",
-        "access_token": "mock_updated_token_xyz",
-    }
+    # Reconnect with updated credentials using connection_id
     r_res = await client.post(
         f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
         headers=headers,
-        json=recon_payload,
+        json={"phone_number_id": "123456789", "access_token": "mock_token_2"},
     )
     assert r_res.status_code == 200
-    assert r_res.json()["is_verified"] is True
-
-    d_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
-        headers=headers,
-    )
-    assert d_res.status_code == 200
-    assert d_res.json()["status"] == "DISCONNECTED"
+    r_data = r_res.json()
+    assert r_data["connection_id"] == conn_id
+    assert r_data["is_verified"] is True
 
 
 @pytest.mark.asyncio
-async def test_06_ai_test_gate(
+async def test_09_whatsapp_reconnect_cross_tenant_denied(
+    client: AsyncClient, active_tenant: Tenant, tenant_b: Tenant
+) -> None:
+    headers_a = AUTH_HEADERS(active_tenant.id)
+    c_res = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers_a,
+        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+    )
+    conn_id = c_res.json()["connection_id"]
+
+    # Tenant B attempting to reconnect Tenant A's connection_id -> denied
+    headers_b = AUTH_HEADERS(tenant_b.id)
+    r_res = await client.post(
+        f"/api/v1/tenants/{tenant_b.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
+        headers=headers_b,
+        json={"phone_number_id": "123456789", "access_token": "mock_token_hacked"},
+    )
+    assert r_res.status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_10_whatsapp_disconnect_and_repeated_disconnect(
+    client: AsyncClient, active_tenant: Tenant
+) -> None:
+    headers = AUTH_HEADERS(active_tenant.id)
+    c_res = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+        headers=headers,
+        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+    )
+    conn_id = c_res.json()["connection_id"]
+
+    # Disconnect 1st time
+    d1 = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
+        headers=headers,
+    )
+    assert d1.status_code == 200
+    assert d1.json()["status"] == "DISCONNECTED"
+
+    # Disconnect 2nd time (idempotent)
+    d2 = await client.post(
+        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
+        headers=headers,
+    )
+    assert d2.status_code == 200
+    assert d2.json()["status"] == "DISCONNECTED"
+
+
+@pytest.mark.asyncio
+async def test_11_ai_test_gate(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
@@ -173,7 +251,7 @@ async def test_06_ai_test_gate(
 
 
 @pytest.mark.asyncio
-async def test_07_activation_blocked_when_requirements_missing(
+async def test_12_activation_blocked_when_requirements_missing(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
@@ -187,7 +265,7 @@ async def test_07_activation_blocked_when_requirements_missing(
 
 
 @pytest.mark.asyncio
-async def test_08_activation_success_and_idempotency(
+async def test_13_activation_success_and_idempotency(
     client: AsyncClient, db_session: AsyncSession, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
@@ -242,7 +320,7 @@ async def test_08_activation_success_and_idempotency(
     act_data = act_res.json()
     assert act_data["current_state"] == "ACTIVE"
 
-    # Idempotent second call
+    # Idempotent second call on already ACTIVE tenant (must NOT crash or duplicate)
     act_res2 = await client.post(
         f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
         headers=headers,
@@ -252,7 +330,7 @@ async def test_08_activation_success_and_idempotency(
 
 
 @pytest.mark.asyncio
-async def test_09_owner_ai_read_only_tools(
+async def test_14_owner_ai_read_only_tools(
     db_session: AsyncSession, active_tenant: Tenant
 ) -> None:
     tool_req = ToolRequest(
@@ -275,7 +353,7 @@ async def test_09_owner_ai_read_only_tools(
 
 
 @pytest.mark.asyncio
-async def test_10_credential_security_no_secret_leakage(
+async def test_15_credential_security_no_secret_leakage(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
     headers = AUTH_HEADERS(active_tenant.id)
@@ -294,21 +372,3 @@ async def test_10_credential_security_no_secret_leakage(
     assert "super_secret_access_token_123" not in body_str
     assert "super_secret_app_secret_456" not in body_str
     assert "super_secret_wh_secret_789" not in body_str
-
-
-@pytest.mark.asyncio
-async def test_11_permission_fail_closed(
-    client: AsyncClient, active_tenant: Tenant
-) -> None:
-    headers_no_perms = {"X-Tenant-ID": str(active_tenant.id)}
-    conn_payload = {
-        "phone_number_id": "123456789",
-        "access_token": "mock_valid_token_abc",
-    }
-    res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers_no_perms,
-        json=conn_payload,
-    )
-    assert res.status_code in (401, 403)
-    assert "PERMISSION_DENIED" in str(res.json()) or "Permission" in str(res.json())

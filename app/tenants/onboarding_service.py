@@ -17,7 +17,7 @@ from app.tenants.provisioning.exceptions import ChecklistRequirementError, Readi
 from app.integrations.service import IntegrationService
 from app.integrations.events import publish_integration_event
 from app.integrations.registry import integration_registry
-from app.integrations.exceptions import PermissionDeniedError, IntegrationError
+from app.integrations.exceptions import PermissionDeniedError, IntegrationError, ConnectionNotFoundError
 from app.billing.entitlement import EntitlementResolver
 from app.billing.state_machine import SubscriptionStatus
 from app.core.ai_gateway import AIGateway, AIRequest
@@ -437,8 +437,9 @@ class OnboardingService:
         actor_permissions: set[str] | list[str] | None = None,
     ) -> WhatsAppConnectResponse:
         """Re-authenticates and reconnects an existing WhatsApp integration connection safely without creating duplicate connection records."""
-        connection = await self.integration_service._get_connection(tenant_id, connection_id)
-        if not connection:
+        try:
+            connection = await self.integration_service._get_connection(tenant_id, connection_id)
+        except ConnectionNotFoundError:
             raise AppException(code="CONNECTION_NOT_FOUND", message="WhatsApp connection not found", status_code=404)
 
         res = await self.connect_whatsapp(tenant_id, connect_req, actor_permissions=actor_permissions)
