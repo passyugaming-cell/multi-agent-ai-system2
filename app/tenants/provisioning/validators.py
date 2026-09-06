@@ -8,6 +8,7 @@ from app.database.models.product import Product
 from app.database.models.knowledge import KnowledgeCategory
 from app.database.models.guardrail import AIGuardrail
 from app.database.models.workflow import WorkflowConfiguration
+from app.database.models.integrations import IntegrationConnection, Integration
 
 
 class TenantValidatorEngine:
@@ -73,7 +74,17 @@ class TenantValidatorEngine:
         results["default_workflow_initialized"] = wf_count >= 3
 
         # 6. Integrations & Operational Checks
-        results["whatsapp_integration_available"] = True  # System channel configuration available
+        wa_conn_stmt = (
+            select(IntegrationConnection)
+            .join(Integration, IntegrationConnection.integration_id == Integration.id)
+            .where(
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
+                Integration.provider_key.in_(["whatsapp_cloud_api", "whatsapp"]),
+            )
+        )
+        wa_conn = (await self.session.execute(wa_conn_stmt)).scalars().first()
+        results["whatsapp_integration_available"] = wa_conn is not None
 
         # Human handoff is available if workflow configuration for HUMAN_HANDOFF exists
         hh_wf_stmt = select(WorkflowConfiguration).where(

@@ -489,6 +489,39 @@ async def tool_execute_integration_operation(request: ToolRequest, db_session: A
         )
 
 
+async def tool_get_onboarding_status(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
+    """Read-only tool for Owner AI to inspect tenant onboarding checklist, readiness score, and blocking items."""
+    try:
+        from app.tenants.onboarding_service import OnboardingService
+        tenant_id = uuid.UUID(request.tenant_id) if isinstance(request.tenant_id, str) else request.tenant_id
+        service = OnboardingService(db_session)
+        summary = await service.get_onboarding_summary(tenant_id)
+
+        data = {
+            "lifecycle_state": summary.lifecycle_state,
+            "readiness_score": summary.readiness_score,
+            "readiness_status": summary.readiness_status,
+            "blocking_items": summary.blocking_items,
+            "warnings": summary.warnings,
+            "checklist_summary": summary.checklist_summary.model_dump(mode="json"),
+        }
+
+        return ToolResult(
+            success=True,
+            tool_name="get_onboarding_status",
+            data=data,
+            evidence=[f"Retrieved read-only onboarding summary with readiness score {summary.readiness_score}%."],
+            correlation_id=request.correlation_id,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            tool_name="get_onboarding_status",
+            error=str(exc),
+            correlation_id=request.correlation_id,
+        )
+
+
 async def tool_get_whatsapp_connection_status(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
     """Read-only tool for Owner AI to inspect WhatsApp Cloud API connection status without direct mutation capability."""
     try:

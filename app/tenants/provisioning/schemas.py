@@ -93,3 +93,54 @@ class LifecycleTransitionResponse(BaseModel):
     current_state: str
     transition_timestamp: datetime
     transition_reason: Optional[str]
+
+
+class WhatsAppConnectRequest(BaseModel):
+    phone_number_id: str = Field(..., description="Meta WhatsApp Phone Number ID")
+    access_token: str = Field(..., description="Meta Graph API Access Token")
+    waba_id: Optional[str] = Field(None, description="WhatsApp Business Account ID")
+    app_secret: Optional[str] = Field(None, description="App Secret for Webhook Signature Verification")
+    webhook_secret: Optional[str] = Field(None, description="Custom Webhook Verification Secret Token")
+    config: Optional[dict[str, Any]] = Field(None, description="Additional connection configuration")
+
+
+class WhatsAppConnectResponse(BaseModel):
+    connection_id: uuid.UUID
+    status: str
+    phone_number_id: str
+    waba_id: Optional[str] = None
+    is_verified: bool
+    created_at: datetime
+
+
+class WhatsAppVerifyResponse(BaseModel):
+    connection_id: uuid.UUID
+    status: str
+    is_verified: bool
+    phone_number_id: Optional[str] = None
+    message: str
+
+
+class AITestRequest(BaseModel):
+    test_message: Optional[str] = Field(None, description="Optional custom test message for AI verification")
+
+
+class AITestResponse(BaseModel):
+    success: bool
+    ai_gateway_status: str
+    sample_response: Optional[str] = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    tested_at: datetime
+
+
+class TenantActivationRequest(BaseModel):
+    reason: Optional[str] = Field(None, description="Reason for activation")
+
+
+class TenantActivationResponse(BaseModel):
+    tenant_id: uuid.UUID
+    previous_state: Optional[str] = None
+    current_state: str
+    activated_at: datetime
+    readiness_score: float
+    summary: OnboardingSummaryResponse

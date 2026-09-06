@@ -15,6 +15,13 @@ from app.tenants.provisioning.schemas import (
     ChecklistItemUpdate,
     LifecycleTransitionRequest,
     LifecycleTransitionResponse,
+    WhatsAppConnectRequest,
+    WhatsAppConnectResponse,
+    WhatsAppVerifyResponse,
+    AITestRequest,
+    AITestResponse,
+    TenantActivationRequest,
+    TenantActivationResponse,
 )
 
 router = APIRouter(tags=["Tenant Onboarding & Provisioning"])
@@ -151,3 +158,88 @@ async def transition_lifecycle_state(
         transition_timestamp=tenant.state_transition_at or tenant.updated_at,
         transition_reason=tenant.transition_reason,
     )
+
+
+# --- WHATSAPP CONNECTION & ACTIVATION ENDPOINTS ---
+
+@router.post("/tenants/{tenant_id}/onboarding/whatsapp/connect", response_model=WhatsAppConnectResponse)
+async def connect_whatsapp_onboarding(
+    tenant_id: uuid.UUID,
+    payload: WhatsAppConnectRequest,
+    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppConnectResponse:
+    """Connect WhatsApp Cloud API during onboarding."""
+    verify_tenant_authorization(tenant_id)
+    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
+    service = OnboardingService(db)
+    return await service.connect_whatsapp(tenant_id, payload, actor_permissions=actor_perms)
+
+
+@router.post("/tenants/{tenant_id}/onboarding/whatsapp/verify", response_model=WhatsAppVerifyResponse)
+async def verify_whatsapp_onboarding(
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppVerifyResponse:
+    """Verify health and credentials of WhatsApp connection."""
+    verify_tenant_authorization(tenant_id)
+    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
+    service = OnboardingService(db)
+    return await service.verify_whatsapp_connection(tenant_id, connection_id, actor_permissions=actor_perms)
+
+
+@router.post("/tenants/{tenant_id}/onboarding/whatsapp/reconnect", response_model=WhatsAppConnectResponse)
+async def reconnect_whatsapp_onboarding(
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    payload: WhatsAppConnectRequest,
+    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppConnectResponse:
+    """Reconnect and refresh credentials for an existing WhatsApp integration."""
+    verify_tenant_authorization(tenant_id)
+    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
+    service = OnboardingService(db)
+    return await service.reconnect_whatsapp(tenant_id, connection_id, payload, actor_permissions=actor_perms)
+
+
+@router.post("/tenants/{tenant_id}/onboarding/whatsapp/disconnect", response_model=WhatsAppConnectResponse)
+async def disconnect_whatsapp_onboarding(
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    db: AsyncSession = Depends(get_db),
+) -> WhatsAppConnectResponse:
+    """Disconnect WhatsApp integration safely."""
+    verify_tenant_authorization(tenant_id)
+    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
+    service = OnboardingService(db)
+    return await service.disconnect_whatsapp(tenant_id, connection_id, actor_permissions=actor_perms)
+
+
+@router.post("/tenants/{tenant_id}/onboarding/ai-test", response_model=AITestResponse)
+async def run_ai_test_gate(
+    tenant_id: uuid.UUID,
+    payload: AITestRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> AITestResponse:
+    """Run deterministic AI readiness test gate using AIGateway."""
+    verify_tenant_authorization(tenant_id)
+    service = OnboardingService(db)
+    return await service.run_ai_test(tenant_id, payload)
+
+
+@router.post("/tenants/{tenant_id}/onboarding/activate", response_model=TenantActivationResponse)
+async def activate_tenant_onboarding(
+    tenant_id: uuid.UUID,
+    payload: TenantActivationRequest | None = None,
+    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    db: AsyncSession = Depends(get_db),
+) -> TenantActivationResponse:
+    """Activate tenant after enforcing subscription, entitlement, readiness, and WhatsApp connection gates."""
+    verify_tenant_authorization(tenant_id)
+    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
+    service = OnboardingService(db)
+    return await service.activate_tenant(tenant_id, actor_permissions=actor_perms)
