@@ -25,8 +25,8 @@ async def test_tenant_isolation_products(async_client: AsyncClient, test_session
     test_session.add(product_a)
     await test_session.commit()
 
-    headers_a = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": "product.read,product.write"}
-    headers_b = {"X-Tenant-ID": str(tenant_b.id), "X-Actor-Permissions": "product.read,product.write"}
+    headers_a = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_b.id), "X-Actor-Role": "owner"}
 
     # 3. Tenant A can read product_a
     res_a = await async_client.get(f"/api/v1/products/{product_a.id}", headers=headers_a)

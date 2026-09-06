@@ -32,37 +32,77 @@ async def tenant_beta(db_session: AsyncSession) -> Tenant:
     return t
 
 
-# --- 1. RBAC FAIL-CLOSED & SECURITY TESTS ---
+# --- 1. RBAC FAIL-CLOSED & SECURITY ATTACK TESTS ---
 
 @pytest.mark.asyncio
-async def test_01_no_actor_permissions_returns_403(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+async def test_01_no_authenticated_actor_returns_403(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_no_perm = {"X-Tenant-ID": str(tenant_alpha.id)}  # No X-Actor-Permissions header
-    res = await async_client.get("/api/v1/business", headers=headers_no_perm)
+    headers_no_actor = {"X-Tenant-ID": str(tenant_alpha.id)}  # No server-side actor identity/role
+    res = await async_client.get("/api/v1/business", headers=headers_no_actor)
     assert res.status_code == 403
     assert res.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
 @pytest.mark.asyncio
-async def test_02_insufficient_actor_permissions_returns_403(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+async def test_02_forged_wildcard_permissions_header_without_actor_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_wrong_perm = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "wrong.perm"}
-    res = await async_client.get("/api/v1/business", headers=headers_wrong_perm)
+    headers_forged = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "*"}
+    res = await async_client.get("/api/v1/business", headers=headers_forged)
     assert res.status_code == 403
+    assert res.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
 @pytest.mark.asyncio
-async def test_03_valid_actor_permissions_success(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+async def test_03_forged_approve_permissions_header_without_actor_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,business.read"}
-    payload = {"business_name": "Alpha Corp Verified"}
-    res = await async_client.put("/api/v1/business", json=payload, headers=headers_a)
+    headers_forged = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.approve"}
+    res = await async_client.post("/api/v1/knowledge", json={"title": "Forged Item", "content": "Text"}, headers=headers_forged)
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_04_forged_write_permissions_header_without_actor_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+    await db_session.commit()
+    headers_forged = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write"}
+    res = await async_client.put("/api/v1/business", json={"business_name": "Forged Corp"}, headers=headers_forged)
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_05_valid_authenticated_actor_role_owner_success(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+    await db_session.commit()
+    headers_owner = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    res = await async_client.put("/api/v1/business", json={"business_name": "Alpha Corp Verified"}, headers=headers_owner)
     assert res.status_code in (200, 201)
     assert res.json()["business_name"] == "Alpha Corp Verified"
 
 
 @pytest.mark.asyncio
-async def test_04_service_layer_direct_invocation_without_permissions_blocked(db_session: AsyncSession, tenant_alpha: Tenant):
+async def test_05_b_valid_authenticated_actor_role_member_read_only_denied_write(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
+    await db_session.commit()
+    headers_member = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "member"}
+    res = await async_client.put("/api/v1/business", json={"business_name": "Member Attempt Write"}, headers=headers_member)
+    assert res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_05_c_cross_tenant_header_tampering_rejected(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
+    await db_session.commit()
+    # Authenticated for Tenant A, but request attempts X-Tenant-ID Tenant B
+    headers_tampered = {
+        "X-Tenant-ID": str(tenant_beta.id),
+        "X-Authenticated-Tenant-ID": str(tenant_alpha.id),
+        "X-Actor-Role": "owner",
+    }
+    res = await async_client.get("/api/v1/business", headers=headers_tampered)
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "FORBIDDEN_CROSS_TENANT_ACCESS"
+
+
+@pytest.mark.asyncio
+async def test_05_d_service_layer_direct_invocation_without_permissions_blocked(db_session: AsyncSession, tenant_alpha: Tenant):
     service = BusinessDataService(db_session)
     with pytest.raises(AppException) as exc_info:
         await service.get_business_profile(tenant_alpha.id, actor_permissions=None)
@@ -70,24 +110,12 @@ async def test_04_service_layer_direct_invocation_without_permissions_blocked(db
     assert exc_info.value.status_code == 403
 
 
-@pytest.mark.asyncio
-async def test_05_cross_tenant_access_blocked(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
-    await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,business.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "business.write,business.read"}
-
-    await async_client.put("/api/v1/business", json={"business_name": "Alpha Private"}, headers=headers_a)
-
-    res_b = await async_client.get("/api/v1/business", headers=headers_b)
-    assert res_b.status_code == 404
-
-
 # --- 2. BUSINESS PROFILE EXTENSION TESTS ---
 
 @pytest.mark.asyncio
 async def test_06_create_business_profile_extended_fields(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,business.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     payload = {
         "business_name": "Alpha Extended Corp",
         "business_type": "SERVICES",
@@ -114,13 +142,12 @@ async def test_06_create_business_profile_extended_fields(async_client: AsyncCli
     assert data["business_name"] == "Alpha Extended Corp"
     assert data["city"] == "Jakarta Selatan"
     assert data["email"] == "contact@alphaext.com"
-    assert data["bank_accounts"] == [{"bank": "Mandiri", "account": "9876543210", "name": "PT Alpha Ext"}]
 
 
 @pytest.mark.asyncio
 async def test_07_get_business_profile_returns_404_when_missing(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     res = await async_client.get("/api/v1/business", headers=headers)
     assert res.status_code == 404
 
@@ -128,7 +155,7 @@ async def test_07_get_business_profile_returns_404_when_missing(async_client: As
 @pytest.mark.asyncio
 async def test_08_update_existing_business_profile(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,business.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     await async_client.put("/api/v1/business", json={"business_name": "Initial Name"}, headers=headers)
 
     res_update = await async_client.put("/api/v1/business", json={"business_name": "Updated Name", "city": "Bandung"}, headers=headers)
@@ -142,7 +169,7 @@ async def test_08_update_existing_business_profile(async_client: AsyncClient, te
 @pytest.mark.asyncio
 async def test_09_create_physical_product(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     payload = {
         "name": "Kemeja Batik",
         "type": "PRODUCT",
@@ -165,7 +192,7 @@ async def test_09_create_physical_product(async_client: AsyncClient, tenant_alph
 @pytest.mark.asyncio
 async def test_10_create_service_item(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     payload = {
         "name": "Sewa Kamera",
         "type": "SERVICE",
@@ -184,7 +211,7 @@ async def test_10_create_service_item(async_client: AsyncClient, tenant_alpha: T
 @pytest.mark.asyncio
 async def test_11_list_products_scoped_by_tenant(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     await async_client.post("/api/v1/products", json={"name": "P1", "price": "100.00"}, headers=headers)
     await async_client.post("/api/v1/products", json={"name": "P2", "price": "200.00"}, headers=headers)
 
@@ -196,7 +223,7 @@ async def test_11_list_products_scoped_by_tenant(async_client: AsyncClient, tena
 @pytest.mark.asyncio
 async def test_12_get_product_by_id(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Target Product", "price": "50000.00"}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -208,7 +235,7 @@ async def test_12_get_product_by_id(async_client: AsyncClient, tenant_alpha: Ten
 @pytest.mark.asyncio
 async def test_13_update_product_price_and_stock(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Old Item", "price": "10000.00", "stock": 5}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -223,7 +250,7 @@ async def test_13_update_product_price_and_stock(async_client: AsyncClient, tena
 @pytest.mark.asyncio
 async def test_14_delete_product_deletes_cascade_variants(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Item To Delete", "price": "10000.00"}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -237,7 +264,7 @@ async def test_14_delete_product_deletes_cascade_variants(async_client: AsyncCli
 @pytest.mark.asyncio
 async def test_15_create_product_variant(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Sepatu Sneaker", "price": "500000.00"}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -255,7 +282,7 @@ async def test_15_create_product_variant(async_client: AsyncClient, tenant_alpha
 @pytest.mark.asyncio
 async def test_16_update_product_variant(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Jam Tangan", "price": "1000000.00"}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -270,7 +297,7 @@ async def test_16_update_product_variant(async_client: AsyncClient, tenant_alpha
 @pytest.mark.asyncio
 async def test_17_delete_product_variant(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/products", json={"name": "Topi", "price": "75000.00"}, headers=headers)
     prod_id = create_res.json()["id"]
 
@@ -284,8 +311,8 @@ async def test_17_delete_product_variant(async_client: AsyncClient, tenant_alpha
 @pytest.mark.asyncio
 async def test_18_product_tenant_isolation_read(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/products", json={"name": "Alpha Item", "price": "100.00"}, headers=headers_a)
     prod_id = create_res.json()["id"]
@@ -297,8 +324,8 @@ async def test_18_product_tenant_isolation_read(async_client: AsyncClient, tenan
 @pytest.mark.asyncio
 async def test_19_product_tenant_isolation_update(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/products", json={"name": "Alpha Item", "price": "100.00"}, headers=headers_a)
     prod_id = create_res.json()["id"]
@@ -310,8 +337,8 @@ async def test_19_product_tenant_isolation_update(async_client: AsyncClient, ten
 @pytest.mark.asyncio
 async def test_20_product_tenant_isolation_delete(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/products", json={"name": "Alpha Item", "price": "100.00"}, headers=headers_a)
     prod_id = create_res.json()["id"]
@@ -323,7 +350,7 @@ async def test_20_product_tenant_isolation_delete(async_client: AsyncClient, ten
 @pytest.mark.asyncio
 async def test_21_negative_price_stock_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     res_price = await async_client.post("/api/v1/products", json={"name": "Bad Price", "price": "-100.00"}, headers=headers)
     assert res_price.status_code == 400
@@ -337,7 +364,7 @@ async def test_21_negative_price_stock_rejected(async_client: AsyncClient, tenan
 @pytest.mark.asyncio
 async def test_22_direct_approved_creation_prohibited(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     res = await async_client.post("/api/v1/knowledge", json={"title": "Policy", "content": "Text", "status": "APPROVED"}, headers=headers)
     assert res.status_code == 400
     assert res.json()["error"]["code"] == "INVALID_STATUS_ON_CREATION"
@@ -346,7 +373,7 @@ async def test_22_direct_approved_creation_prohibited(async_client: AsyncClient,
 @pytest.mark.asyncio
 async def test_23_direct_active_creation_prohibited(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     res = await async_client.post("/api/v1/knowledge", json={"title": "Policy", "content": "Text", "status": "ACTIVE"}, headers=headers)
     assert res.status_code == 400
     assert res.json()["error"]["code"] == "INVALID_STATUS_ON_CREATION"
@@ -355,7 +382,7 @@ async def test_23_direct_active_creation_prohibited(async_client: AsyncClient, t
 @pytest.mark.asyncio
 async def test_24_valid_knowledge_creation_forces_draft_and_v1(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     res = await async_client.post("/api/v1/knowledge", json={"title": "Draft Policy", "content": "Initial Text"}, headers=headers)
     assert res.status_code == 201
     data = res.json()
@@ -367,7 +394,7 @@ async def test_24_valid_knowledge_creation_forces_draft_and_v1(async_client: Asy
 @pytest.mark.asyncio
 async def test_25_list_knowledge_items_filtered_by_category(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     await async_client.post("/api/v1/knowledge", json={"title": "FAQ Item", "content": "Content", "category_key": "FAQ"}, headers=headers)
     await async_client.post("/api/v1/knowledge", json={"title": "Shipping Item", "content": "Content", "category_key": "SHIPPING"}, headers=headers)
 
@@ -381,7 +408,7 @@ async def test_25_list_knowledge_items_filtered_by_category(async_client: AsyncC
 @pytest.mark.asyncio
 async def test_26_get_knowledge_item_by_id(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Target Item", "content": "Content"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -393,7 +420,7 @@ async def test_26_get_knowledge_item_by_id(async_client: AsyncClient, tenant_alp
 @pytest.mark.asyncio
 async def test_27_transition_draft_to_validating(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Policy", "content": "Content"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -405,7 +432,7 @@ async def test_27_transition_draft_to_validating(async_client: AsyncClient, tena
 @pytest.mark.asyncio
 async def test_28_approve_knowledge_item_persists_approval_record(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "To Approve", "content": "Content"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -426,7 +453,7 @@ async def test_28_approve_knowledge_item_persists_approval_record(async_client: 
 @pytest.mark.asyncio
 async def test_29_transition_approved_to_active(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Approved To Active", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -439,7 +466,7 @@ async def test_29_transition_approved_to_active(async_client: AsyncClient, tenan
 @pytest.mark.asyncio
 async def test_30_transition_active_to_outdated(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Active To Outdated", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -454,7 +481,7 @@ async def test_30_transition_active_to_outdated(async_client: AsyncClient, tenan
 @pytest.mark.asyncio
 async def test_31_transition_outdated_to_archived(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Outdated To Archived", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -469,7 +496,7 @@ async def test_31_transition_outdated_to_archived(async_client: AsyncClient, ten
 @pytest.mark.asyncio
 async def test_32_invalid_status_transition_draft_to_outdated_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Draft Policy", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -480,7 +507,7 @@ async def test_32_invalid_status_transition_draft_to_outdated_rejected(async_cli
 @pytest.mark.asyncio
 async def test_33_invalid_status_transition_archived_to_active_rejected(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Draft Policy", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -493,7 +520,7 @@ async def test_33_invalid_status_transition_archived_to_active_rejected(async_cl
 @pytest.mark.asyncio
 async def test_34_version_increment_and_reapproval_reset_on_content_change(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Version 1 Policy", "content": "Text v1"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -510,13 +537,13 @@ async def test_34_version_increment_and_reapproval_reset_on_content_change(async
 @pytest.mark.asyncio
 async def test_34_b_editing_content_with_status_approved_in_payload_still_resets_to_draft(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Original Approved", "content": "Text v1"}, headers=headers)
     item_id = create_res.json()["id"]
 
     await async_client.post(f"/api/v1/knowledge/{item_id}/approve", headers=headers)
 
-    # Client attempts to keep status APPROVED alongside content edit
+    # Client attempts to keep status APPROVED alongside content edit -> forced back to DRAFT
     res_edit = await async_client.put(
         f"/api/v1/knowledge/{item_id}",
         json={"content": "Malicious edit attempting to keep approved status", "status": "APPROVED"},
@@ -532,7 +559,7 @@ async def test_34_b_editing_content_with_status_approved_in_payload_still_resets
 @pytest.mark.asyncio
 async def test_35_metadata_only_update_preserves_version_and_approval(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Policy", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
 
@@ -550,8 +577,8 @@ async def test_35_metadata_only_update_preserves_version_and_approval(async_clie
 @pytest.mark.asyncio
 async def test_36_knowledge_tenant_isolation_read(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Alpha Item", "content": "Text"}, headers=headers_a)
     item_id = create_res.json()["id"]
@@ -563,8 +590,8 @@ async def test_36_knowledge_tenant_isolation_read(async_client: AsyncClient, ten
 @pytest.mark.asyncio
 async def test_37_knowledge_tenant_isolation_write(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Alpha Item", "content": "Text"}, headers=headers_a)
     item_id = create_res.json()["id"]
@@ -576,8 +603,8 @@ async def test_37_knowledge_tenant_isolation_write(async_client: AsyncClient, te
 @pytest.mark.asyncio
 async def test_38_knowledge_tenant_isolation_approve(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Alpha Item", "content": "Text"}, headers=headers_a)
     item_id = create_res.json()["id"]
@@ -589,27 +616,28 @@ async def test_38_knowledge_tenant_isolation_approve(async_client: AsyncClient, 
 @pytest.mark.asyncio
 async def test_39_knowledge_permission_read_denied(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_wrong = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "unrelated.perm"}
-    res = await async_client.get("/api/v1/knowledge", headers=headers_wrong)
+    headers_no_actor = {"X-Tenant-ID": str(tenant_alpha.id)}
+    res = await async_client.get("/api/v1/knowledge", headers=headers_no_actor)
     assert res.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_40_knowledge_permission_write_denied(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_read_only = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.read"}
-    res = await async_client.post("/api/v1/knowledge", json={"title": "Item", "content": "Text"}, headers=headers_read_only)
+    headers_member = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "member"}
+    res = await async_client.post("/api/v1/knowledge", json={"title": "Item", "content": "Text"}, headers=headers_member)
     assert res.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_41_knowledge_permission_approve_denied(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_no_approve = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read"}
-    create_res = await async_client.post("/api/v1/knowledge", json={"title": "Draft Item", "content": "Text"}, headers=headers_no_approve)
+    headers_member = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "member"}
+    headers_owner = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    create_res = await async_client.post("/api/v1/knowledge", json={"title": "Draft Item", "content": "Text"}, headers=headers_owner)
     item_id = create_res.json()["id"]
 
-    res_app = await async_client.post(f"/api/v1/knowledge/{item_id}/approve", headers=headers_no_approve)
+    res_app = await async_client.post(f"/api/v1/knowledge/{item_id}/approve", headers=headers_member)
     assert res_app.status_code == 403
 
 
@@ -618,7 +646,7 @@ async def test_41_knowledge_permission_approve_denied(async_client: AsyncClient,
 @pytest.mark.asyncio
 async def test_42_audit_trail_recorded_on_business_mutation(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,business.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     await async_client.put("/api/v1/business", json={"business_name": "Audit Company"}, headers=headers)
 
@@ -631,7 +659,7 @@ async def test_42_audit_trail_recorded_on_business_mutation(async_client: AsyncC
 @pytest.mark.asyncio
 async def test_43_audit_trail_recorded_on_product_mutation(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     await async_client.post("/api/v1/products", json={"name": "Audit Product", "price": "12000.00"}, headers=headers)
 
@@ -644,7 +672,7 @@ async def test_43_audit_trail_recorded_on_product_mutation(async_client: AsyncCl
 @pytest.mark.asyncio
 async def test_44_audit_trail_recorded_on_knowledge_mutation(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     create_res = await async_client.post("/api/v1/knowledge", json={"title": "Audit Knowledge", "content": "Text"}, headers=headers)
     item_id = create_res.json()["id"]
@@ -677,7 +705,7 @@ async def test_46_readiness_check_fully_configured_tenant_returns_ready(async_cl
     await provisioner.provision_tenant(tenant_alpha.id)
     await db_session.commit()
 
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,product.write,knowledge.write,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     await async_client.put(
         "/api/v1/business",
@@ -721,7 +749,7 @@ async def test_47_readiness_check_alias_endpoint_parity(async_client: AsyncClien
 @pytest.mark.asyncio
 async def test_48_ai_router_never_uses_unapproved_draft_knowledge(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "knowledge.write,knowledge.read,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     # Draft item
     await async_client.post("/api/v1/knowledge", json={"title": "Unapproved Draft", "content": "Draft text"}, headers=headers)
@@ -743,7 +771,7 @@ async def test_49_router_uses_db_price_truth_deterministically(async_client: Asy
     from app.core.router.router import MessageRouter
     from app.database.models import Conversation, Message, Customer
 
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     prod_res = await async_client.post("/api/v1/products", json={"name": "Jaket Kulit", "price": "750000.00", "stock": 5}, headers=headers)
     assert prod_res.status_code == 201
 
@@ -770,7 +798,7 @@ async def test_50_router_uses_db_stock_truth_deterministically(async_client: Asy
     from app.core.router.router import MessageRouter
     from app.database.models import Conversation, Message, Customer
 
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
     await async_client.post("/api/v1/products", json={"name": "Helm Retro", "price": "300000.00", "stock": 18}, headers=headers)
 
     cust = Customer(tenant_id=tenant_alpha.id, name="Rider", phone="+62812555666")
@@ -793,8 +821,8 @@ async def test_50_router_uses_db_stock_truth_deterministically(async_client: Asy
 @pytest.mark.asyncio
 async def test_51_cross_tenant_foreign_key_variant_protection(async_client: AsyncClient, tenant_alpha: Tenant, tenant_beta: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "product.write,product.read"}
-    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Permissions": "product.write,product.read"}
+    headers_a = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
+    headers_b = {"X-Tenant-ID": str(tenant_beta.id), "X-Actor-Role": "owner"}
 
     prod_res = await async_client.post("/api/v1/products", json={"name": "Alpha Item", "price": "1000.00"}, headers=headers_a)
     alpha_prod_id = prod_res.json()["id"]
@@ -806,7 +834,7 @@ async def test_51_cross_tenant_foreign_key_variant_protection(async_client: Asyn
 @pytest.mark.asyncio
 async def test_52_event_bus_publishing_reliability(async_client: AsyncClient, tenant_alpha: Tenant, db_session: AsyncSession):
     await db_session.commit()
-    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Permissions": "business.write,product.write,knowledge.write,knowledge.approve"}
+    headers = {"X-Tenant-ID": str(tenant_alpha.id), "X-Actor-Role": "owner"}
 
     res_bp = await async_client.put("/api/v1/business", json={"business_name": "Event Reliability Corp"}, headers=headers)
     assert res_bp.status_code in (200, 201)

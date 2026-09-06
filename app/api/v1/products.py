@@ -1,9 +1,10 @@
 from uuid import UUID
 from typing import Sequence
-from fastapi import APIRouter, Depends, Header, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
 from app.database.session import get_db_session
 from app.tenants.business_service import BusinessDataService
 from app.schemas.domain import (
@@ -28,18 +29,12 @@ def _get_tenant_id_or_400() -> UUID:
     return tenant_id
 
 
-def _get_actor_permissions(x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions")) -> set[str]:
-    if x_actor_permissions is None or not x_actor_permissions.strip():
-        return set()
-    return set(p.strip() for p in x_actor_permissions.split(",") if p.strip())
-
-
 @router.get("", response_model=list[ProductResponse])
 async def list_products(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -50,7 +45,7 @@ async def list_products(
 async def create_product(
     payload: ProductCreate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -61,7 +56,7 @@ async def create_product(
 async def get_product(
     product_id: UUID,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -73,7 +68,7 @@ async def update_product(
     product_id: UUID,
     payload: ProductUpdate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -84,7 +79,7 @@ async def update_product(
 async def delete_product(
     product_id: UUID,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -97,7 +92,7 @@ async def create_product_variant(
     product_id: UUID,
     payload: ProductVariantCreate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -109,7 +104,7 @@ async def update_product_variant(
     variant_id: UUID,
     payload: ProductVariantUpdate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -120,7 +115,7 @@ async def update_product_variant(
 async def delete_product_variant(
     variant_id: UUID,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)

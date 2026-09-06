@@ -1,9 +1,10 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
 from app.database.session import get_db_session
 from app.tenants.business_service import BusinessDataService
 from app.tenants.provisioning.validators import TenantValidatorEngine
@@ -28,16 +29,10 @@ def _get_tenant_id_or_400() -> UUID:
     return tenant_id
 
 
-def get_actor_permissions_dependency(x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions")) -> set[str]:
-    if x_actor_permissions is None or not x_actor_permissions.strip():
-        return set()
-    return set(p.strip() for p in x_actor_permissions.split(",") if p.strip())
-
-
 @router.get("", response_model=BusinessProfileResponse)
 async def get_business_profile(
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(get_actor_permissions_dependency),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -49,7 +44,7 @@ async def get_business_profile(
 async def create_or_update_business_profile(
     payload: BusinessProfileCreate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] = Depends(get_actor_permissions_dependency),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
