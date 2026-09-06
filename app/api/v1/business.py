@@ -28,16 +28,16 @@ def _get_tenant_id_or_400() -> UUID:
     return tenant_id
 
 
-def _get_actor_permissions(x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions")) -> set[str] | None:
-    if x_actor_permissions is None:
-        return None
+def get_actor_permissions_dependency(x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions")) -> set[str]:
+    if x_actor_permissions is None or not x_actor_permissions.strip():
+        return set()
     return set(p.strip() for p in x_actor_permissions.split(",") if p.strip())
 
 
 @router.get("", response_model=BusinessProfileResponse)
 async def get_business(
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(get_actor_permissions_dependency),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
@@ -49,7 +49,7 @@ async def get_business(
 async def update_business(
     payload: BusinessProfileUpdate,
     db: AsyncSession = Depends(get_db_session),
-    actor_permissions: set[str] | None = Depends(_get_actor_permissions),
+    actor_permissions: set[str] = Depends(get_actor_permissions_dependency),
 ):
     tenant_id = _get_tenant_id_or_400()
     service = BusinessDataService(db)
