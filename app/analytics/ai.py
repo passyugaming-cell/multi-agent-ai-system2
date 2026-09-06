@@ -32,7 +32,7 @@ class AIAnalyticsService:
         period_duration = period_end - period_start
         prior_period_start = period_start - period_duration
 
-        ai_filter = [AIUsageRecord.tenant_id == str(tenant_id)] if tenant_id else []
+        ai_filter = [AIUsageRecord.tenant_id == tenant_id] if tenant_id else []
 
         # 1. Total Requests, Tokens, Cost, Latency
         stmt_summary = select(

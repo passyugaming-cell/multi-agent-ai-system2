@@ -96,7 +96,7 @@ class ConversationRepository(BaseRepository[Conversation]):
             .where(
                 Conversation.tenant_id == tenant_id,
                 Conversation.customer_id == customer_id,
-                Conversation.status.in_(["OPEN", "PENDING"]),
+                Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
             )
             .order_by(Conversation.created_at.desc())
         )
