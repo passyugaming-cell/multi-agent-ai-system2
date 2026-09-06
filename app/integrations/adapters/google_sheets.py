@@ -41,22 +41,19 @@ class GoogleSheetsAdapter:
     ) -> tuple[httpx.AsyncClient, dict[str, str]]:
         access_token = credentials.get("access_token")
         refresh_token = credentials.get("refresh_token")
-        api_key = credentials.get("api_key")
 
         # Refresh access token if expired/missing when refresh_token is available
         if not access_token and refresh_token:
             access_token = await self._refresh_access_token(tenant_id, connection_id, refresh_token, session)
 
-        if not access_token and not api_key:
+        if not access_token or not isinstance(access_token, str) or not access_token.strip():
             raise PermanentIntegrationError(
-                "Google Sheets requires valid OAuth credentials (access_token or refresh_token) or api_key",
+                "Google Sheets requires valid OAuth credentials (access_token or refresh_token)",
                 error_code="AUTHENTICATION_ERROR",
             )
 
         client = httpx.AsyncClient(timeout=15.0)
-        headers = {}
-        if access_token:
-            headers["Authorization"] = f"Bearer {access_token}"
+        headers = {"Authorization": f"Bearer {access_token.strip()}"}
 
         return client, headers
 
@@ -119,16 +116,15 @@ class GoogleSheetsAdapter:
         from app.integrations.events import publish_integration_event
         access_token = credentials.get("access_token")
         refresh_token = credentials.get("refresh_token")
-        api_key = credentials.get("api_key")
 
-        if not (access_token or refresh_token or api_key):
+        if not (access_token or refresh_token):
             await publish_integration_event(
                 tenant_id=tenant_id,
                 event_type="integration.google_sheets.connection_failed",
-                payload={"connection_id": str(connection_id), "reason": "Missing OAuth tokens or API key"},
+                payload={"connection_id": str(connection_id), "reason": "Missing OAuth tokens"},
             )
             raise PermanentIntegrationError(
-                "Google Sheets requires access_token, refresh_token, or api_key",
+                "Google Sheets requires valid OAuth credentials (access_token or refresh_token)",
                 error_code="INVALID_CREDENTIALS",
             )
 
@@ -163,7 +159,7 @@ class GoogleSheetsAdapter:
         session: AsyncSession | None = None,
     ) -> bool:
         """Performs a real authenticated Google API connectivity check to verify provider health."""
-        if not (credentials.get("access_token") or credentials.get("refresh_token") or credentials.get("api_key")):
+        if not (credentials.get("access_token") or credentials.get("refresh_token")):
             return False
 
         try:
