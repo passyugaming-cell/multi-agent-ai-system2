@@ -1274,3 +1274,16 @@ async def test_60_whatsapp_status_update_idempotency(async_client: AsyncClient, 
 
     res2 = await async_client.post("/api/v1/webhooks/whatsapp", content=raw, headers=headers)
     assert res2.json()["processed"][0]["status"] == "duplicate_event"
+
+
+@pytest.mark.asyncio
+async def test_61_invalid_signature_on_inactive_tenant_returns_401_first(async_client: AsyncClient, active_tenant_fixture, db_session: AsyncSession):
+    tenant = active_tenant_fixture["tenant"]
+    tenant.is_active = False
+    await db_session.commit()
+
+    raw_bytes, _ = make_wa_payload(active_tenant_fixture["phone_number_id"], "628111", "Hello probe")
+    invalid_sig = "sha256=invalid_probe_signature_hash"
+
+    res = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers={"X-Hub-Signature-256": invalid_sig})
+    assert res.status_code == 401
