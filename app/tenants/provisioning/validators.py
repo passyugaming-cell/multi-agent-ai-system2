@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.business_profile import BusinessProfile
 from app.database.models.product import Product
-from app.database.models.knowledge import KnowledgeCategory
+from app.database.models.knowledge import KnowledgeCategory, KnowledgeItem
 from app.database.models.guardrail import AIGuardrail
 from app.database.models.workflow import WorkflowConfiguration
 from app.database.models.integrations import IntegrationConnection, Integration
@@ -57,7 +57,13 @@ class TenantValidatorEngine:
             KnowledgeCategory.tenant_id == tenant_id, KnowledgeCategory.is_active.is_(True)
         )
         kc_count = (await self.session.execute(kc_count_stmt)).scalar() or 0
-        results["ai_knowledge_configured"] = kc_count >= 10
+
+        ki_count_stmt = select(func.count(KnowledgeItem.id)).where(
+            KnowledgeItem.tenant_id == tenant_id, KnowledgeItem.status.in_(["APPROVED", "ACTIVE"])
+        )
+        ki_count = (await self.session.execute(ki_count_stmt)).scalar() or 0
+
+        results["ai_knowledge_configured"] = kc_count >= 10 or ki_count >= 1
 
         # 4. AI Guardrails Checks
         gr_count_stmt = select(func.count(AIGuardrail.id)).where(
@@ -96,7 +102,6 @@ class TenantValidatorEngine:
         results["human_handoff_available"] = hh_wf is not None
 
         # 7. Overall Validation Check
-        # tenant_configuration_validated is True if core required items (profile, products, knowledge, guardrails, workflows, handoff) are True
         core_keys = [
             "business_profile_completed",
             "product_configured",

@@ -16,7 +16,7 @@ from app.schemas.domain import (
     BusinessProfileResponse,
 )
 
-router = APIRouter(prefix="/business-profile", tags=["Business Profile"])
+router = APIRouter(prefix="/business", tags=["Business Setup"])
 
 
 def _get_tenant_id_or_400() -> UUID:
@@ -30,7 +30,7 @@ def _get_tenant_id_or_400() -> UUID:
 
 
 @router.get("", response_model=BusinessProfileResponse)
-async def get_business_profile(
+async def get_business(
     db: AsyncSession = Depends(get_db_session),
     actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
@@ -39,10 +39,10 @@ async def get_business_profile(
     return await service.get_business_profile(tenant_id, actor_permissions=actor_permissions)
 
 
-@router.post("", response_model=BusinessProfileResponse, status_code=status.HTTP_201_CREATED)
 @router.put("", response_model=BusinessProfileResponse)
-async def create_or_update_business_profile(
-    payload: BusinessProfileCreate,
+@router.post("", response_model=BusinessProfileResponse, status_code=status.HTTP_200_OK)
+async def update_business(
+    payload: BusinessProfileUpdate,
     db: AsyncSession = Depends(get_db_session),
     actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
@@ -52,7 +52,7 @@ async def create_or_update_business_profile(
 
 
 @router.get("/readiness")
-async def get_business_profile_readiness(
+async def get_business_readiness(
     db: AsyncSession = Depends(get_db_session),
     actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
