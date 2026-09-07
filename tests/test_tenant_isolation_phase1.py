@@ -3,7 +3,7 @@ from decimal import Decimal
 import uuid
 from httpx import AsyncClient
 
-from app.database.models import Tenant, Product, Customer, Conversation, Order
+from app.database.models import Tenant, User, Product, Customer, Conversation, Order
 from app.repositories.domain import ProductRepository
 
 
@@ -13,6 +13,12 @@ async def test_tenant_isolation_products(async_client: AsyncClient, test_session
     tenant_a = Tenant(name="Tenant A", slug="tenant-a-iso", is_active=True)
     tenant_b = Tenant(name="Tenant B", slug="tenant-b-iso", is_active=True)
     test_session.add_all([tenant_a, tenant_b])
+    await test_session.commit()
+
+    # 1b. Create User for Tenant A and Tenant B
+    user_a = User(tenant_id=tenant_a.id, email="owner_a@test.com", password_hash="hash_a", is_active=True)
+    user_b = User(tenant_id=tenant_b.id, email="owner_b@test.com", password_hash="hash_b", is_active=True)
+    test_session.add_all([user_a, user_b])
     await test_session.commit()
 
     # 2. Create Product owned by Tenant A
@@ -25,8 +31,8 @@ async def test_tenant_isolation_products(async_client: AsyncClient, test_session
     test_session.add(product_a)
     await test_session.commit()
 
-    headers_a = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Role": "owner"}
-    headers_b = {"X-Tenant-ID": str(tenant_b.id), "X-Actor-Role": "owner"}
+    headers_a = {"X-Tenant-ID": str(tenant_a.id)}
+    headers_b = {"X-Tenant-ID": str(tenant_b.id)}
 
     # 3. Tenant A can read product_a
     res_a = await async_client.get(f"/api/v1/products/{product_a.id}", headers=headers_a)
