@@ -85,13 +85,24 @@ class OwnerAIOrchestrator:
             exec_record.status = "PLANNING"
             await self.session.commit()
 
-            # Retrieve business health and memory context
+            # Retrieve business health and assemble structured owner context
             health = await BusinessHealthCalculator.calculate(self.session, tenant_id)
-            mem_context = await self.mem_service.get_relevant_context(tenant_id, objective)
+
+            from app.core.context_assembly import ContextAssemblyService, ContextAssemblyRequest
+
+            assembly_service = ContextAssemblyService(self.session)
+            assembled_ctx = await assembly_service.assemble_context(
+                ContextAssemblyRequest(
+                    tenant_id=tenant_id,
+                    agent_name="owner_ai",
+                    task_type="orchestration",
+                    query_text=objective,
+                )
+            )
 
             evidence_list.append(f"Business Health Score: {health.score}/100")
-            for m in mem_context.business_memories:
-                evidence_list.append(f"Business Memory [{m.key}]: {m.content}")
+            for m in assembled_ctx.business_memory:
+                evidence_list.append(f"Business Memory [{m.get('key')}]: {m.get('content')}")
 
             # Determine relevant agents based on objective
             obj_lower = objective.lower()

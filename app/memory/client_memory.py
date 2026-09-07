@@ -87,12 +87,14 @@ class ClientMemoryService:
         memory_type: str | None = None,
         status: str = "ACTIVE",
         query_keywords: list[str] | None = None,
+        customer_id: uuid.UUID | None = None,
     ) -> list[MemoryItemSchema]:
         items = await self.repo.list_client_memories(
             tenant_id=tenant_id,
             memory_type=memory_type,
             status=status,
             query_keywords=query_keywords,
+            customer_id=customer_id,
         )
         return [
             MemoryItemSchema(

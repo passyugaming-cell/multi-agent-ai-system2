@@ -139,6 +139,11 @@ class ApprovalService:
         if isinstance(actions, dict):
             actions = [actions]
 
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+        if not active_actor:
+            raise AppError("Authentication required: no active trusted actor context to resume workflow execution.", status_code=403)
+
         if execution.current_step < len(actions):
             action_def = actions[execution.current_step]
             action_type = approval.action_type

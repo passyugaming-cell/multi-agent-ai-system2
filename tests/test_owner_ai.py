@@ -26,6 +26,7 @@ from app.database.models.owner_ai import OwnerAIExecution, Recommendation
 from app.tenants.repository import TenantRepository
 from app.tenants.schemas import TenantCreate
 from app.core.exceptions import AppError
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
 @pytest.mark.asyncio
@@ -72,7 +73,11 @@ async def test_end_to_end_acceptance_scenario(db_session: AsyncSession):
         objective="Kenapa performa bisnis bulan ini menurun dan apa yang harus saya lakukan?",
     )
 
-    res = await owner_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await owner_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     # Assertions for E2E Flow
     assert res.status in (AgentRequestStatus.COMPLETED, AgentRequestStatus.PARTIAL)

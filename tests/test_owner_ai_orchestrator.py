@@ -7,6 +7,7 @@ from app.agents.base.registry import agent_registry
 from app.agents.base.schemas import AgentRequest, AgentRequestStatus
 from app.tenants.repository import TenantRepository
 from app.tenants.schemas import TenantCreate
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
 @pytest.mark.asyncio
@@ -30,7 +31,11 @@ async def test_owner_ai_agent_and_orchestrator(db_session: AsyncSession):
         objective="Kenapa performa bisnis bulan ini menurun dan apa yang harus saya lakukan?",
     )
 
-    res = await owner_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await owner_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status in (AgentRequestStatus.COMPLETED, AgentRequestStatus.PARTIAL)
     assert res.agent == "owner_ai"
@@ -59,6 +64,10 @@ async def test_owner_ai_delegation_depth_limit(db_session: AsyncSession):
         delegation_depth=3,
     )
 
-    res = await owner_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await owner_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
     assert res.status == AgentRequestStatus.BLOCKED
     assert "limit exceeded" in res.error.lower()

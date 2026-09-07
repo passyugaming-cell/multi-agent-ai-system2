@@ -436,6 +436,37 @@ async def receive_whatsapp_webhook(
                 detail=f"Tenant '{tenant_id}' is not entitled to WhatsApp messaging: {ent_res.reason}",
             )
 
+    # Establish trusted actor context ONCE at the trusted entrypoint boundary (after verification & active tenant validation)
+    from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
+    webhook_actor = AuthenticatedActor(
+        user_id=None,
+        tenant_id=tenant_id,
+        role="system_webhook",
+        permissions={"business.read", "product.read", "knowledge.read"},
+    )
+    token = set_actor_context(webhook_actor)
+
+    try:
+        return await _process_whatsapp_webhook_body(
+            tenant_id=tenant_id,
+            target_connection=target_connection,
+            payload=payload,
+            entries=entries,
+            service=service,
+            db=db,
+        )
+    finally:
+        reset_actor_context(token)
+
+
+async def _process_whatsapp_webhook_body(
+    tenant_id: uuid.UUID,
+    target_connection: Any,
+    payload: dict,
+    entries: list,
+    service: IntegrationService,
+    db: AsyncSession,
+) -> Any:
     processed_results = []
     msg_repo = MessageRepository(db)
     cust_repo = CustomerRepository(db)

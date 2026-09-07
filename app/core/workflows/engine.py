@@ -34,6 +34,22 @@ class WorkflowEngine:
 
         tenant_uuid = uuid.UUID(event.tenant_id)
 
+        # Establish trusted actor context at workflow engine execution boundary
+        from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
+        wf_actor = AuthenticatedActor(
+            user_id=None,
+            tenant_id=tenant_uuid,
+            role="system_workflow",
+            permissions={"business.read", "product.read", "knowledge.read"},
+        )
+        token = set_actor_context(wf_actor)
+
+        try:
+            return await self._handle_event_internal(event, tenant_uuid)
+        finally:
+            reset_actor_context(token)
+
+    async def _handle_event_internal(self, event: EventSchema, tenant_uuid: uuid.UUID) -> list[WorkflowExecution]:
         # 1. Store event record
         evt_stmt = select(EventRecord).where(
             and_(EventRecord.tenant_id == tenant_uuid, EventRecord.event_id == event.event_id)
@@ -107,7 +123,7 @@ class WorkflowEngine:
         return matched_executions
 
     async def run_execution_pipeline(self, execution: WorkflowExecution, workflow: WorkflowConfiguration) -> None:
-        """Executes workflow steps deterministically."""
+        """Executes workflow steps deterministically under already established actor context."""
         if execution.status in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "BLOCKED"):
             return
 

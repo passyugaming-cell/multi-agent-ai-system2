@@ -28,6 +28,7 @@ from app.database.models.product import Product
 from app.database.models.customer import Customer
 from app.database.models.agent import AgentExecution
 from app.database.models.workflow import Approval, Task, WorkflowConfiguration, WorkflowExecution
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.core.approvals.service import ApprovalService
 from app.core.workflows.engine import WorkflowEngine
 from tests.fake_ai import FakeAIProvider
@@ -149,7 +150,11 @@ async def test_ai_sales_agent_uses_db_truth_and_approvals(db_session: AsyncSessi
         context={"product_name": "Laptop Pro"},
     )
 
-    res = await sales_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await sales_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status == AgentRequestStatus.WAITING_APPROVAL
     assert res.needs_approval is True
@@ -189,7 +194,11 @@ async def test_ai_client_manager_readiness_and_no_data_fabrication(db_session: A
         objective="Evaluate onboarding readiness",
     )
 
-    res = await cm_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await cm_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status in (AgentRequestStatus.COMPLETED, AgentRequestStatus.WAITING_APPROVAL)
     assert "Readiness Score" in res.finding or "configured" in res.finding
@@ -218,7 +227,11 @@ async def test_ai_support_agent_diagnosis_and_approval(db_session: AsyncSession,
         objective="Diagnose database connection error",
     )
 
-    res = await support_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await support_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status == AgentRequestStatus.WAITING_APPROVAL
     assert res.needs_approval is True
@@ -244,7 +257,11 @@ async def test_ai_data_manager_rejects_missing_fields_and_no_hallucination(db_se
         context={"records": raw_records_missing_price, "entity_type": "product"},
     )
 
-    res = await dm_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await dm_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status == AgentRequestStatus.WAITING_DATA
     assert "missing" in res.finding.lower()
@@ -272,7 +289,11 @@ async def test_ai_analyst_agent_read_only_and_data_labeling(db_session: AsyncSes
         objective="Analyze quarterly revenue and forecast next quarter",
     )
 
-    res = await analyst_agent.run(req, db_session)
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        res = await analyst_agent.run(req, db_session)
+    finally:
+        reset_actor_context(token)
 
     assert res.status == AgentRequestStatus.COMPLETED
     assert res.needs_approval is False
@@ -340,7 +361,11 @@ async def test_workflow_engine_can_invoke_agent_and_pause_for_approval(db_sessio
 
     # Approve approval and verify workflow resumes
     approval_service = ApprovalService(db_session)
-    updated_appr = await approval_service.approve(tenant_a.id, appr.id, decided_by="admin_user", reason="Approved 20% discount")
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="admin", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        updated_appr = await approval_service.approve(tenant_a.id, appr.id, decided_by="admin_user", reason="Approved 20% discount")
+    finally:
+        reset_actor_context(token)
     assert updated_appr.status == "APPROVED"
 
     await db_session.refresh(exec_rec)

@@ -35,22 +35,25 @@ class MemoryService:
         tenant_id: uuid.UUID,
         objective: str,
         keywords: list[str] | None = None,
+        customer_id: uuid.UUID | None = None,
     ) -> MemoryContextSchema:
         """Retrieves only contextually relevant business and client memories without exposing unrelated data."""
         # Extract keywords from objective if none provided
-        if not keywords:
-            keywords = [w.strip() for w in objective.lower().split() if len(w) > 3]
+        query_kw = keywords
+        if not query_kw and objective and objective.strip() and objective.lower() not in ("general", "general context query", "general query"):
+            query_kw = [w.strip() for w in objective.lower().split() if len(w) > 3]
 
         biz_items = await self.business_mem.list_memories(
             tenant_id=tenant_id,
             status="ACTIVE",
-            query_keywords=keywords[:5] if keywords else None,
+            query_keywords=query_kw[:5] if query_kw else None,
         )
 
         cli_items = await self.client_mem.list_memories(
             tenant_id=tenant_id,
             status="ACTIVE",
-            query_keywords=keywords[:5] if keywords else None,
+            query_keywords=query_kw[:5] if query_kw else None,
+            customer_id=customer_id,
         )
 
         # Mark expired memories as OUTDATED on read

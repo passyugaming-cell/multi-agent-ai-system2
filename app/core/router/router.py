@@ -137,74 +137,39 @@ class MessageRouter:
         except Exception as exc:
             logger.warning(f"AI Intent classification failed or unavailable: {exc}")
 
-        # 4. Fallback: Call Gemini for conversational assistance with factual context (catalog, business profile, approved knowledge)
+        # 4. Fallback: Call Gemini for conversational assistance with assembled safe context
         try:
-            product_repo = ProductRepository(session)
-            bp_repo = BusinessProfileRepository(session)
-            know_repo = KnowledgeItemRepository(session)
+            from app.core.context_assembly import ContextAssemblyService, ContextAssemblyRequest
 
-            all_products = await product_repo.list_all(tenant_id=tenant_id, limit=50)
-            bp = await bp_repo.get_by_tenant(tenant_id)
-            approved_knowledge = await know_repo.list_active_and_approved(tenant_id)
+            assembly_service = ContextAssemblyService(session)
+            assembled_ctx = await assembly_service.assemble_context(
+                ContextAssemblyRequest(
+                    tenant_id=tenant_id,
+                    agent_name="customer_service",
+                    task_type="customer_service_response",
+                    query_text=text,
+                    conversation_id=conversation.id,
+                    customer_id=conversation.customer_id,
+                )
+            )
 
-            catalog_context = [
-                {
-                    "name": p.name,
-                    "type": p.type,
-                    "sku": p.sku,
-                    "price": float(p.price),
-                    "currency": p.currency,
-                    "stock": p.stock,
-                    "stock_status": p.stock_status,
-                    "variants": [
-                        {
-                            "name": v.name,
-                            "sku": v.sku,
-                            "price_override": float(v.price_override) if v.price_override is not None else None,
-                            "stock": v.stock,
-                        }
-                        for v in (p.variants or [])
-                        if v.is_active
-                    ],
-                }
-                for p in all_products
-                if p.is_active
-            ]
-
-            business_context = {}
-            if bp:
-                business_context = {
-                    "name": bp.business_name,
-                    "description": bp.description,
-                    "phone": bp.phone,
-                    "email": bp.email,
-                    "website": bp.website,
-                    "operating_hours": bp.operating_hours,
-                    "payment_methods": bp.payment_methods,
-                    "shipping_information": bp.shipping_information,
-                    "return_policy": bp.return_policy,
-                    "exchange_policy": bp.exchange_policy,
-                    "refund_policy": bp.refund_policy,
-                }
-
-            knowledge_context = [
-                {
-                    "title": k.title,
-                    "category": k.category_key,
-                    "content": k.content,
-                }
-                for k in approved_knowledge
-            ]
+            formatted_prompt = ContextAssemblyService.format_prompt(
+                assembled=assembled_ctx,
+                user_message=text,
+                system_instruction=CUSTOMER_SERVICE_SYSTEM_PROMPT,
+            )
 
             gen_request = AIRequest(
                 tenant_id=tenant_id,
                 task_type="customer_service_response",
                 system_instruction=CUSTOMER_SERVICE_SYSTEM_PROMPT,
-                user_message=text,
+                user_message=formatted_prompt.full_prompt,
                 context={
-                    "product_catalog": catalog_context,
-                    "business_profile": business_context,
-                    "approved_knowledge": knowledge_context,
+                    "product_catalog": assembled_ctx.facts.get("product_catalog", []),
+                    "business_profile": assembled_ctx.business_profile or {},
+                    "approved_knowledge": assembled_ctx.knowledge,
+                    "business_memory": assembled_ctx.business_memory,
+                    "client_memory": assembled_ctx.client_memory,
                 },
             )
             ai_response = await self.ai_gateway.generate(

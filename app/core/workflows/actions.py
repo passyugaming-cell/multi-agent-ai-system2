@@ -170,8 +170,10 @@ class ActionExecutor:
             if params.get("_already_approved"):
                 agent_context["_already_approved"] = True
 
+            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+
             agent_req = AgentRequest(
-                tenant_id=uuid.UUID(tenant_id),
+                tenant_id=tenant_uuid,
                 source="workflow",
                 target_agent=target_agent,
                 task_type=task_type,
