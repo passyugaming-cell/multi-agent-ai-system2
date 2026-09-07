@@ -504,7 +504,10 @@ async def test_21_subsequent_message_reuses_customer(async_client: AsyncClient, 
 
 @pytest.mark.asyncio
 async def test_22_customer_identity_no_merge_by_name_alone(db_session: AsyncSession):
-    tenant_id = uuid.uuid4()
+    tenant = Tenant(name="Tenant 22", slug=f"tenant-22-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add(tenant)
+    await db_session.commit()
+    tenant_id = tenant.id
     c_repo = CustomerRepository(db_session)
 
     c1 = await c_repo.create(tenant_id=tenant_id, name="John Doe", phone="6281111111", external_id="6281111111")
@@ -564,13 +567,20 @@ async def test_24_subsequent_message_reuses_conversation(async_client: AsyncClie
 
 @pytest.mark.asyncio
 async def test_25_conversation_tenant_isolation(db_session: AsyncSession):
-    tenant_a = uuid.uuid4()
-    tenant_b = uuid.uuid4()
-    cust_id = uuid.uuid4()
+    t_a = Tenant(name="Tenant 25A", slug=f"tenant-25a-{uuid.uuid4().hex[:6]}", is_active=True)
+    t_b = Tenant(name="Tenant 25B", slug=f"tenant-25b-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add_all([t_a, t_b])
+    await db_session.commit()
+    tenant_a = t_a.id
+    tenant_b = t_b.id
+
+    c_repo = CustomerRepository(db_session)
+    cust_a = await c_repo.create(tenant_id=tenant_a, name="Cust A", phone="628111", external_id="628111")
+    cust_b = await c_repo.create(tenant_id=tenant_b, name="Cust B", phone="628222", external_id="628222")
 
     conv_repo = ConversationRepository(db_session)
-    c_a = await conv_repo.create(tenant_id=tenant_a, customer_id=cust_id, channel="whatsapp", status="OPEN")
-    c_b = await conv_repo.create(tenant_id=tenant_b, customer_id=cust_id, channel="whatsapp", status="OPEN")
+    c_a = await conv_repo.create(tenant_id=tenant_a, customer_id=cust_a.id, channel="whatsapp", status="OPEN")
+    c_b = await conv_repo.create(tenant_id=tenant_b, customer_id=cust_b.id, channel="whatsapp", status="OPEN")
 
     convs_a = await conv_repo.list_all(tenant_a)
     convs_b = await conv_repo.list_all(tenant_b)
@@ -655,7 +665,11 @@ async def test_28_credentials_never_stored_in_message_metadata(async_client: Asy
 
 @pytest.mark.asyncio
 async def test_29_deterministic_product_query_uses_db_truth(db_session: AsyncSession):
-    tenant_id = uuid.uuid4()
+    tenant = Tenant(name="Tenant 29", slug=f"tenant-29-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add(tenant)
+    await db_session.commit()
+    tenant_id = tenant.id
+
     p_repo = ProductRepository(db_session)
     prod = await p_repo.create(
         tenant_id=tenant_id,
@@ -777,7 +791,11 @@ async def test_34_no_direct_gemini_sdk_call():
 
 @pytest.mark.asyncio
 async def test_35_ai_usage_recorded_in_usage_records(db_session: AsyncSession):
-    tenant_id = uuid.uuid4()
+    tenant = Tenant(name="Tenant 35", slug=f"tenant-35-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add(tenant)
+    await db_session.commit()
+    tenant_id = tenant.id
+
     usage_repo = AIUsageRepository(db_session)
 
     req_id = f"ai_req_test_{uuid.uuid4().hex[:6]}"
@@ -1119,12 +1137,18 @@ async def test_51_ai_usage_contributes_to_analytics(db_session: AsyncSession, ac
 
 @pytest.mark.asyncio
 async def test_52_tenant_a_cannot_access_tenant_b_conversation(db_session: AsyncSession):
-    tenant_a = uuid.uuid4()
-    tenant_b = uuid.uuid4()
-    cust_b = uuid.uuid4()
+    t_a = Tenant(name="Tenant 52A", slug=f"tenant-52a-{uuid.uuid4().hex[:6]}", is_active=True)
+    t_b = Tenant(name="Tenant 52B", slug=f"tenant-52b-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add_all([t_a, t_b])
+    await db_session.commit()
+    tenant_a = t_a.id
+    tenant_b = t_b.id
+
+    c_repo = CustomerRepository(db_session)
+    cust_b = await c_repo.create(tenant_id=tenant_b, name="Customer B", phone="6289999998", external_id="6289999998")
 
     conv_repo = ConversationRepository(db_session)
-    conv_b = await conv_repo.create(tenant_id=tenant_b, customer_id=cust_b, channel="whatsapp", status="OPEN")
+    conv_b = await conv_repo.create(tenant_id=tenant_b, customer_id=cust_b.id, channel="whatsapp", status="OPEN")
 
     convs_a = await conv_repo.list_all(tenant_a)
     assert conv_b.id not in [c.id for c in convs_a]
@@ -1132,8 +1156,12 @@ async def test_52_tenant_a_cannot_access_tenant_b_conversation(db_session: Async
 
 @pytest.mark.asyncio
 async def test_53_tenant_a_cannot_access_tenant_b_customer(db_session: AsyncSession):
-    tenant_a = uuid.uuid4()
-    tenant_b = uuid.uuid4()
+    t_a = Tenant(name="Tenant 53A", slug=f"tenant-53a-{uuid.uuid4().hex[:6]}", is_active=True)
+    t_b = Tenant(name="Tenant 53B", slug=f"tenant-53b-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add_all([t_a, t_b])
+    await db_session.commit()
+    tenant_a = t_a.id
+    tenant_b = t_b.id
 
     c_repo = CustomerRepository(db_session)
     cust_b = await c_repo.create(tenant_id=tenant_b, name="Customer B", phone="6289999999", external_id="6289999999")
