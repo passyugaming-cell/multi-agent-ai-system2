@@ -22,6 +22,7 @@ from app.agents.base.exceptions import (
     ToolExecutionError,
 )
 from app.agents.base.permissions import check_tool_permission
+from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
 from app.core.context_assembly import (
     ContextAssemblyService,
     ContextAssemblyRequest,
@@ -181,25 +182,39 @@ class BaseAgent(ABC):
         include_categories: list[str] | None = None,
     ) -> tuple[AssembledContext, FormattedPromptContext]:
         """Assembles safe, minimum-necessary context and formats prompt for the agent."""
-        assembly_service = ContextAssemblyService(db_session)
-        assembly_req = ContextAssemblyRequest(
-            tenant_id=request.tenant_id,
-            agent_name=self.name,
-            task_type=request.task_type,
-            query_text=query_text or request.objective,
-            customer_id=request.context.get("customer_id") if isinstance(request.context, dict) else None,
-            conversation_id=request.context.get("conversation_id") if isinstance(request.context, dict) else None,
-            product_query=request.context.get("product_name") if isinstance(request.context, dict) else None,
-            include_categories=include_categories,
-            allow_internal=True,
-        )
-        assembled = await assembly_service.assemble_context(assembly_req)
-        formatted = ContextAssemblyService.format_prompt(
-            assembled=assembled,
-            user_message=f"Objective: {request.objective}\nContext: {request.context}\nRequested Action: {request.requested_action or 'Execute agent task'}",
-            system_instruction=self.system_instruction,
-        )
-        return assembled, formatted
+        active_actor = get_actor_context()
+        token = None
+        if not active_actor:
+            agent_actor = AuthenticatedActor(
+                user_id=None,
+                tenant_id=request.tenant_id,
+                role="system_agent",
+                permissions={"business.read", "product.read", "knowledge.read"},
+            )
+            token = set_actor_context(agent_actor)
+
+        try:
+            assembly_service = ContextAssemblyService(db_session)
+            assembly_req = ContextAssemblyRequest(
+                tenant_id=request.tenant_id,
+                agent_name=self.name,
+                task_type=request.task_type,
+                query_text=query_text or request.objective,
+                customer_id=request.context.get("customer_id") if isinstance(request.context, dict) else None,
+                conversation_id=request.context.get("conversation_id") if isinstance(request.context, dict) else None,
+                product_query=request.context.get("product_name") if isinstance(request.context, dict) else None,
+                include_categories=include_categories,
+            )
+            assembled = await assembly_service.assemble_context(assembly_req)
+            formatted = ContextAssemblyService.format_prompt(
+                assembled=assembled,
+                user_message=f"Objective: {request.objective}\nContext: {request.context}\nRequested Action: {request.requested_action or 'Execute agent task'}",
+                system_instruction=self.system_instruction,
+            )
+            return assembled, formatted
+        finally:
+            if token:
+                reset_actor_context(token)
 
     async def _execute_tool(
         self,

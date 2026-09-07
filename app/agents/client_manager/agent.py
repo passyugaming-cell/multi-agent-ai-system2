@@ -52,13 +52,15 @@ class ClientManagerAgent(BaseAgent):
 
         readiness_data = readiness_res.data if readiness_res.success else {}
 
-        # 3. Formulate AI message with deterministic facts
+        # 3. Assemble safe minimum-necessary AI context & format prompt
+        assembled_ctx, formatted_prompt = await self._assemble_agent_context(
+            request, db_session, query_text=request.objective
+        )
+
         user_message = (
-            f"Objective: {request.objective}\n"
-            f"Context: {request.context}\n"
-            f"Deterministic Onboarding State: {onboarding_state}\n"
-            f"Deterministic Readiness Evaluation: {readiness_data}\n"
-            f"Requested Action: {request.requested_action or 'Evaluate readiness and recommend tasks'}"
+            f"{formatted_prompt.full_prompt}\n\n"
+            f"[DETERMINISTIC ONBOARDING STATE]\n{onboarding_state}\n[/DETERMINISTIC ONBOARDING STATE]\n"
+            f"[DETERMINISTIC READINESS EVALUATION]\n{readiness_data}\n[/DETERMINISTIC READINESS EVALUATION]"
         )
 
         # 4. Call AIGateway

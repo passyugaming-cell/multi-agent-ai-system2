@@ -166,6 +166,7 @@ class MemoryRepository:
         memory_type: str | None = None,
         status: str = "ACTIVE",
         query_keywords: list[str] | None = None,
+        customer_id: uuid.UUID | None = None,
     ) -> Sequence[ClientMemory]:
         filters = [ClientMemory.tenant_id == tenant_id]
         if status:
@@ -175,6 +176,21 @@ class MemoryRepository:
 
         stmt = select(ClientMemory).where(and_(*filters)).order_by(ClientMemory.updated_at.desc())
         items = (await self.session.execute(stmt)).scalars().all()
+
+        # Customer isolation filtering
+        customer_filtered = []
+        for item in items:
+            item_customer_id = (item.meta_data or {}).get("customer_id") if item.meta_data else None
+            if customer_id is not None:
+                # If customer_id provided, include if item matches this customer or is unassigned tenant-level memory
+                if item_customer_id == str(customer_id) or item_customer_id is None:
+                    customer_filtered.append(item)
+            else:
+                # If no customer_id provided, ONLY include tenant-level memory without a specific customer_id
+                if item_customer_id is None:
+                    customer_filtered.append(item)
+
+        items = customer_filtered
 
         if query_keywords:
             filtered = []

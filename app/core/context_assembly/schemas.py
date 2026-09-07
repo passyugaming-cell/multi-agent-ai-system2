@@ -16,7 +16,6 @@ class ContextAssemblyRequest(BaseModel):
     product_id: Optional[uuid.UUID] = None
     product_query: Optional[str] = None
     include_categories: Optional[List[str]] = None
-    allow_internal: bool = False  # Bypasses client-header auth check for system-internal worker tasks
 
 
 class AssembledContext(BaseModel):

@@ -57,14 +57,12 @@ class SalesAgent(BaseAgent):
             if conv_tool_res.success:
                 conv_messages = conv_tool_res.data
 
-        # 3. Formulate prompt with trusted DB facts
-        user_message = (
-            f"Objective: {request.objective}\n"
-            f"Context: {request.context}\n"
-            f"Trusted Product Database Facts: {db_products}\n"
-            f"Customer Conversation Context: {conv_messages}\n"
-            f"Requested Action: {request.requested_action or 'Recommend product or follow-up'}"
+        # 3. Assemble safe minimum-necessary AI context & format prompt
+        assembled_ctx, formatted_prompt = await self._assemble_agent_context(
+            request, db_session, query_text=product_query
         )
+
+        user_message = formatted_prompt.full_prompt
 
         # 4. Call AIGateway with structured output schema
         ai_res, sales_output = await self._call_ai_gateway(

@@ -75,13 +75,15 @@ class DataManagerAgent(BaseAgent):
                 correlation_id=request.correlation_id,
             )
 
-        # 4. Formulate AI evaluation prompt
+        # 4. Assemble safe minimum-necessary AI context & format prompt
+        assembled_ctx, formatted_prompt = await self._assemble_agent_context(
+            request, db_session, query_text=request.objective
+        )
+
         user_message = (
-            f"Objective: {request.objective}\n"
-            f"Context: {request.context}\n"
-            f"Validation Data: {val_data}\n"
-            f"Conflicts Detected: {conf_data}\n"
-            f"Requested Action: {request.requested_action or 'Validate data import and generate change request'}"
+            f"{formatted_prompt.full_prompt}\n\n"
+            f"[VALIDATION DATA]\n{val_data}\n[/VALIDATION DATA]\n"
+            f"[CONFLICTS DETECTED]\n{conf_data}\n[/CONFLICTS DETECTED]"
         )
 
         # 5. Call AIGateway

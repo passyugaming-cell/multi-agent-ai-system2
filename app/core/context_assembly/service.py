@@ -16,12 +16,23 @@ from app.repositories.domain import (
     KnowledgeItemRepository,
     CustomerRepository,
     ConversationRepository,
+    MessageRepository,
 )
 from app.memory.service import MemoryService
 
 logger = logging.getLogger("core.context_assembly")
 
-# Sensitive key patterns to sanitize from assembled context
+SERVER_AGENT_CONTEXT_POLICY: Dict[str, set[str]] = {
+    "ai_sales": {"business_profile", "products", "knowledge", "business_memory", "client_memory", "customer", "conversation"},
+    "ai_support": {"business_profile", "knowledge", "client_memory", "customer", "conversation", "system_health"},
+    "ai_analyst": {"business_profile", "analytics", "business_memory"},
+    "owner_ai": {"business_profile", "business_memory", "analytics", "tasks"},
+    "ai_client_manager": {"business_profile", "onboarding", "readiness", "business_memory"},
+    "ai_data_manager": {"business_profile", "data_validation"},
+    "customer_service": {"business_profile", "products", "knowledge", "business_memory", "client_memory", "customer", "conversation"},
+}
+
+# Sensitive key patterns to sanitize from assembled context as defense-in-depth
 SENSITIVE_KEYS = {
     "password",
     "secret",
@@ -34,6 +45,9 @@ SENSITIVE_KEYS = {
     "private_key",
     "credential",
     "credentials",
+    "database_url",
+    "webhook_secret",
+    "encryption_key",
 }
 
 
@@ -62,36 +76,40 @@ class ContextAssemblyService:
         self.know_repo = KnowledgeItemRepository(session)
         self.cust_repo = CustomerRepository(session)
         self.conv_repo = ConversationRepository(session)
+        self.msg_repo = MessageRepository(session)
         self.mem_service = MemoryService(session)
 
     def _validate_actor_and_tenant(
-        self, tenant_id: uuid.UUID, allow_internal: bool = False
+        self, tenant_id: uuid.UUID
     ) -> tuple[Optional[str], Optional[str], List[str]]:
-        """Enforces trusted server-side actor verification and strict tenant isolation."""
+        """Enforces trusted server-side actor verification and strict tenant isolation.
+
+        Fail-closed rules:
+        1. Context assembly MUST fail closed if no server-side AuthenticatedActor exists in _actor_context.
+        2. Request fields / parameters CANNOT bypass authorization or grant permissions.
+        3. Authenticated actor tenant MUST match request tenant_id.
+        """
         active_actor = get_actor_context()
 
-        if not allow_internal:
-            if not active_actor:
-                raise AppException(
-                    code="PERMISSION_DENIED",
-                    message="Authentication required: no trusted server-side actor context found",
-                    status_code=403,
-                )
-
-        if active_actor:
-            if str(active_actor.tenant_id) != str(tenant_id):
-                raise AppException(
-                    code="FORBIDDEN_CROSS_TENANT_ACCESS",
-                    message="Authenticated tenant does not match request tenant",
-                    status_code=403,
-                )
-            return (
-                str(active_actor.user_id) if active_actor.user_id else None,
-                active_actor.role,
-                list(active_actor.permissions),
+        if not active_actor:
+            raise AppException(
+                code="PERMISSION_DENIED",
+                message="Authentication required: no trusted server-side actor context found",
+                status_code=403,
             )
 
-        return None, "system_internal", ["*"]
+        if str(active_actor.tenant_id) != str(tenant_id):
+            raise AppException(
+                code="FORBIDDEN_CROSS_TENANT_ACCESS",
+                message="Authenticated tenant does not match request tenant",
+                status_code=403,
+            )
+
+        return (
+            str(active_actor.user_id) if active_actor.user_id else None,
+            active_actor.role,
+            list(active_actor.permissions),
+        )
 
     def _determine_categories(
         self,
@@ -99,43 +117,21 @@ class ContextAssemblyService:
         task_type: Optional[str],
         requested_categories: Optional[List[str]],
     ) -> List[str]:
-        """Determines minimum necessary context categories based on agent role and task requirements."""
-        if requested_categories:
-            return requested_categories
+        """Determines minimum necessary context categories based on server-controlled policy.
 
+        Security constraints:
+        1. SERVER_AGENT_CONTEXT_POLICY is authoritative.
+        2. If agent_name is unknown, fallback to minimal safe context ({'business_profile'}).
+        3. Requested categories CANNOT expand privileges. They can only narrow (intersect) the agent's policy set.
+        """
         agent = (agent_name or "").lower()
-        task = (task_type or "").lower()
+        policy = SERVER_AGENT_CONTEXT_POLICY.get(agent, {"business_profile"})
 
-        if agent == "ai_sales" or "sales" in task or "customer_service" in task:
-            return [
-                "business_profile",
-                "products",
-                "knowledge",
-                "business_memory",
-                "client_memory",
-                "customer",
-                "conversation",
-            ]
-        elif agent == "ai_support" or "support" in task or "incident" in task:
-            return [
-                "business_profile",
-                "knowledge",
-                "client_memory",
-                "customer",
-                "conversation",
-                "system_health",
-            ]
-        elif agent == "ai_analyst" or "analyst" in task or "report" in task:
-            return ["business_profile", "analytics", "business_memory"]
-        elif agent == "owner_ai" or "orchestrat" in task:
-            return ["business_profile", "business_memory", "analytics", "tasks"]
-        elif agent == "ai_client_manager" or "onboarding" in task:
-            return ["business_profile", "onboarding", "readiness", "business_memory"]
-        elif agent == "ai_data_manager" or "data" in task:
-            return ["business_profile", "data_validation"]
+        if requested_categories:
+            allowed = policy.intersection(set(requested_categories))
+            return sorted(list(allowed))
 
-        # Default minimal category set
-        return ["business_profile", "products", "knowledge", "business_memory", "client_memory"]
+        return sorted(list(policy))
 
     async def assemble_context(
         self,
@@ -144,7 +140,7 @@ class ContextAssemblyService:
         """Assembles safe, minimum-necessary, structured context for an AI task."""
         # 1. Enforce fail-closed authentication and tenant isolation
         actor_id, actor_role, actor_permissions = self._validate_actor_and_tenant(
-            request.tenant_id, allow_internal=request.allow_internal
+            request.tenant_id
         )
 
         categories = self._determine_categories(
@@ -254,30 +250,27 @@ class ContextAssemblyService:
                 customer_data = {
                     "id": str(cust.id),
                     "name": cust.name,
-                    "phone": cust.phone_number,
+                    "phone": cust.phone,
                     "email": cust.email,
-                    "total_orders": cust.total_orders,
-                    "total_spend": float(cust.total_spend) if cust.total_spend else 0.0,
-                    "segment": cust.segment,
                 }
 
         if "conversation" in categories and request.conversation_id:
-            conv = await self.conv_repo.get_by_id(request.tenant_id, request.conversation_id)
-            if conv and conv.messages:
-                conversation_history_data = [
-                    {
-                        "sender": m.sender,
-                        "text": m.text,
-                        "created_at": m.created_at.isoformat() if m.created_at else None,
-                    }
-                    for m in conv.messages[-10:]  # Limit to 10 recent messages
-                ]
+            recent_msgs = await self.msg_repo.list_by_conversation(request.tenant_id, request.conversation_id, limit=10)
+            conversation_history_data = [
+                {
+                    "direction": m.direction,
+                    "text": m.text,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                }
+                for m in recent_msgs
+            ]
 
         # 6. Retrieve Memory Context (Business Memory & Client Memory)
         if "business_memory" in categories or "client_memory" in categories:
             mem_context = await self.mem_service.get_relevant_context(
                 tenant_id=request.tenant_id,
                 objective=query_text or request.task_type or "general context query",
+                customer_id=request.customer_id,
             )
             if "business_memory" in categories:
                 business_memory_data = [

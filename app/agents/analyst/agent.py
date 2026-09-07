@@ -56,12 +56,14 @@ class AnalystAgent(BaseAgent):
             "ai_usage": ai_res_tool.data if ai_res_tool.success else {},
         }
 
-        # 2. Formulate AI prompt
+        # 2. Assemble safe minimum-necessary AI context & format prompt
+        assembled_ctx, formatted_prompt = await self._assemble_agent_context(
+            request, db_session, query_text=request.objective
+        )
+
         user_message = (
-            f"Objective: {request.objective}\n"
-            f"Context: {request.context}\n"
-            f"Trusted Historical DB Analytics Data: {analytics_data}\n"
-            f"Requested Action: {request.requested_action or 'Calculate KPIs and provide forecast/recommendations'}"
+            f"{formatted_prompt.full_prompt}\n\n"
+            f"[TRUSTED HISTORICAL ANALYTICS DATA]\n{analytics_data}\n[/TRUSTED HISTORICAL ANALYTICS DATA]"
         )
 
         # 3. Call AIGateway

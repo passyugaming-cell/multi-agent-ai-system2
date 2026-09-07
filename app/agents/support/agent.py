@@ -59,13 +59,12 @@ class SupportAgent(BaseAgent):
             "whatsapp_status": wa_res.data if wa_res.success else {},
         }
 
-        # 2. Formulate prompt
-        user_message = (
-            f"Objective: {request.objective}\n"
-            f"Context: {request.context}\n"
-            f"Observed System Evidence: {evidence_data}\n"
-            f"Requested Action: {request.requested_action or 'Diagnose problem and recommend fix'}"
+        # 2. Assemble safe minimum-necessary AI context & format prompt
+        assembled_ctx, formatted_prompt = await self._assemble_agent_context(
+            request, db_session, query_text=request.objective
         )
+
+        user_message = f"{formatted_prompt.full_prompt}\n\n[OBSERVED SYSTEM EVIDENCE]\n{evidence_data}\n[/OBSERVED SYSTEM EVIDENCE]"
 
         # 3. Call AIGateway
         ai_res, diag_output = await self._call_ai_gateway(
