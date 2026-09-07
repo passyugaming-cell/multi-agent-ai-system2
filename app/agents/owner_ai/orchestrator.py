@@ -88,33 +88,17 @@ class OwnerAIOrchestrator:
             # Retrieve business health and assemble structured owner context
             health = await BusinessHealthCalculator.calculate(self.session, tenant_id)
 
-            from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
             from app.core.context_assembly import ContextAssemblyService, ContextAssemblyRequest
 
-            active_actor = get_actor_context()
-            token = None
-            if not active_actor:
-                owner_actor = AuthenticatedActor(
-                    user_id=None,
+            assembly_service = ContextAssemblyService(self.session)
+            assembled_ctx = await assembly_service.assemble_context(
+                ContextAssemblyRequest(
                     tenant_id=tenant_id,
-                    role="owner",
-                    permissions={"business.read", "product.read", "knowledge.read"},
+                    agent_name="owner_ai",
+                    task_type="orchestration",
+                    query_text=objective,
                 )
-                token = set_actor_context(owner_actor)
-
-            try:
-                assembly_service = ContextAssemblyService(self.session)
-                assembled_ctx = await assembly_service.assemble_context(
-                    ContextAssemblyRequest(
-                        tenant_id=tenant_id,
-                        agent_name="owner_ai",
-                        task_type="orchestration",
-                        query_text=objective,
-                    )
-                )
-            finally:
-                if token:
-                    reset_actor_context(token)
+            )
 
             evidence_list.append(f"Business Health Score: {health.score}/100")
             for m in assembled_ctx.business_memory:

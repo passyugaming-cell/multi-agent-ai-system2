@@ -161,6 +161,7 @@ class ActionExecutor:
 
         elif action_type == "call_agent":
             from app.agents import agent_registry, AgentRequest, AgentRequestStatus
+            from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
 
             target_agent = params.get("agent_name") or params.get("agent", "ai_sales")
             task_type = params.get("task_type", "workflow_execution")
@@ -170,8 +171,10 @@ class ActionExecutor:
             if params.get("_already_approved"):
                 agent_context["_already_approved"] = True
 
+            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+
             agent_req = AgentRequest(
-                tenant_id=uuid.UUID(tenant_id),
+                tenant_id=tenant_uuid,
                 source="workflow",
                 target_agent=target_agent,
                 task_type=task_type,
@@ -182,7 +185,22 @@ class ActionExecutor:
                 correlation_id=params.get("correlation_id"),
             )
 
-            agent_res = await agent_registry.delegate_task(agent_req, session)
+            active_actor = get_actor_context()
+            token = None
+            if not active_actor:
+                wf_actor = AuthenticatedActor(
+                    user_id=None,
+                    tenant_id=tenant_uuid,
+                    role="system_workflow",
+                    permissions={"business.read", "product.read", "knowledge.read"},
+                )
+                token = set_actor_context(wf_actor)
+
+            try:
+                agent_res = await agent_registry.delegate_task(agent_req, session)
+            finally:
+                if token:
+                    reset_actor_context(token)
 
             if not params.get("_already_approved") and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
                 return ActionResult(

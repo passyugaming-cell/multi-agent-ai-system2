@@ -515,12 +515,29 @@ async def receive_whatsapp_webhook(
                         metadata_=un_msg.metadata,
                     )
 
-                    route_result = await message_router.route_message(
-                        tenant_id=tenant_id,
-                        conversation=conversation,
-                        message=inbound_db_msg,
-                        session=db,
-                    )
+                    from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
+
+                    active_actor = get_actor_context()
+                    token = None
+                    if not active_actor:
+                        router_actor = AuthenticatedActor(
+                            user_id=None,
+                            tenant_id=tenant_id,
+                            role="system_router",
+                            permissions={"business.read", "product.read", "knowledge.read"},
+                        )
+                        token = set_actor_context(router_actor)
+
+                    try:
+                        route_result = await message_router.route_message(
+                            tenant_id=tenant_id,
+                            conversation=conversation,
+                            message=inbound_db_msg,
+                            session=db,
+                        )
+                    finally:
+                        if token:
+                            reset_actor_context(token)
 
                     if route_result.handsoff_to_human and not conversation.human_handoff:
                         conversation.human_handoff = True

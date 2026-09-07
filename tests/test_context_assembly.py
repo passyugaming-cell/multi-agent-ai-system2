@@ -213,7 +213,6 @@ async def test_04_current_authoritative_facts_override_stale_memory(test_engine,
         actor_t1 = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=t1_id, role="owner", permissions={"business.read"})
         token = set_actor_context(actor_t1)
         try:
-            # 3. Assemble Context
             service = ContextAssemblyService(session)
             req = ContextAssemblyRequest(
                 tenant_id=t1_id,
@@ -359,7 +358,6 @@ async def test_07_server_context_policy_escalation_rejection(test_engine, setup_
         try:
             service = ContextAssemblyService(session)
             # Analyst agent policy allows {"business_profile", "analytics", "business_memory"}
-            # Request attempts to escalate context to include "products" and "customer"
             req = ContextAssemblyRequest(
                 tenant_id=t1_id,
                 agent_name="ai_analyst",
@@ -383,7 +381,6 @@ async def test_08_unknown_agent_safe_fallback(test_engine, setup_tenants):
         token = set_actor_context(actor_t1)
         try:
             service = ContextAssemblyService(session)
-            # Unknown agent name -> minimal safe fallback context (business_profile)
             req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="unknown_malicious_agent")
             ctx = await service.assemble_context(req)
 
@@ -418,13 +415,18 @@ async def test_09_prompt_injection_defense_and_secret_redaction(test_engine, set
 
 
 @pytest.mark.asyncio
-async def test_10_all_six_specialist_agents_use_context_assembly(test_engine, setup_tenants):
+async def test_10_all_six_specialist_agents_real_execution_path(test_engine, setup_tenants):
     t1_id, _ = setup_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
-        actor_t1 = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=t1_id, role="owner", permissions={"business.read", "product.read", "knowledge.read"})
+        actor_t1 = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="owner",
+            permissions={"business.read", "product.read", "knowledge.read"},
+        )
         token = set_actor_context(actor_t1)
         try:
-            # Test all 6 agents execute context assembly cleanly
+            # Test all 5 specialist agent process_task public execution methods
             agents = [
                 SalesAgent(enabled=True),
                 SupportAgent(enabled=True),
@@ -432,6 +434,13 @@ async def test_10_all_six_specialist_agents_use_context_assembly(test_engine, se
                 DataManagerAgent(enabled=True),
                 AnalystAgent(enabled=True),
             ]
+
+            mock_ai_response = AIResponse(
+                text="Agent execution output.",
+                model="gemini-3.1-flash-lite",
+                request_id="req_agent_test",
+                structured_output=None,
+            )
 
             for ag in agents:
                 req = AgentRequest(
@@ -441,21 +450,25 @@ async def test_10_all_six_specialist_agents_use_context_assembly(test_engine, se
                     task_type="test_task",
                     objective="Perform operational test",
                 )
-                assembled, formatted = await ag._assemble_agent_context(req, session)
-                assert assembled.tenant_id == t1_id
-                assert assembled.agent_name == ag.name
-                assert len(formatted.full_prompt) > 0
+                with patch.object(ag.ai_gateway, "generate", new_callable=AsyncMock) as mock_gen:
+                    mock_gen.return_value = mock_ai_response
+                    res = await ag.run(req, session)
 
-            # Test Owner AI Orchestrator uses context assembly
+                    assert res.status.value in ("COMPLETED", "WAITING_APPROVAL")
+                    assert mock_gen.called
+                    ai_req_arg = mock_gen.call_args.args[0] if mock_gen.call_args.args else mock_gen.call_args.kwargs.get("request")
+                    assert "[FACTS - AUTHORITATIVE SYSTEM TRUTH]" in ai_req_arg.user_message
+
+            # Test Owner AI Orchestrator real orchestrate execution path
             orchestrator = OwnerAIOrchestrator(session)
-            res = await orchestrator.orchestrate(tenant_id=t1_id, objective="Test business health and strategy")
-            assert res.status.value in ("COMPLETED", "PARTIAL")
+            res_owner = await orchestrator.orchestrate(tenant_id=t1_id, objective="Test business health and strategy")
+            assert res_owner.status.value in ("COMPLETED", "PARTIAL")
         finally:
             reset_actor_context(token)
 
 
 @pytest.mark.asyncio
-async def test_11_messagerouter_fallback_uses_context_assembly(test_engine, setup_tenants):
+async def test_11_messagerouter_deterministic_vs_fallback_paths(test_engine, setup_tenants):
     t1_id, _ = setup_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
         cust = Customer(tenant_id=t1_id, name="Jane Doe", phone="+6289999999")
@@ -466,30 +479,63 @@ async def test_11_messagerouter_fallback_uses_context_assembly(test_engine, setu
         session.add(conv)
         await session.flush()
 
-        # Ambiguous message that goes to AI fallback
-        msg = Message(tenant_id=t1_id, conversation_id=conv.id, direction="INBOUND", text="Can you help me choose a gift?")
-
-        router = MessageRouter()
-
-        # Mock AIGateway generate method to verify assembled context payload
-        mock_ai_response = AIResponse(
-            text="I can recommend several catalog items.",
-            model="gemini-3.1-flash-lite",
-            request_id="req_test_123",
-            structured_output=None,
+        prod = Product(
+            tenant_id=t1_id,
+            name="Classic Shoes",
+            sku="SHOES-01",
+            price=Decimal("250000.00"),
+            stock=8,
+            is_active=True,
         )
+        session.add(prod)
+        await session.commit()
 
-        with patch.object(router.ai_gateway, "generate", new_callable=AsyncMock) as mock_gen:
-            mock_gen.return_value = mock_ai_response
+        actor_t1 = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="owner",
+            permissions={"business.read", "product.read", "knowledge.read"},
+        )
+        token = set_actor_context(actor_t1)
+        try:
+            router = MessageRouter()
 
-            res = await router.route_message(tenant_id=t1_id, conversation=conv, message=msg, session=session)
+            # TEST A — Deterministic Price Query
+            msg_price = Message(tenant_id=t1_id, conversation_id=conv.id, direction="INBOUND", text="berapa harga Classic Shoes?")
+            with patch.object(router.ai_gateway, "generate", new_callable=AsyncMock) as mock_gen_price:
+                res_price = await router.route_message(tenant_id=t1_id, conversation=conv, message=msg_price, session=session)
+                assert not res_price.was_ai_called
+                assert "Rp 250,000" in res_price.response_text
+                mock_gen_price.assert_not_called()
 
-            assert res.was_ai_called
-            assert res.response_text == "I can recommend several catalog items."
-            assert mock_gen.called
+            # TEST B — Deterministic Stock Query
+            msg_stock = Message(tenant_id=t1_id, conversation_id=conv.id, direction="INBOUND", text="stok Classic Shoes berapa?")
+            with patch.object(router.ai_gateway, "generate", new_callable=AsyncMock) as mock_gen_stock:
+                res_stock = await router.route_message(tenant_id=t1_id, conversation=conv, message=msg_stock, session=session)
+                assert not res_stock.was_ai_called
+                assert "8 unit" in res_stock.response_text
+                mock_gen_stock.assert_not_called()
 
-            # Verify AIRequest passed to model contains formatted assembled context
-            ai_req_arg = mock_gen.call_args[1]["request"] if mock_gen.call_args[1] else mock_gen.call_args[0][0]
-            assert "[FACTS - AUTHORITATIVE SYSTEM TRUTH]" in ai_req_arg.user_message
-            assert "[UNTRUSTED USER INPUT]" in ai_req_arg.user_message
-            assert "Can you help me choose a gift?" in ai_req_arg.user_message
+            # TEST C — Conversational Fallback Query
+            msg_conv = Message(tenant_id=t1_id, conversation_id=conv.id, direction="INBOUND", text="Can you help me choose a gift?")
+            mock_ai_response = AIResponse(
+                text="I can recommend several catalog items.",
+                model="gemini-3.1-flash-lite",
+                request_id="req_test_123",
+                structured_output=None,
+            )
+
+            with patch.object(router.ai_gateway, "generate", new_callable=AsyncMock) as mock_gen_fb:
+                mock_gen_fb.return_value = mock_ai_response
+                res_fallback = await router.route_message(tenant_id=t1_id, conversation=conv, message=msg_conv, session=session)
+
+                assert res_fallback.was_ai_called
+                assert res_fallback.response_text == "I can recommend several catalog items."
+                assert mock_gen_fb.called
+
+                ai_req_arg = mock_gen_fb.call_args[1]["request"] if mock_gen_fb.call_args[1] else mock_gen_fb.call_args[0][0]
+                assert "[FACTS - AUTHORITATIVE SYSTEM TRUTH]" in ai_req_arg.user_message
+                assert "[UNTRUSTED USER INPUT]" in ai_req_arg.user_message
+                assert "Can you help me choose a gift?" in ai_req_arg.user_message
+        finally:
+            reset_actor_context(token)

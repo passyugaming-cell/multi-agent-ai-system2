@@ -139,35 +139,19 @@ class MessageRouter:
 
         # 4. Fallback: Call Gemini for conversational assistance with assembled safe context
         try:
-            from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
             from app.core.context_assembly import ContextAssemblyService, ContextAssemblyRequest
 
-            active_actor = get_actor_context()
-            token = None
-            if not active_actor:
-                router_actor = AuthenticatedActor(
-                    user_id=None,
+            assembly_service = ContextAssemblyService(session)
+            assembled_ctx = await assembly_service.assemble_context(
+                ContextAssemblyRequest(
                     tenant_id=tenant_id,
-                    role="system_router",
-                    permissions={"business.read", "product.read", "knowledge.read"},
+                    agent_name="customer_service",
+                    task_type="customer_service_response",
+                    query_text=text,
+                    conversation_id=conversation.id,
+                    customer_id=conversation.customer_id,
                 )
-                token = set_actor_context(router_actor)
-
-            try:
-                assembly_service = ContextAssemblyService(session)
-                assembled_ctx = await assembly_service.assemble_context(
-                    ContextAssemblyRequest(
-                        tenant_id=tenant_id,
-                        agent_name="customer_service",
-                        task_type="customer_service_response",
-                        query_text=text,
-                        conversation_id=conversation.id,
-                        customer_id=conversation.customer_id,
-                    )
-                )
-            finally:
-                if token:
-                    reset_actor_context(token)
+            )
 
             formatted_prompt = ContextAssemblyService.format_prompt(
                 assembled=assembled_ctx,

@@ -32,6 +32,37 @@ SERVER_AGENT_CONTEXT_POLICY: Dict[str, set[str]] = {
     "customer_service": {"business_profile", "products", "knowledge", "business_memory", "client_memory", "customer", "conversation"},
 }
 
+# Strict Primary Safe-Field Allowlists
+SAFE_BUSINESS_PROFILE_FIELDS = {
+    "business_name", "description", "phone", "email", "website",
+    "operating_hours", "payment_methods", "shipping_information",
+    "return_policy", "exchange_policy", "refund_policy"
+}
+
+SAFE_PRODUCT_FIELDS = {
+    "id", "name", "type", "sku", "price", "currency", "stock", "stock_status"
+}
+
+SAFE_VARIANT_FIELDS = {
+    "name", "sku", "price_override", "stock"
+}
+
+SAFE_KNOWLEDGE_FIELDS = {
+    "title", "category", "content", "version"
+}
+
+SAFE_CUSTOMER_FIELDS = {
+    "id", "name", "phone", "email"
+}
+
+SAFE_CONVERSATION_FIELDS = {
+    "direction", "text", "created_at"
+}
+
+SAFE_MEMORY_FIELDS = {
+    "key", "content", "memory_type", "importance"
+}
+
 # Sensitive key patterns to sanitize from assembled context as defense-in-depth
 SENSITIVE_KEYS = {
     "password",
@@ -158,22 +189,14 @@ class ContextAssemblyService:
 
         query_text = request.query_text or request.product_query or ""
 
-        # 2. Retrieve Business Profile if needed
+        # 2. Retrieve Business Profile if needed (Strict Safe-Field Allowlist)
         if "business_profile" in categories:
             bp = await self.bp_repo.get_by_tenant(request.tenant_id)
             if bp:
                 business_profile_data = {
-                    "business_name": bp.business_name,
-                    "description": bp.description,
-                    "phone": bp.phone,
-                    "email": bp.email,
-                    "website": bp.website,
-                    "operating_hours": bp.operating_hours,
-                    "payment_methods": bp.payment_methods,
-                    "shipping_information": bp.shipping_information,
-                    "return_policy": bp.return_policy,
-                    "exchange_policy": bp.exchange_policy,
-                    "refund_policy": bp.refund_policy,
+                    k: getattr(bp, k, None)
+                    for k in SAFE_BUSINESS_PROFILE_FIELDS
+                    if hasattr(bp, k)
                 }
 
         # 3. Retrieve Real-time Products Facts (Source of Truth for Price & Stock)
