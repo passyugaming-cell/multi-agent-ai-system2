@@ -22,7 +22,7 @@ from app.agents.base.exceptions import (
     ToolExecutionError,
 )
 from app.agents.base.permissions import check_tool_permission
-from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
+from app.core.context import get_actor_context
 from app.core.context_assembly import (
     ContextAssemblyService,
     ContextAssemblyRequest,

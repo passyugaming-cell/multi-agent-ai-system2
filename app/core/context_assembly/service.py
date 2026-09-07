@@ -63,6 +63,10 @@ SAFE_MEMORY_FIELDS = {
     "key", "content", "memory_type", "importance"
 }
 
+SAFE_TASK_FIELDS = {
+    "id", "title", "description", "status", "priority", "task_type", "assigned_agent"
+}
+
 # Sensitive key patterns to sanitize from assembled context as defense-in-depth
 SENSITIVE_KEYS = {
     "password",

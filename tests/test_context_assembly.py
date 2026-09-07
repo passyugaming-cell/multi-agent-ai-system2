@@ -561,21 +561,36 @@ async def test_12_safe_field_allowlisting_excludes_secrets_completely():
         "database_url": "postgresql://user:pass@localhost/db",
         "refresh_token": "REFRESH_TOKEN_123",
         "encryption_key": "32_BYTE_BASE64_KEY",
+        "webhook_secret": "WHSEC_SECRET_123",
+        "private_key": "PEM_PRIVATE_KEY",
+        "credentials": {"token": "SECRET_TOKEN"},
     }
 
-    projected = _project_safe_fields(dirty_product_dict, SAFE_PRODUCT_FIELDS)
+    projected_prod = _project_safe_fields(dirty_product_dict, SAFE_PRODUCT_FIELDS)
 
     # Assert allowed fields ARE present
-    assert projected["name"] == "Secure Item"
-    assert projected["price"] == 100000.0
+    assert projected_prod["name"] == "Secure Item"
+    assert projected_prod["price"] == 100000.0
 
     # Assert sensitive secret fields ARE COMPLETELY ABSENT
     secret_keys = [
         "password", "api_key", "jwt_secret", "database_url",
-        "refresh_token", "encryption_key"
+        "refresh_token", "encryption_key", "webhook_secret",
+        "private_key", "credentials"
     ]
     for key in secret_keys:
-        assert key not in projected
+        assert key not in projected_prod
+
+    dirty_bp_dict = {
+        "business_name": "ACME Corp",
+        "phone": "+62812345678",
+        "jwt_secret": "SECRET_BP_JWT",
+        "api_key": "SECRET_BP_API_KEY",
+    }
+    projected_bp = _project_safe_fields(dirty_bp_dict, SAFE_BUSINESS_PROFILE_FIELDS)
+    assert projected_bp["business_name"] == "ACME Corp"
+    assert "jwt_secret" not in projected_bp
+    assert "api_key" not in projected_bp
 
 
 @pytest.mark.asyncio

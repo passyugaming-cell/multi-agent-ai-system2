@@ -123,30 +123,10 @@ class WorkflowEngine:
         return matched_executions
 
     async def run_execution_pipeline(self, execution: WorkflowExecution, workflow: WorkflowConfiguration) -> None:
-        """Executes workflow steps deterministically."""
+        """Executes workflow steps deterministically under already established actor context."""
         if execution.status in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "BLOCKED"):
             return
 
-        from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
-
-        active_actor = get_actor_context()
-        token = None
-        if not active_actor:
-            wf_actor = AuthenticatedActor(
-                user_id=None,
-                tenant_id=execution.tenant_id,
-                role="system_workflow",
-                permissions={"business.read", "product.read", "knowledge.read"},
-            )
-            token = set_actor_context(wf_actor)
-
-        try:
-            await self._run_execution_pipeline_internal(execution, workflow)
-        finally:
-            if token:
-                reset_actor_context(token)
-
-    async def _run_execution_pipeline_internal(self, execution: WorkflowExecution, workflow: WorkflowConfiguration) -> None:
         now = datetime.now(timezone.utc)
         execution.started_at = execution.started_at or now
 
