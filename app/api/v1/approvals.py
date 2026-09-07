@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
 from app.database.session import get_db_session
 from app.core.approvals.service import ApprovalService
 from app.core.exceptions import AppException
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/approvals", tags=["Approvals"])
 @router.get("", response_model=list[ApprovalResponse])
 async def list_approvals(
     status: str | None = Query(default=None),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db_session),
 ) -> list[ApprovalResponse]:
     tenant_id = get_tenant_id()
@@ -38,6 +40,7 @@ async def list_approvals(
 @router.get("/{approval_id}", response_model=ApprovalResponse)
 async def get_approval(
     approval_id: str,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApprovalResponse:
     tenant_id = get_tenant_id()
@@ -64,6 +67,7 @@ async def get_approval(
 async def approve_request(
     approval_id: str,
     body: ApprovalDecisionRequest,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApprovalResponse:
     tenant_id = get_tenant_id()
@@ -104,6 +108,7 @@ async def approve_request(
 async def reject_request(
     approval_id: str,
     body: ApprovalDecisionRequest,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApprovalResponse:
     tenant_id = get_tenant_id()
@@ -134,6 +139,7 @@ async def reject_request(
 @router.post("/{approval_id}/cancel", response_model=ApprovalResponse)
 async def cancel_approval(
     approval_id: str,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApprovalResponse:
     tenant_id = get_tenant_id()

@@ -13,7 +13,7 @@ from app.core.context_assembly import (
     FormattedPromptContext,
 )
 from app.core.context_assembly.service import _project_safe_fields, SAFE_PRODUCT_FIELDS, SAFE_BUSINESS_PROFILE_FIELDS
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, AppError
 from app.database.models import Tenant, Product, BusinessProfile, KnowledgeItem, Conversation, Message, Customer
 from app.memory.service import MemoryService
 from app.memory.schemas import MemoryCreateSchema, MemoryScope, MemoryType, MemoryImportance
@@ -627,3 +627,59 @@ async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, s
         )
         assert wf_res.success is False
         assert "Authentication required" in wf_res.error
+
+
+@pytest.mark.asyncio
+async def test_14_approval_service_fail_closed_without_actor(test_engine, setup_tenants):
+    """Test that ApprovalService._resume_workflow_execution fails closed (403) when no trusted actor exists."""
+    t1_id, _ = setup_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        from app.database.models.workflow import Approval, WorkflowExecution, WorkflowConfiguration
+        from app.core.approvals.service import ApprovalService
+
+        wf = WorkflowConfiguration(
+            tenant_id=t1_id,
+            key="test_wf_key",
+            name="Approval Test WF",
+            trigger_type="event",
+            trigger_config={"event_type": "test_event"},
+            actions=[{"action_type": "whatsapp_send_message", "params": {"recipient_phone": "+628123456789", "message_body": "Hello"}}],
+        )
+        session.add(wf)
+        await session.flush()
+
+        execution = WorkflowExecution(
+            tenant_id=t1_id,
+            workflow_id=wf.id,
+            event_id="evt_test_123",
+            status="WAITING_APPROVAL",
+            current_step=0,
+            context={},
+        )
+        session.add(execution)
+        await session.flush()
+
+        appr = Approval(
+            tenant_id=t1_id,
+            workflow_execution_id=execution.id,
+            requested_by="test_user",
+            action_type="whatsapp_send_message",
+            target="recipient",
+            reason="High risk action",
+            risk_level="HIGH",
+            status="PENDING",
+        )
+        session.add(appr)
+        await session.commit()
+
+        approval_service = ApprovalService(session)
+
+        # Without actor context -> approve() attempting to resume workflow must fail closed with 403 AppError
+        with pytest.raises(AppError) as exc_info:
+            await approval_service.approve(
+                tenant_id=t1_id,
+                approval_id=appr.id,
+                decided_by="admin_user",
+            )
+        assert exc_info.value.status_code == 403
+        assert "Authentication required" in exc_info.value.message

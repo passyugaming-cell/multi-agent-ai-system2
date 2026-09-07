@@ -1,6 +1,7 @@
 import uuid
 import pytest
 from httpx import AsyncClient
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
 @pytest.mark.asyncio
@@ -107,21 +108,31 @@ async def test_approvals_api(client: AsyncClient, tenant_a):
         headers=headers,
     )
 
-    # Get pending approvals
-    res_appr = await client.get("/api/v1/approvals?status=PENDING", headers=headers)
-    assert res_appr.status_code == 200
-    approvals = res_appr.json()
-    assert len(approvals) == 1
-    appr_id = approvals[0]["id"]
-
-    # Approve request
-    res_decision = await client.post(
-        f"/api/v1/approvals/{appr_id}/approve",
-        json={"decided_by": "owner@tenant.com", "reason": "Approved market update"},
-        headers=headers,
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "product.read", "knowledge.read"},
     )
-    assert res_decision.status_code == 200
-    assert res_decision.json()["status"] == "APPROVED"
+    token = set_actor_context(actor)
+    try:
+        # Get pending approvals
+        res_appr = await client.get("/api/v1/approvals?status=PENDING", headers=headers)
+        assert res_appr.status_code == 200
+        approvals = res_appr.json()
+        assert len(approvals) == 1
+        appr_id = approvals[0]["id"]
+
+        # Approve request
+        res_decision = await client.post(
+            f"/api/v1/approvals/{appr_id}/approve",
+            json={"decided_by": "owner@tenant.com", "reason": "Approved market update"},
+            headers=headers,
+        )
+        assert res_decision.status_code == 200
+        assert res_decision.json()["status"] == "APPROVED"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio

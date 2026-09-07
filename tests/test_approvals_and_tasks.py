@@ -6,6 +6,7 @@ from app.core.events.schemas import EventSchema
 from app.core.workflows.engine import WorkflowEngine
 from app.database.models.workflow import WorkflowConfiguration
 from app.core.exceptions import AppError
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
 @pytest.mark.asyncio
@@ -82,7 +83,11 @@ async def test_approval_workflow_pause_and_resume(db_session, tenant_a):
     assert appr.risk_level == "HIGH"
 
     # Approve request
-    approved = await appr_service.approve(tenant_uuid, appr.id, decided_by="owner@company.com")
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_uuid, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    try:
+        approved = await appr_service.approve(tenant_uuid, appr.id, decided_by="owner@company.com")
+    finally:
+        reset_actor_context(token)
     assert approved.status == "APPROVED"
 
     # Refresh execution, now should be COMPLETED
