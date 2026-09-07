@@ -54,6 +54,7 @@ async def create_or_update_business_profile(
 @router.get("/readiness")
 async def get_business_profile_readiness(
     db: AsyncSession = Depends(get_db_session),
+    actor_permissions: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     validator = TenantValidatorEngine(db)
