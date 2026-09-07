@@ -436,6 +436,37 @@ async def receive_whatsapp_webhook(
                 detail=f"Tenant '{tenant_id}' is not entitled to WhatsApp messaging: {ent_res.reason}",
             )
 
+    # Establish trusted actor context ONCE at the trusted entrypoint boundary (after verification & active tenant validation)
+    from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
+    webhook_actor = AuthenticatedActor(
+        user_id=None,
+        tenant_id=tenant_id,
+        role="system_webhook",
+        permissions={"business.read", "product.read", "knowledge.read"},
+    )
+    token = set_actor_context(webhook_actor)
+
+    try:
+        return await _process_whatsapp_webhook_body(
+            tenant_id=tenant_id,
+            target_connection=target_connection,
+            payload=payload,
+            entries=entries,
+            service=service,
+            db=db,
+        )
+    finally:
+        reset_actor_context(token)
+
+
+async def _process_whatsapp_webhook_body(
+    tenant_id: uuid.UUID,
+    target_connection: Any,
+    payload: dict,
+    entries: list,
+    service: IntegrationService,
+    db: AsyncSession,
+) -> Any:
     processed_results = []
     msg_repo = MessageRepository(db)
     cust_repo = CustomerRepository(db)
@@ -515,29 +546,12 @@ async def receive_whatsapp_webhook(
                         metadata_=un_msg.metadata,
                     )
 
-                    from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
-
-                    active_actor = get_actor_context()
-                    token = None
-                    if not active_actor:
-                        router_actor = AuthenticatedActor(
-                            user_id=None,
-                            tenant_id=tenant_id,
-                            role="system_router",
-                            permissions={"business.read", "product.read", "knowledge.read"},
-                        )
-                        token = set_actor_context(router_actor)
-
-                    try:
-                        route_result = await message_router.route_message(
-                            tenant_id=tenant_id,
-                            conversation=conversation,
-                            message=inbound_db_msg,
-                            session=db,
-                        )
-                    finally:
-                        if token:
-                            reset_actor_context(token)
+                    route_result = await message_router.route_message(
+                        tenant_id=tenant_id,
+                        conversation=conversation,
+                        message=inbound_db_msg,
+                        session=db,
+                    )
 
                     if route_result.handsoff_to_human and not conversation.human_handoff:
                         conversation.human_handoff = True

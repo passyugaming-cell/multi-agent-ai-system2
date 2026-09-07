@@ -139,28 +139,44 @@ class ApprovalService:
         if isinstance(actions, dict):
             actions = [actions]
 
-        if execution.current_step < len(actions):
-            action_def = actions[execution.current_step]
-            action_type = approval.action_type
-            params = modified_params or action_def.get("params") or action_def
-            params["_already_approved"] = True
-
-            res = await ActionExecutor.execute(
-                action_type=action_type,
-                params=params,
-                context=execution.context,
-                session=self.session,
-                tenant_id=str(execution.tenant_id),
+        from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
+        active_actor = get_actor_context()
+        token = None
+        if not active_actor:
+            wf_actor = AuthenticatedActor(
+                user_id=None,
+                tenant_id=approval.tenant_id,
+                role="system_workflow",
+                permissions={"business.read", "product.read", "knowledge.read"},
             )
+            token = set_actor_context(wf_actor)
 
-            if res.success and not res.requires_approval:
-                execution.context.update(res.output)
-                execution.current_step += 1
-                execution.status = "RUNNING"
+        try:
+            if execution.current_step < len(actions):
+                action_def = actions[execution.current_step]
+                action_type = approval.action_type
+                params = modified_params or action_def.get("params") or action_def
+                params["_already_approved"] = True
 
-                # Resume engine loop for subsequent steps
-                engine = WorkflowEngine(self.session)
-                await engine.run_execution_pipeline(execution, wf)
-            else:
-                execution.status = "FAILED"
-                execution.error = res.error
+                res = await ActionExecutor.execute(
+                    action_type=action_type,
+                    params=params,
+                    context=execution.context,
+                    session=self.session,
+                    tenant_id=str(execution.tenant_id),
+                )
+
+                if res.success and not res.requires_approval:
+                    execution.context.update(res.output)
+                    execution.current_step += 1
+                    execution.status = "RUNNING"
+
+                    # Resume engine loop for subsequent steps
+                    engine = WorkflowEngine(self.session)
+                    await engine.run_execution_pipeline(execution, wf)
+                else:
+                    execution.status = "FAILED"
+                    execution.error = res.error
+        finally:
+            if token:
+                reset_actor_context(token)

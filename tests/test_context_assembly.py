@@ -5,13 +5,14 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context, get_actor_context
 from app.core.context_assembly import (
     ContextAssemblyService,
     ContextAssemblyRequest,
     AssembledContext,
     FormattedPromptContext,
 )
+from app.core.context_assembly.service import _project_safe_fields, SAFE_PRODUCT_FIELDS, SAFE_BUSINESS_PROFILE_FIELDS
 from app.core.exceptions import AppException
 from app.database.models import Tenant, Product, BusinessProfile, KnowledgeItem, Conversation, Message, Customer
 from app.memory.service import MemoryService
@@ -19,13 +20,14 @@ from app.memory.schemas import MemoryCreateSchema, MemoryScope, MemoryType, Memo
 from app.tenants.business_service import BusinessDataService
 from app.schemas.domain import KnowledgeItemCreate
 from app.core.router import MessageRouter
+from app.core.workflows.actions import ActionExecutor
 from app.agents.sales.agent import SalesAgent
 from app.agents.support.agent import SupportAgent
 from app.agents.client_manager.agent import ClientManagerAgent
 from app.agents.data_manager.agent import DataManagerAgent
 from app.agents.analyst.agent import AnalystAgent
 from app.agents.owner_ai.orchestrator import OwnerAIOrchestrator
-from app.agents.base.schemas import AgentRequest
+from app.agents.base.schemas import AgentRequest, AgentRequestStatus
 from app.core.ai_gateway import AIResponse
 
 
@@ -539,3 +541,74 @@ async def test_11_messagerouter_deterministic_vs_fallback_paths(test_engine, set
                 assert "Can you help me choose a gift?" in ai_req_arg.user_message
         finally:
             reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_12_safe_field_allowlisting_excludes_secrets_completely():
+    """Test that sensitive fields injected into source objects/dicts never enter projected context."""
+    dirty_product_dict = {
+        "id": "prod_123",
+        "name": "Secure Item",
+        "type": "physical",
+        "sku": "SKU-123",
+        "price": 100000.0,
+        "currency": "IDR",
+        "stock": 10,
+        "stock_status": "IN_STOCK",
+        "password": "SUPER_SECRET_PASSWORD",
+        "api_key": "SK_LIVE_SECRET_KEY",
+        "jwt_secret": "JWT_SECRET_STRING",
+        "database_url": "postgresql://user:pass@localhost/db",
+        "refresh_token": "REFRESH_TOKEN_123",
+        "encryption_key": "32_BYTE_BASE64_KEY",
+    }
+
+    projected = _project_safe_fields(dirty_product_dict, SAFE_PRODUCT_FIELDS)
+
+    # Assert allowed fields ARE present
+    assert projected["name"] == "Secure Item"
+    assert projected["price"] == 100000.0
+
+    # Assert sensitive secret fields ARE COMPLETELY ABSENT
+    secret_keys = [
+        "password", "api_key", "jwt_secret", "database_url",
+        "refresh_token", "encryption_key"
+    ]
+    for key in secret_keys:
+        assert key not in projected
+
+
+@pytest.mark.asyncio
+async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, setup_tenants):
+    """Test that handlers fail closed (403 or FAILED status) when no actor context exists."""
+    t1_id, _ = setup_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        # 1. BaseAgent.run without actor -> FAILED
+        sales_agent = SalesAgent(enabled=True)
+        req = AgentRequest(
+            tenant_id=t1_id,
+            target_agent="ai_sales",
+            task_type="test_task",
+            objective="Test without actor",
+        )
+        res = await sales_agent.run(req, session)
+        assert res.status == AgentRequestStatus.FAILED
+        assert "Authentication required" in res.error
+
+        # 2. ContextAssemblyService without actor -> PERMISSION_DENIED
+        service = ContextAssemblyService(session)
+        assembly_req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales")
+        with pytest.raises(AppException) as exc_info:
+            await service.assemble_context(assembly_req)
+        assert exc_info.value.code == "PERMISSION_DENIED"
+
+        # 3. ActionExecutor call_agent without actor -> returns FAILED
+        wf_res = await ActionExecutor.execute(
+            action_type="call_agent",
+            params={"agent_name": "ai_sales", "objective": "Workflow test without actor"},
+            context={},
+            session=session,
+            tenant_id=str(t1_id),
+        )
+        assert wf_res.success is False
+        assert "Authentication required" in wf_res.error

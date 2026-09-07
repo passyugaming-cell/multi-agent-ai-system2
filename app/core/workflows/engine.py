@@ -34,6 +34,22 @@ class WorkflowEngine:
 
         tenant_uuid = uuid.UUID(event.tenant_id)
 
+        # Establish trusted actor context at workflow engine execution boundary
+        from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
+        wf_actor = AuthenticatedActor(
+            user_id=None,
+            tenant_id=tenant_uuid,
+            role="system_workflow",
+            permissions={"business.read", "product.read", "knowledge.read"},
+        )
+        token = set_actor_context(wf_actor)
+
+        try:
+            return await self._handle_event_internal(event, tenant_uuid)
+        finally:
+            reset_actor_context(token)
+
+    async def _handle_event_internal(self, event: EventSchema, tenant_uuid: uuid.UUID) -> list[WorkflowExecution]:
         # 1. Store event record
         evt_stmt = select(EventRecord).where(
             and_(EventRecord.tenant_id == tenant_uuid, EventRecord.event_id == event.event_id)
@@ -111,6 +127,26 @@ class WorkflowEngine:
         if execution.status in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "BLOCKED"):
             return
 
+        from app.core.context import get_actor_context, set_actor_context, reset_actor_context, AuthenticatedActor
+
+        active_actor = get_actor_context()
+        token = None
+        if not active_actor:
+            wf_actor = AuthenticatedActor(
+                user_id=None,
+                tenant_id=execution.tenant_id,
+                role="system_workflow",
+                permissions={"business.read", "product.read", "knowledge.read"},
+            )
+            token = set_actor_context(wf_actor)
+
+        try:
+            await self._run_execution_pipeline_internal(execution, workflow)
+        finally:
+            if token:
+                reset_actor_context(token)
+
+    async def _run_execution_pipeline_internal(self, execution: WorkflowExecution, workflow: WorkflowConfiguration) -> None:
         now = datetime.now(timezone.utc)
         execution.started_at = execution.started_at or now
 

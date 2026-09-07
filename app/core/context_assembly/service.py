@@ -82,6 +82,35 @@ SENSITIVE_KEYS = {
 }
 
 
+def _project_safe_fields(obj: Any, allowed_fields: set[str]) -> Dict[str, Any]:
+    """Projects an ORM model instance or dictionary exclusively through an explicit safe-field allowlist."""
+    if obj is None:
+        return {}
+
+    projected: Dict[str, Any] = {}
+    if isinstance(obj, dict):
+        for k in allowed_fields:
+            if k in obj and obj[k] is not None:
+                projected[k] = obj[k]
+    else:
+        for k in allowed_fields:
+            if hasattr(obj, k):
+                val = getattr(obj, k)
+                if val is not None:
+                    if isinstance(val, uuid.UUID):
+                        projected[k] = str(val)
+                    elif hasattr(val, "isoformat"):
+                        projected[k] = val.isoformat()
+                    elif hasattr(val, "__float__"):
+                        projected[k] = float(val)
+                    elif hasattr(val, "value"):
+                        projected[k] = val.value
+                    else:
+                        projected[k] = val
+
+    return projected
+
+
 def sanitize_data(data: Any) -> Any:
     """Recursively redacts or removes sensitive credentials and secret keys from context dictionaries."""
     if isinstance(data, dict):
@@ -216,31 +245,16 @@ class ContextAssemblyService:
                 if matched_prods:
                     active_prods = matched_prods
 
-            product_catalog_facts = [
-                {
-                    "id": str(p.id),
-                    "name": p.name,
-                    "type": p.type,
-                    "sku": p.sku,
-                    "price": float(p.price),
-                    "currency": p.currency,
-                    "stock": p.stock,
-                    "stock_status": p.stock_status,
-                    "variants": [
-                        {
-                            "name": v.name,
-                            "sku": v.sku,
-                            "price_override": float(v.price_override)
-                            if v.price_override is not None
-                            else None,
-                            "stock": v.stock,
-                        }
-                        for v in (p.variants or [])
-                        if v.is_active
-                    ],
-                }
-                for p in active_prods[:10]  # Limit to top relevant products
-            ]
+            product_catalog_facts = []
+            for p in active_prods[:10]:
+                p_dict = _project_safe_fields(p, SAFE_PRODUCT_FIELDS)
+                p_dict["variants"] = [
+                    _project_safe_fields(v, SAFE_VARIANT_FIELDS)
+                    for v in (p.variants or [])
+                    if getattr(v, "is_active", True)
+                ]
+                product_catalog_facts.append(p_dict)
+
             facts["product_catalog"] = product_catalog_facts
 
         # 4. Retrieve Approved & Active Knowledge Items
@@ -257,12 +271,7 @@ class ContextAssemblyService:
                     approved_items = filtered_know
 
             knowledge_data = [
-                {
-                    "title": k.title,
-                    "category": k.category_key,
-                    "content": k.content,
-                    "version": k.version,
-                }
+                _project_safe_fields(k, SAFE_KNOWLEDGE_FIELDS)
                 for k in approved_items[:10]
             ]
 
@@ -270,21 +279,12 @@ class ContextAssemblyService:
         if "customer" in categories and request.customer_id:
             cust = await self.cust_repo.get_by_id(request.tenant_id, request.customer_id)
             if cust:
-                customer_data = {
-                    "id": str(cust.id),
-                    "name": cust.name,
-                    "phone": cust.phone,
-                    "email": cust.email,
-                }
+                customer_data = _project_safe_fields(cust, SAFE_CUSTOMER_FIELDS)
 
         if "conversation" in categories and request.conversation_id:
             recent_msgs = await self.msg_repo.list_by_conversation(request.tenant_id, request.conversation_id, limit=10)
             conversation_history_data = [
-                {
-                    "direction": m.direction,
-                    "text": m.text,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
+                _project_safe_fields(m, SAFE_CONVERSATION_FIELDS)
                 for m in recent_msgs
             ]
 
@@ -297,27 +297,13 @@ class ContextAssemblyService:
             )
             if "business_memory" in categories:
                 business_memory_data = [
-                    {
-                        "key": m.key,
-                        "content": m.content,
-                        "memory_type": m.memory_type.value
-                        if hasattr(m.memory_type, "value")
-                        else str(m.memory_type),
-                        "importance": m.importance,
-                    }
+                    _project_safe_fields(m, SAFE_MEMORY_FIELDS)
                     for m in mem_context.business_memories
                 ]
 
             if "client_memory" in categories:
                 client_memory_data = [
-                    {
-                        "key": m.key,
-                        "content": m.content,
-                        "memory_type": m.memory_type.value
-                        if hasattr(m.memory_type, "value")
-                        else str(m.memory_type),
-                        "importance": m.importance,
-                    }
+                    _project_safe_fields(m, SAFE_MEMORY_FIELDS)
                     for m in mem_context.client_memories
                 ]
 
