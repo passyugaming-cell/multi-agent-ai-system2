@@ -22,6 +22,10 @@ import {
   CheckCircle2,
   ShieldCheck,
   Building,
+  Check,
+  X,
+  ChevronRight,
+  AlertCircle,
 } from "lucide-react";
 
 interface CustomerItem {
@@ -59,6 +63,9 @@ interface BusinessReadiness {
   readiness_status?: string;
   score?: number;
   percentage?: number;
+  completed_requirements?: string[];
+  incomplete_requirements?: string[];
+  blocking_requirements?: string[];
 }
 
 interface FinancialData {
@@ -172,6 +179,8 @@ export default function DashboardPage() {
     return timeB - timeA;
   }).slice(0, 5);
 
+  const readinessPercent = readiness?.percentage ?? readiness?.score ?? 0;
+
   return (
     <MainLayout>
       <div className="space-y-6">
@@ -190,7 +199,7 @@ export default function DashboardPage() {
                   size="sm"
                   className="text-[10px] uppercase font-mono"
                 >
-                  Readiness: {readiness.readiness_status} ({readiness.percentage ?? readiness.score ?? 0}%)
+                  Readiness: {readiness.readiness_status} ({readinessPercent}%)
                 </Badge>
               )}
             </div>
@@ -346,6 +355,133 @@ export default function DashboardPage() {
             )}
           </Card>
         </div>
+
+        {/* SECTION: BUSINESS READINESS CARD (STEP 5 REQUIREMENT) */}
+        <Card variant="default" className="border-blue-500/30 bg-gradient-to-r from-slate-900/90 to-blue-950/20">
+          <CardHeader>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <ShieldCheck className="w-4.5 h-4.5 text-blue-400" />
+                  <span>Kesiapan Bisnis (Business Readiness)</span>
+                </CardTitle>
+                <CardDescription>
+                  Apakah bisnis ini sudah siap menggunakan AI BOS secara otomatis?
+                </CardDescription>
+              </div>
+
+              {readiness && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xl font-extrabold font-mono text-white">
+                    {readinessPercent}%
+                  </span>
+                  <Badge
+                    variant={readiness.ready ? "success" : "warning"}
+                    size="sm"
+                    className="text-[10px] uppercase font-mono"
+                  >
+                    {readiness.readiness_status || (readiness.ready ? "READY" : "NEARLY_READY")}
+                  </Badge>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {isLoading ? (
+              <div className="space-y-2">
+                <div className="h-3 w-full bg-slate-800 rounded animate-pulse" />
+                <div className="h-8 w-1/2 bg-slate-800 rounded animate-pulse" />
+              </div>
+            ) : (
+              <>
+                {/* Progress Bar */}
+                <div className="space-y-1.5">
+                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden p-0.5 border border-slate-800">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        readiness?.ready
+                          ? "bg-emerald-500"
+                          : readinessPercent >= 60
+                          ? "bg-amber-500"
+                          : "bg-blue-500"
+                      }`}
+                      style={{ width: `${readinessPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Requirement Checklist Items */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
+                  {/* Business Profile */}
+                  <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex items-center justify-between text-xs">
+                    <span className="text-slate-300 font-medium">Profil Bisnis</span>
+                    {readiness?.completed_requirements?.some((r) => r.toLowerCase().includes("business") || r.toLowerCase().includes("profile")) ? (
+                      <span className="text-emerald-400 font-bold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Selesai
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-medium flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" /> Belum
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Product Catalog */}
+                  <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex items-center justify-between text-xs">
+                    <span className="text-slate-300 font-medium">Katalog Produk</span>
+                    {products.length > 0 ? (
+                      <span className="text-emerald-400 font-bold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> {products.length} Produk
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-medium flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" /> Belum
+                      </span>
+                    )}
+                  </div>
+
+                  {/* WhatsApp Integration */}
+                  <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex items-center justify-between text-xs">
+                    <span className="text-slate-300 font-medium">WhatsApp Cloud API</span>
+                    {readiness?.completed_requirements?.some((r) => r.toLowerCase().includes("whatsapp")) ? (
+                      <span className="text-emerald-400 font-bold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Terhubung
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-medium flex items-center gap-1">
+                        <X className="w-3.5 h-3.5 text-amber-400" /> Belum
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Call to Action Navigation */}
+                <div className="pt-2 flex items-center justify-between flex-wrap gap-2">
+                  <p className="text-[11px] text-slate-400">
+                    {readiness?.ready
+                      ? "Status operasional bisnis sudah SIAP (READY)."
+                      : "Lengkapi konfigurasi integrasi & profil untuk mengaktifkan AI BOS secara otomatis."}
+                  </p>
+
+                  <div className="flex items-center gap-2">
+                    <Link href="/settings">
+                      <Button variant="outline" size="sm" className="text-xs bg-slate-900 border-slate-800">
+                        <span>Pengaturan</span>
+                      </Button>
+                    </Link>
+
+                    <Link href="/integrations">
+                      <Button variant="primary" size="sm" className="text-xs">
+                        <span>Konfigurasi Integrasi</span>
+                        <ChevronRight className="w-3.5 h-3.5 ml-1" />
+                      </Button>
+                    </Link>
+                  </div>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Section: Quick Actions & Navigation Shortcuts */}
         <Card variant="default">

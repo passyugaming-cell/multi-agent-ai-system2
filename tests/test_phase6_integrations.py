@@ -85,6 +85,47 @@ async def test_connection_lifecycle_and_entitlement_gating(db_session: AsyncSess
     assert disconnected.status == "DISCONNECTED"
 
 
+def test_role_permissions_matrix():
+    from app.core.auth import ROLE_PERMISSIONS
+    from app.integrations.permissions import (
+        VIEW_INTEGRATIONS,
+        MANAGE_INTEGRATIONS,
+        MANAGE_CREDENTIALS,
+        EXECUTE_INTEGRATION,
+    )
+
+    owner_perms = ROLE_PERMISSIONS["owner"]
+    admin_perms = ROLE_PERMISSIONS["admin"]
+    member_perms = ROLE_PERMISSIONS["member"]
+
+    # 1. owner has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in owner_perms
+    # 2. owner has MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS in owner_perms
+    # 3. owner has MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS in owner_perms
+    # 4. owner has EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION in owner_perms
+
+    # 5. admin has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in admin_perms
+    # 6. admin has MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS in admin_perms
+    # 7. admin has MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS in admin_perms
+    # 8. admin has EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION in admin_perms
+
+    # 9. member only has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in member_perms
+    # 10. member does NOT have MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS not in member_perms
+    # 11. member does NOT have MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS not in member_perms
+    # 12. member does NOT have EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION not in member_perms
+
+
 @pytest.mark.asyncio
 async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
     plan_srv = PlanService(db_session)
@@ -104,7 +145,7 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
 
     service = IntegrationService(db_session)
 
-    # Lacks MANAGE_INTEGRATIONS
+    # Lacks MANAGE_INTEGRATIONS (e.g. member with only VIEW_INTEGRATIONS)
     with pytest.raises(PermissionDeniedError):
         await service.connect_integration(
             tenant_id=tenant_a.id,
@@ -113,7 +154,7 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
             actor_permissions={"VIEW_INTEGRATIONS"},
         )
 
-    # Valid permissions
+    # Valid permissions (e.g. owner/admin with MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS)
     conn = await service.connect_integration(
         tenant_id=tenant_a.id,
         integration_key="rest_api",
@@ -131,6 +172,36 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
             params={},
             actor_permissions={VIEW_INTEGRATIONS},
         )
+
+
+@pytest.mark.asyncio
+async def test_api_forged_permission_headers_rejection(async_client: AsyncClient, tenant_a):
+    from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+    from app.core.auth import ROLE_PERMISSIONS
+
+    # Member role has VIEW_INTEGRATIONS but NOT MANAGE_INTEGRATIONS or MANAGE_CREDENTIALS
+    member_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions=set(ROLE_PERMISSIONS.get("member", {VIEW_INTEGRATIONS})),
+    )
+    token = set_actor_context(member_actor)
+    try:
+        # Member attempts to call endpoint requiring MANAGE_INTEGRATIONS by forging client X-Actor-Permissions header
+        headers = {
+            "X-Tenant-ID": str(tenant_a.id),
+            "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS,EXECUTE_INTEGRATION",
+        }
+        resp = await async_client.post(
+            "/api/v1/integrations/connect/rest_api",
+            json={"credentials": {"api_key": "test"}},
+            headers=headers,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
