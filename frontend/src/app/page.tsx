@@ -103,43 +103,48 @@ export default function DashboardPage() {
         apiGet<FinancialData>("/analytics/financial"),
       ]);
 
+      const failedEndpoints: string[] = [];
+
       if (customersRes.status === "fulfilled") {
         setCustomers(customersRes.value || []);
+      } else {
+        failedEndpoints.push("Customer");
       }
+
       if (ordersRes.status === "fulfilled") {
         setOrders(ordersRes.value || []);
+      } else {
+        failedEndpoints.push("Pesanan");
       }
+
       if (productsRes.status === "fulfilled") {
         setProducts(productsRes.value || []);
+      } else {
+        failedEndpoints.push("Produk");
       }
+
       if (conversationsRes.status === "fulfilled") {
         setConversations(conversationsRes.value || []);
+      } else {
+        failedEndpoints.push("Percakapan");
       }
+
       if (readinessRes.status === "fulfilled") {
         setReadiness(readinessRes.value);
       }
+
       if (financialsRes.status === "fulfilled") {
         setFinancials(financialsRes.value);
       }
 
-      // Check if all core requests failed
-      const allFailed = [customersRes, ordersRes, productsRes].every(
-        (r) => r.status === "rejected"
-      );
-
-      if (allFailed) {
-        const firstErr = (customersRes as PromiseRejectedResult).reason;
-        if (firstErr instanceof ApiError) {
-          setErrorMsg(firstErr.message);
-        } else {
-          setErrorMsg("Gagal memuat data dashboard. Silakan periksa koneksi atau coba lagi.");
-        }
+      if (failedEndpoints.length > 0) {
+        setErrorMsg(`Sebagian data (${failedEndpoints.join(", ")}) belum dapat dimuat. Menyajikan data yang tersedia.`);
       }
     } catch (err) {
       if (err instanceof ApiError) {
         setErrorMsg(err.message);
       } else {
-        setErrorMsg("Terjadi kesalahan sistem saat memuat data.");
+        setErrorMsg("Terjadi kesalahan sistem saat memuat data dashboard.");
       }
     } finally {
       setIsLoading(false);
@@ -159,6 +164,13 @@ export default function DashboardPage() {
       maximumFractionDigits: 0,
     }).format(val);
   };
+
+  // Sort orders descending by created_at date for "Pesanan Terbaru" list
+  const recentOrders = [...orders].sort((a, b) => {
+    const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return timeB - timeA;
+  }).slice(0, 5);
 
   return (
     <MainLayout>
@@ -208,7 +220,7 @@ export default function DashboardPage() {
             <div className="flex items-start gap-2.5">
               <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
               <div>
-                <p className="font-semibold text-red-300">Gagal Memuat Sebagian Data</p>
+                <p className="font-semibold text-red-300">Status Sinkronisasi Data</p>
                 <p className="text-xs text-red-400 mt-0.5">{errorMsg}</p>
               </div>
             </div>
@@ -445,9 +457,9 @@ export default function DashboardPage() {
                     <div key={i} className="h-12 bg-slate-900/60 rounded-lg animate-pulse" />
                   ))}
                 </div>
-              ) : orders.length > 0 ? (
+              ) : recentOrders.length > 0 ? (
                 <div className="space-y-2.5">
-                  {orders.slice(0, 5).map((order) => (
+                  {recentOrders.map((order) => (
                     <div
                       key={order.id}
                       className="p-3 rounded-lg bg-slate-900/60 border border-slate-800/80 flex items-center justify-between text-xs"
