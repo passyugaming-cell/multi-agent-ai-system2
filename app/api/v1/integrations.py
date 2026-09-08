@@ -22,14 +22,11 @@ from app.integrations.permissions import (
     MANAGE_PAYMENTS,
     VIEW_PAYMENT_STATUS,
     REQUEST_REFUND,
-    APPROVE_REFUND,
 )
 from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
-from app.core.approvals import ApprovalService
 from app.integrations.oauth import generate_oauth_state, validate_oauth_state
 from app.core.auth import resolve_actor_permissions
-from app.core.context import get_tenant_id
 
 logger = logging.getLogger(__name__)
 

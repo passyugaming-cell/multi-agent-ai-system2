@@ -85,6 +85,47 @@ async def test_connection_lifecycle_and_entitlement_gating(db_session: AsyncSess
     assert disconnected.status == "DISCONNECTED"
 
 
+def test_role_permissions_matrix():
+    from app.core.auth import ROLE_PERMISSIONS
+    from app.integrations.permissions import (
+        VIEW_INTEGRATIONS,
+        MANAGE_INTEGRATIONS,
+        MANAGE_CREDENTIALS,
+        EXECUTE_INTEGRATION,
+    )
+
+    owner_perms = ROLE_PERMISSIONS["owner"]
+    admin_perms = ROLE_PERMISSIONS["admin"]
+    member_perms = ROLE_PERMISSIONS["member"]
+
+    # 1. owner has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in owner_perms
+    # 2. owner has MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS in owner_perms
+    # 3. owner has MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS in owner_perms
+    # 4. owner has EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION in owner_perms
+
+    # 5. admin has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in admin_perms
+    # 6. admin has MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS in admin_perms
+    # 7. admin has MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS in admin_perms
+    # 8. admin has EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION in admin_perms
+
+    # 9. member only has VIEW_INTEGRATIONS
+    assert VIEW_INTEGRATIONS in member_perms
+    # 10. member does NOT have MANAGE_INTEGRATIONS
+    assert MANAGE_INTEGRATIONS not in member_perms
+    # 11. member does NOT have MANAGE_CREDENTIALS
+    assert MANAGE_CREDENTIALS not in member_perms
+    # 12. member does NOT have EXECUTE_INTEGRATION
+    assert EXECUTE_INTEGRATION not in member_perms
+
+
 @pytest.mark.asyncio
 async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
     plan_srv = PlanService(db_session)
