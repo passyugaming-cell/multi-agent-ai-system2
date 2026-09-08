@@ -238,16 +238,32 @@ class OrderRepository(BaseRepository[Order]):
     def __init__(self, session: AsyncSession):
         super().__init__(Order, session)
 
-    async def get_by_id_with_items(
-        self, tenant_id: uuid.UUID, order_id: uuid.UUID
-    ) -> Order | None:
+    async def get_by_id(self, tenant_id: uuid.UUID, entity_id: uuid.UUID) -> Order | None:
         stmt = (
             select(Order)
             .options(selectinload(Order.items))
-            .where(Order.tenant_id == tenant_id, Order.id == order_id)
+            .where(Order.tenant_id == tenant_id, Order.id == entity_id)
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_all(
+        self, tenant_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> Sequence[Order]:
+        stmt = (
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.tenant_id == tenant_id)
+            .offset(skip)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def get_by_id_with_items(
+        self, tenant_id: uuid.UUID, order_id: uuid.UUID
+    ) -> Order | None:
+        return await self.get_by_id(tenant_id, order_id)
 
     async def create_order_with_items(
         self,
