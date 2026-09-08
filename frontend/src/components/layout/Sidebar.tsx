@@ -62,6 +62,12 @@ const activeNavItems: NavItem[] = [
     icon: Package,
     status: "active",
   },
+  {
+    title: "Integrations",
+    href: "/integrations",
+    icon: Layers,
+    status: "active",
+  },
 ];
 
 const comingSoonNavItems: NavItem[] = [
@@ -87,12 +93,6 @@ const comingSoonNavItems: NavItem[] = [
     title: "Analytics",
     href: "/analytics",
     icon: BarChart3,
-    status: "coming_soon",
-  },
-  {
-    title: "Integrations",
-    href: "/integrations",
-    icon: Layers,
     status: "coming_soon",
   },
 ];
@@ -236,7 +236,7 @@ export const Sidebar: React.FC = () => {
             <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
             <div className="flex flex-col min-w-0">
               <span className="text-xs font-medium text-slate-300 truncate">System Active</span>
-              <span className="text-[10px] text-slate-500 truncate">Core v1.0 • Step 1</span>
+              <span className="text-[10px] text-slate-500 truncate">Core v1.0 • Step 5</span>
             </div>
           </div>
         </div>
