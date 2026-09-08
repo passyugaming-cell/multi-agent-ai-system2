@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
+from app.api.v1.auth import router as auth_router
 from app.api.v1.business import router as business_router
 from app.api.v1.business_profile import router as business_profile_router
 from app.api.v1.products import router as products_router
@@ -49,9 +51,18 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# Register Middlewares (Order: RequestLoggingMiddleware runs outside TenantMiddleware)
+# Register Middlewares (Order: CORSMiddleware must wrap on the outside to handle preflights & CORS headers)
 app.add_middleware(TenantMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
+
+origins = [o.strip() for o in settings.FRONTEND_ORIGINS.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*"],
+)
 
 
 # Register Exception Handlers for consistent JSON error formatting
@@ -107,6 +118,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Include Routers
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(health_router)  # Also expose /health and /health/db at root
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(business_router, prefix="/api/v1")
 app.include_router(business_profile_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
