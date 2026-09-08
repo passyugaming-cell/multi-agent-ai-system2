@@ -6,6 +6,10 @@ import { Bell, ChevronDown, Building2, LogOut, Check, ArrowRightLeft } from "luc
 import { Avatar } from "@/components/ui/Avatar";
 import { useAuth } from "@/lib/auth-context";
 
+/**
+ * App Shell Header with active tenant context indicator & switcher integration.
+ * Triggers `POST /api/v1/auth/select-tenant` via `selectTenant` from `useAuth()`.
+ */
 export const Header: React.FC = () => {
   const { user, tenants, activeTenant, selectTenant, logout } = useAuth();
   const [showTenantMenu, setShowTenantMenu] = useState(false);
@@ -36,7 +40,7 @@ export const Header: React.FC = () => {
       const { redirectTo } = await selectTenant(tenantId);
       router.push(redirectTo);
     } catch {
-      // Handled in context
+      // Handled in auth context
     }
   };
 
