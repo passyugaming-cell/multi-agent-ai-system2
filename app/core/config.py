@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     JWT_SECRET: str = "dev_secret_jwt_key_32_characters_long_for_security"
     ENCRYPTION_KEY: str = "dev_encryption_key_32_bytes_long_secret"
+    FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.1-flash-lite"

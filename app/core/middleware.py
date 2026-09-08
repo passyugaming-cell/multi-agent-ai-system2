@@ -2,9 +2,19 @@ from uuid import UUID
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from sqlalchemy import select
 
-from app.core.context import reset_tenant_context, set_tenant_context
+from app.core.context import (
+    reset_tenant_context,
+    set_tenant_context,
+    set_actor_context,
+    reset_actor_context,
+    AuthenticatedActor,
+)
+from app.core.auth import ROLE_PERMISSIONS
+from app.core.auth_service import verify_and_decode_token
 from app.database.session import async_session_factory
+from app.database.models.user import User
 from app.tenants.repository import TenantRepository
 
 
@@ -21,16 +31,17 @@ EXCLUDED_PATHS = {
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
-    """Middleware to resolve tenant context from X-Tenant-ID header."""
+    """Middleware to resolve tenant context from X-Tenant-ID header and populate authenticated actor context from database user role."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
 
-        # Skip tenant check for system, docs, and external provider webhooks
+        # Skip tenant check for system, docs, auth endpoints, and external webhooks
         if (
             path in EXCLUDED_PATHS
             or path.startswith("/docs")
             or path.startswith("/openapi.json")
+            or path.startswith("/api/v1/auth")
             or path.startswith("/api/v1/billing/webhooks")
             or path.startswith("/api/v1/webhooks")
         ):
@@ -88,10 +99,41 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     },
                 )
 
+            # Validate authentication and resolve per-tenant user role from database
+            actor_token = None
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                raw_jwt = auth_header.split(" ", 1)[1]
+                jwt_payload = await verify_and_decode_token(raw_jwt)
+                if jwt_payload and "sub" in jwt_payload and "tenant_ids" in jwt_payload:
+                    if str(tenant_id) in jwt_payload["tenant_ids"]:
+                        email = jwt_payload["sub"]
+                        user_stmt = select(User).where(
+                            User.email == email,
+                            User.tenant_id == tenant_id,
+                            User.is_active == True,
+                        )
+                        user_result = await db.execute(user_stmt)
+                        user = user_result.scalars().first()
+
+                        if user:
+                            role = getattr(user, "role", "owner")
+                            permissions = ROLE_PERMISSIONS.get(role, set())
+                            actor = AuthenticatedActor(
+                                user_id=user.id,
+                                tenant_id=tenant_id,
+                                role=role,
+                                permissions=set(permissions),
+                            )
+                            actor_token = set_actor_context(actor)
+
         request.state.tenant_id = str(tenant_id)
-        token = set_tenant_context(tenant_id)
+        tenant_token = set_tenant_context(tenant_id)
+
         try:
             response = await call_next(request)
             return response
         finally:
-            reset_tenant_context(token)
+            reset_tenant_context(tenant_token)
+            if actor_token is not None:
+                reset_actor_context(actor_token)
