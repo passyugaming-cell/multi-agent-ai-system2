@@ -81,7 +81,7 @@ async def connect_integration(
     integration_key: str,
     payload: IntegrationConnectionCreate,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -106,7 +106,7 @@ async def connect_integration(
 async def google_calendar_authorize(
     redirect_uri: str | None = None,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
 ) -> dict[str, str]:
     if permissions is None or MANAGE_INTEGRATIONS not in permissions:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
@@ -124,7 +124,7 @@ async def google_calendar_callback(
     state: str,
     redirect_uri: str | None = None,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
@@ -172,7 +172,7 @@ async def google_calendar_callback(
 async def google_calendar_list_calendars(
     connection_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -196,7 +196,7 @@ async def google_calendar_list_events(
     connection_id: uuid.UUID,
     calendar_id: str = "primary",
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -221,7 +221,7 @@ async def google_calendar_get_event(
     event_id: str,
     calendar_id: str = "primary",
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -247,7 +247,7 @@ async def google_calendar_update_event(
     payload: dict[str, Any],
     calendar_id: str = "primary",
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -273,7 +273,7 @@ async def google_calendar_delete_event(
     event_id: str,
     calendar_id: str = "primary",
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -298,7 +298,7 @@ async def google_calendar_create_event(
     payload: dict[str, Any],
     idempotency_key: str | None = Header(None, alias="X-Idempotency-Key"),
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -323,7 +323,7 @@ async def google_calendar_check_availability(
     connection_id: uuid.UUID,
     payload: dict[str, Any],
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -347,7 +347,7 @@ async def google_calendar_check_availability(
 async def google_sheets_authorize(
     redirect_uri: str | None = None,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
 ) -> dict[str, str]:
     if permissions is None or MANAGE_INTEGRATIONS not in permissions:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
@@ -366,7 +366,7 @@ async def google_sheets_callback(
     state: str,
     redirect_uri: str | None = None,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
@@ -414,7 +414,7 @@ async def google_sheets_callback(
 async def google_sheets_list_spreadsheets(
     connection_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -438,7 +438,7 @@ async def google_sheets_get_spreadsheet(
     spreadsheet_id: str,
     connection_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -463,7 +463,7 @@ async def google_sheets_read_values(
     connection_id: uuid.UUID,
     range: str = "Sheet1!A1:Z100",
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -489,7 +489,7 @@ async def google_sheets_append_values(
     payload: dict[str, Any],
     idempotency_key: str | None = Header(None, alias="X-Idempotency-Key"),
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -516,7 +516,7 @@ async def google_sheets_update_values(
     connection_id: uuid.UUID,
     payload: dict[str, Any],
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -541,7 +541,7 @@ async def google_sheets_update_values(
 async def midtrans_create_payment(
     payload: dict[str, Any],
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is not None and MANAGE_PAYMENTS not in permissions and MANAGE_INTEGRATIONS not in permissions:
@@ -587,7 +587,7 @@ async def midtrans_create_payment(
 async def midtrans_get_payment_status(
     payment_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is not None and VIEW_PAYMENT_STATUS not in permissions and VIEW_INTEGRATIONS not in permissions:
@@ -615,7 +615,7 @@ async def midtrans_get_payment_status(
 async def midtrans_cancel_payment(
     payment_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is not None and MANAGE_PAYMENTS not in permissions and MANAGE_INTEGRATIONS not in permissions:
@@ -654,7 +654,7 @@ async def midtrans_refund_payment(
     payment_id: uuid.UUID,
     payload: dict[str, Any],
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     if permissions is not None and REQUEST_REFUND not in permissions and MANAGE_INTEGRATIONS not in permissions:
@@ -718,7 +718,7 @@ async def midtrans_refund_payment(
 async def disconnect_integration(
     connection_id: uuid.UUID,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
@@ -735,7 +735,7 @@ async def execute_operation(
     connection_id: uuid.UUID,
     payload: OperationExecutionRequest,
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)

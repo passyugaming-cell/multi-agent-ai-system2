@@ -12,16 +12,27 @@ ROLE_PERMISSIONS = {
         "business.read", "business.write",
         "product.read", "product.write",
         "knowledge.read", "knowledge.write", "knowledge.approve",
+        "VIEW_INTEGRATIONS", "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "EXECUTE_INTEGRATION",
+        "TEST_INTEGRATION", "VIEW_INTEGRATION_LOGS",
+        "MANAGE_PAYMENTS", "VIEW_PAYMENT_STATUS", "REQUEST_REFUND", "APPROVE_REFUND",
+        "VIEW_WHATSAPP_CONNECTION", "MANAGE_WHATSAPP_CONNECTION", "SEND_WHATSAPP_MESSAGE", "MANAGE_WHATSAPP_WEBHOOK",
     },
     "admin": {
         "business.read", "business.write",
         "product.read", "product.write",
         "knowledge.read", "knowledge.write", "knowledge.approve",
+        "VIEW_INTEGRATIONS", "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "EXECUTE_INTEGRATION",
+        "TEST_INTEGRATION", "VIEW_INTEGRATION_LOGS",
+        "MANAGE_PAYMENTS", "VIEW_PAYMENT_STATUS", "REQUEST_REFUND",
+        "VIEW_WHATSAPP_CONNECTION", "MANAGE_WHATSAPP_CONNECTION", "SEND_WHATSAPP_MESSAGE",
     },
     "member": {
         "business.read",
         "product.read",
         "knowledge.read",
+        "VIEW_INTEGRATIONS",
+        "VIEW_PAYMENT_STATUS",
+        "VIEW_WHATSAPP_CONNECTION",
     },
 }
 

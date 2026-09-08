@@ -23,17 +23,29 @@ import {
   Lock,
 } from "lucide-react";
 
+interface IntegrationDefinition {
+  id: string;
+  integration_key: string;
+  provider_key: string;
+  display_name: string;
+  category: string;
+  status?: string;
+  is_enabled: boolean;
+}
+
 interface IntegrationConnection {
   id: string;
-  tenant_id?: string;
-  integration_key?: string;
-  provider_key?: string;
-  display_name?: string;
+  tenant_id: string;
+  integration_id: string;
   status: string;
-  is_enabled?: boolean;
-  external_account_id?: string;
-  last_connected_at?: string;
-  updated_at?: string;
+  external_account_id?: string | null;
+  meta_data?: Record<string, unknown> | null;
+  last_connected_at?: string | null;
+  last_success_at?: string | null;
+  last_error_at?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface WhatsAppConnectResponse {
@@ -55,6 +67,7 @@ interface WhatsAppVerifyResponse {
 export default function IntegrationsPage() {
   const { activeTenant } = useAuth();
 
+  const [definitions, setDefinitions] = useState<IntegrationDefinition[]>([]);
   const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -69,21 +82,30 @@ export default function IntegrationsPage() {
   const [isSubmittingWa, setIsSubmittingWa] = useState<boolean>(false);
   const [waFeedbackMsg, setWaFeedbackMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  // Load Integration Connections
-  const loadConnections = useCallback(async () => {
+  // Load Both Integration Definitions & Tenant Connections
+  const loadData = useCallback(async () => {
     if (!activeTenant) return;
     setIsLoading(true);
     setErrorMsg(null);
 
     try {
-      const data = await apiGet<IntegrationConnection[]>("/integrations/connections");
-      setConnections(data || []);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setErrorMsg(err.message);
-      } else {
-        setErrorMsg("Gagal memuat status integrasi tenant.");
+      const [defsRes, connsRes] = await Promise.allSettled([
+        apiGet<IntegrationDefinition[]>("/integrations"),
+        apiGet<IntegrationConnection[]>("/integrations/connections"),
+      ]);
+
+      if (defsRes.status === "fulfilled") {
+        setDefinitions(defsRes.value || []);
       }
+      if (connsRes.status === "fulfilled") {
+        setConnections(connsRes.value || []);
+      }
+
+      if (defsRes.status === "rejected" && connsRes.status === "rejected") {
+        setErrorMsg("Gagal memuat daftar integrasi dan koneksi tenant.");
+      }
+    } catch {
+      setErrorMsg("Gagal memuat status integrasi tenant.");
     } finally {
       setIsLoading(false);
     }
@@ -91,16 +113,23 @@ export default function IntegrationsPage() {
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    loadConnections();
-  }, [loadConnections]);
+    loadData();
+  }, [loadData]);
 
-  // Helper to find connection status for a provider
-  const getConnection = (providerKey: string): IntegrationConnection | undefined => {
-    return connections.find(
-      (c) =>
-        c.provider_key?.toLowerCase() === providerKey.toLowerCase() ||
-        c.integration_key?.toLowerCase() === providerKey.toLowerCase()
+  // Helper to find definition for a provider
+  const getDefinition = (providerKey: string): IntegrationDefinition | undefined => {
+    return definitions.find(
+      (d) =>
+        d.provider_key.toLowerCase() === providerKey.toLowerCase() ||
+        d.integration_key.toLowerCase() === providerKey.toLowerCase()
     );
+  };
+
+  // Helper to find connection for a provider
+  const getConnection = (providerKey: string): IntegrationConnection | undefined => {
+    const def = getDefinition(providerKey);
+    if (!def) return undefined;
+    return connections.find((c) => c.integration_id === def.id);
   };
 
   const getStatusBadge = (status?: string) => {
@@ -146,7 +175,7 @@ export default function IntegrationsPage() {
       setWaAppSecret("");
 
       // Reload connection list
-      await loadConnections();
+      await loadData();
     } catch (err) {
       if (err instanceof ApiError) {
         setWaFeedbackMsg({ type: "error", text: err.message });
@@ -174,7 +203,7 @@ export default function IntegrationsPage() {
         text: `Verifikasi WhatsApp: ${res.message || "Koneksi terverifikasi aktif."}`,
       });
 
-      await loadConnections();
+      await loadData();
     } catch (err) {
       if (err instanceof ApiError) {
         setWaFeedbackMsg({ type: "error", text: err.message });
@@ -204,7 +233,7 @@ export default function IntegrationsPage() {
         text: "Integrasi WhatsApp berhasil diputuskan.",
       });
 
-      await loadConnections();
+      await loadData();
     } catch (err) {
       if (err instanceof ApiError) {
         setWaFeedbackMsg({ type: "error", text: err.message });
@@ -242,7 +271,7 @@ export default function IntegrationsPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={loadConnections}
+              onClick={loadData}
               disabled={isLoading}
               className="text-xs bg-slate-900/80 border-slate-800 hover:border-slate-700 text-slate-300"
             >
@@ -259,7 +288,7 @@ export default function IntegrationsPage() {
               <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
               <span>{errorMsg}</span>
             </div>
-            <Button variant="danger" size="sm" onClick={loadConnections} className="text-xs shrink-0">
+            <Button variant="danger" size="sm" onClick={loadData} className="text-xs shrink-0">
               Coba Lagi
             </Button>
           </div>
@@ -286,17 +315,15 @@ export default function IntegrationsPage() {
             <CardContent className="space-y-4 flex-1 flex flex-col justify-between">
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Phone Number ID:</span>
-                  <span className="font-mono text-slate-200">
-                    {waConn?.external_account_id || "Belum Dikonfigurasi"}
+                  <span className="text-slate-400">Status Koneksi Tenant:</span>
+                  <span className="font-medium text-slate-200">
+                    {waConn?.status || "DISCONNECTED"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Terakhir Sinkron:</span>
-                  <span className="text-slate-300">
-                    {waConn?.last_connected_at
-                      ? new Date(waConn.last_connected_at).toLocaleDateString("id-ID")
-                      : "N/A"}
+                  <span className="text-slate-400">ID Koneksi:</span>
+                  <span className="font-mono text-slate-300">
+                    {waConn?.id ? `${waConn.id.substring(0, 8)}...` : "Belum Dibuat"}
                   </span>
                 </div>
               </div>

@@ -104,7 +104,7 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
 
     service = IntegrationService(db_session)
 
-    # Lacks MANAGE_INTEGRATIONS
+    # Lacks MANAGE_INTEGRATIONS (e.g. member with only VIEW_INTEGRATIONS)
     with pytest.raises(PermissionDeniedError):
         await service.connect_integration(
             tenant_id=tenant_a.id,
@@ -113,7 +113,7 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
             actor_permissions={"VIEW_INTEGRATIONS"},
         )
 
-    # Valid permissions
+    # Valid permissions (e.g. owner/admin with MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS)
     conn = await service.connect_integration(
         tenant_id=tenant_a.id,
         integration_key="rest_api",
@@ -131,6 +131,18 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
             params={},
             actor_permissions={VIEW_INTEGRATIONS},
         )
+
+
+@pytest.mark.asyncio
+async def test_api_forged_permission_headers_rejection(async_client: AsyncClient, tenant_a):
+    # Attempt to bypass authentication by injecting client X-Actor-Permissions header
+    headers = {
+        "X-Tenant-ID": str(tenant_a.id),
+        "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS",
+    }
+    resp = await async_client.get("/api/v1/integrations", headers=headers)
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
 
 
 @pytest.mark.asyncio

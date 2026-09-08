@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy import select, and_
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.integrations import (
@@ -99,14 +100,11 @@ class IntegrationService:
         self._check_permission(actor_permissions, VIEW_INTEGRATIONS, allow_internal=allow_internal)
         stmt = (
             select(IntegrationConnection)
+            .options(selectinload(IntegrationConnection.integration))
             .where(IntegrationConnection.tenant_id == tenant_id)
             .order_by(IntegrationConnection.created_at.desc())
         )
-        conns = list((await self.session.execute(stmt)).scalars().all())
-        for conn in conns:
-            stmt_int = select(Integration).where(Integration.id == conn.integration_id)
-            conn.integration = (await self.session.execute(stmt_int)).scalar_one()
-        return conns
+        return list((await self.session.execute(stmt)).scalars().all())
 
     async def connect_integration(
         self,
@@ -454,6 +452,7 @@ class IntegrationService:
         self._check_permission(actor_permissions, VIEW_INTEGRATIONS, allow_internal=allow_internal)
         stmt = (
             select(IntegrationConnection)
+            .options(selectinload(IntegrationConnection.integration))
             .join(Integration, IntegrationConnection.integration_id == Integration.id)
             .where(
                 and_(
@@ -463,11 +462,7 @@ class IntegrationService:
                 )
             )
         )
-        conn = (await self.session.execute(stmt)).scalars().first()
-        if conn:
-            stmt_int = select(Integration).where(Integration.id == conn.integration_id)
-            conn.integration = (await self.session.execute(stmt_int)).scalar_one()
-        return conn
+        return (await self.session.execute(stmt)).scalars().first()
 
     async def get_webhook_secret(self, tenant_id: uuid.UUID, provider: str) -> str | None:
         """Resolves active webhook secret for tenant and provider safely."""
@@ -519,6 +514,7 @@ class IntegrationService:
     ) -> IntegrationConnection:
         stmt = (
             select(IntegrationConnection)
+            .options(selectinload(IntegrationConnection.integration))
             .where(
                 and_(
                     IntegrationConnection.tenant_id == tenant_id,
@@ -529,9 +525,6 @@ class IntegrationService:
         conn = (await self.session.execute(stmt)).scalar_one_or_none()
         if not conn:
             raise ConnectionNotFoundError(str(connection_id))
-
-        stmt_int = select(Integration).where(Integration.id == conn.integration_id)
-        conn.integration = (await self.session.execute(stmt_int)).scalar_one()
         return conn
 
     def _validate_transition(self, current_status: str, target_status: str) -> None:
