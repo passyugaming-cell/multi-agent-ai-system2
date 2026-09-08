@@ -240,6 +240,23 @@ async def test_cross_tenant_integration_connections_isolation(async_client: Asyn
         # Tenant B attempts to disconnect Tenant A's connection -> HTTP 404 or 403
         res_disc_b = await async_client.post(f"/api/v1/integrations/connections/{conn_a.id}/disconnect", headers=headers_b)
         assert res_disc_b.status_code in (404, 403)
+
+        # Explicit assertion: Verify response does NOT leak Tenant A sensitive data or connection metadata
+        res_text = res_disc_b.text.lower()
+        assert str(conn_a.id).lower() not in res_text
+        assert str(tenant_a.id).lower() not in res_text
+        assert "api_key" not in res_text
+        assert "token" not in res_text
+        assert "secret" not in res_text
+        assert "password" not in res_text
+
+        if res_disc_b.headers.get("content-type", "").startswith("application/json"):
+            body = res_disc_b.json()
+            assert isinstance(body, dict)
+            # Ensure detail message does not expose tenant_a details or connection metadata
+            detail_str = str(body.get("detail", "")).lower()
+            assert str(conn_a.id).lower() not in detail_str
+            assert str(tenant_a.id).lower() not in detail_str
     finally:
         reset_actor_context(token_b)
 
