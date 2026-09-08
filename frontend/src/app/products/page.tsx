@@ -48,7 +48,7 @@ export default function ProductsPage() {
           <CardHeader>
             <CardTitle>Katalog Produk Utama</CardTitle>
             <CardDescription>
-              Modul produk ini sepenuhnya aktif dan unlocked. Siap untuk manajemen inventory.
+              Modul produk ini aktif dan unlocked sebagai antarmuka manajemen inventory MVP.
             </CardDescription>
           </CardHeader>
           <CardContent>

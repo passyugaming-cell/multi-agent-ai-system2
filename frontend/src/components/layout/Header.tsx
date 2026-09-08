@@ -1,9 +1,8 @@
 "use client";
 
 import React from "react";
-import { Bell, ChevronDown, Building2, ShieldCheck } from "lucide-react";
+import { Bell, ChevronDown, Building2 } from "lucide-react";
 import { Avatar } from "@/components/ui/Avatar";
-import { Badge } from "@/components/ui/Badge";
 
 export const Header: React.FC = () => {
   return (
@@ -21,14 +20,9 @@ export const Header: React.FC = () => {
               </span>
               <ChevronDown className="w-3 h-3 text-slate-500 group-hover:text-slate-300" />
             </div>
-            <span className="text-[10px] text-slate-500 font-medium">Tenant ID: demo-tenant-01</span>
+            <span className="text-[10px] text-slate-500 font-medium">Demo Tenant ID: demo-tenant-01</span>
           </div>
         </div>
-
-        <Badge variant="success" size="sm" className="hidden sm:inline-flex items-center gap-1 text-[10px]">
-          <ShieldCheck className="w-3 h-3" />
-          <span>Verified</span>
-        </Badge>
       </div>
 
       {/* Right: Notifications & User Avatar Placeholder */}
@@ -46,10 +40,10 @@ export const Header: React.FC = () => {
 
         {/* User Identity Profile Placeholder */}
         <div className="flex items-center gap-2.5 pl-1 cursor-pointer">
-          <Avatar name="Owner Business" status="online" size="sm" />
+          <Avatar name="Owner Account" size="sm" />
           <div className="hidden md:flex flex-col text-left">
             <span className="text-xs font-medium text-slate-200 leading-none">Business Owner</span>
-            <span className="text-[10px] text-slate-500 mt-0.5">owner@aibos.internal</span>
+            <span className="text-[10px] text-slate-500 mt-0.5">Owner Account (Demo)</span>
           </div>
         </div>
       </div>

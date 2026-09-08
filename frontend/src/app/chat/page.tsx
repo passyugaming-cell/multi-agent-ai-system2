@@ -54,7 +54,7 @@ export default function ChatPage() {
             <p className="text-xs text-slate-400 max-w-sm mb-4">
               Pilih salah satu percakapan dari daftar di sebelah kiri untuk melihat pesan dan berinteraksi.
             </p>
-            <Badge variant="outline" size="sm">WhatsApp Cloud API Ready</Badge>
+            <Badge variant="outline" size="sm">WhatsApp Chat Interface</Badge>
           </Card>
         </div>
       </div>

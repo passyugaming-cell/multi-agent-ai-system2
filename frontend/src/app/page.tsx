@@ -2,7 +2,7 @@ import React from "react";
 import { MainLayout } from "@/components/layout/MainLayout";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { MessageSquare, ShoppingBag, Users, Package, ArrowUpRight, Activity } from "lucide-react";
+import { MessageSquare, ShoppingBag, Users, Package, ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 
 export default function DashboardPage() {
@@ -14,17 +14,11 @@ export default function DashboardPage() {
           <div>
             <div className="flex items-center gap-2 mb-1">
               <h1 className="text-2xl font-bold tracking-tight text-white">Dashboard Overview</h1>
-              <Badge variant="default" size="sm">System Ready</Badge>
+              <Badge variant="secondary" size="sm">MVP Preview</Badge>
             </div>
             <p className="text-sm text-slate-400">
-              Selamat datang di AI Business OS. Ringkasan aktivitas dan performa bisnis Anda.
+              Selamat datang di AI Business OS. Pratinjau antarmuka dan modul bisnis Anda.
             </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-1.5">
-              <Activity className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Status Multi-Tenant Active</span>
-            </span>
           </div>
         </div>
 
@@ -37,8 +31,8 @@ export default function DashboardPage() {
                 <MessageSquare className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-2xl font-bold text-white mb-1">Active Shell</div>
-            <p className="text-xs text-slate-500">Koneksi WhatsApp Cloud API</p>
+            <div className="text-2xl font-bold text-white mb-1">UI Preview</div>
+            <p className="text-xs text-slate-500">Antarmuka inbox pesan</p>
           </Card>
 
           <Card variant="glass" className="p-5">
@@ -48,8 +42,8 @@ export default function DashboardPage() {
                 <ShoppingBag className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-2xl font-bold text-white mb-1">0 Orders</div>
-            <p className="text-xs text-slate-500">Pemesanan realtime</p>
+            <div className="text-2xl font-bold text-white mb-1">UI Preview</div>
+            <p className="text-xs text-slate-500">Antarmuka daftar transaksi</p>
           </Card>
 
           <Card variant="glass" className="p-5">
@@ -59,8 +53,8 @@ export default function DashboardPage() {
                 <Users className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-2xl font-bold text-white mb-1">0 Contacts</div>
-            <p className="text-xs text-slate-500">Database pelanggan</p>
+            <div className="text-2xl font-bold text-white mb-1">UI Preview</div>
+            <p className="text-xs text-slate-500">Antarmuka direktori kontak</p>
           </Card>
 
           <Card variant="glass" className="p-5">
@@ -71,7 +65,7 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="text-2xl font-bold text-white mb-1">Active</div>
-            <p className="text-xs text-slate-500">Manajemen varian & stok</p>
+            <p className="text-xs text-slate-500">Antarmuka produk & varian</p>
           </Card>
         </div>
 
@@ -79,7 +73,7 @@ export default function DashboardPage() {
         <Card variant="default">
           <CardHeader>
             <CardTitle>Fitur Utama MVP</CardTitle>
-            <CardDescription>Akses cepat ke modul fungsional utama AI BOS</CardDescription>
+            <CardDescription>Akses cepat ke modul antarmuka utama AI BOS</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -91,7 +85,7 @@ export default function DashboardPage() {
                   </div>
                   <ArrowUpRight className="w-4 h-4 text-slate-500 group-hover:text-blue-400 transition-colors" />
                 </div>
-                <p className="text-xs text-slate-400">Layanan pesan terpusat & riwayat interaksi WhatsApp.</p>
+                <p className="text-xs text-slate-400">Pratinjau antarmuka percakapan WhatsApp.</p>
               </Link>
 
               <Link href="/orders" className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 transition-all group">
@@ -102,7 +96,7 @@ export default function DashboardPage() {
                   </div>
                   <ArrowUpRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition-colors" />
                 </div>
-                <p className="text-xs text-slate-400">Manajemen status transaksi dan transaksi pelanggan.</p>
+                <p className="text-xs text-slate-400">Pratinjau modul transaksi dan status pesanan.</p>
               </Link>
 
               <Link href="/products" className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 transition-all group">
@@ -113,7 +107,7 @@ export default function DashboardPage() {
                   </div>
                   <Badge variant="success" size="sm" className="text-[9px]">Unlocked</Badge>
                 </div>
-                <p className="text-xs text-slate-400">Kelola katalog produk, harga, dan ketersediaan stok.</p>
+                <p className="text-xs text-slate-400">Pratinjau katalog produk, harga, dan varian.</p>
               </Link>
             </div>
           </CardContent>

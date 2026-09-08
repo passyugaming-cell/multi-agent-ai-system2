@@ -25,13 +25,13 @@ export default function SettingsPage() {
             <CardHeader>
               <div className="flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-blue-400" />
-                <CardTitle>Profil Tenant</CardTitle>
+                <CardTitle>Profil Tenant (Demo Placeholder)</CardTitle>
               </div>
-              <CardDescription>Informasi dasar identitas bisnis</CardDescription>
+              <CardDescription>Pratinjau struktur identitas bisnis</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label className="text-xs font-medium text-slate-400 block mb-1">Nama Tenant</label>
+                <label className="text-xs font-medium text-slate-400 block mb-1">Nama Tenant Placeholder</label>
                 <input
                   type="text"
                   value="Demo Merchant Tenant"
@@ -40,7 +40,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium text-slate-400 block mb-1">Tenant ID</label>
+                <label className="text-xs font-medium text-slate-400 block mb-1">Demo Tenant ID</label>
                 <input
                   type="text"
                   value="demo-tenant-01"
@@ -65,7 +65,7 @@ export default function SettingsPage() {
                   <Key className="w-4 h-4 text-slate-400" />
                   <span className="text-xs font-medium text-slate-300">Isolasi Tenant DB</span>
                 </div>
-                <Badge variant="success" size="sm">Strict Fail-Closed</Badge>
+                <Badge variant="outline" size="sm">Backend Core Ready</Badge>
               </div>
               <p className="text-xs text-slate-500">
                 Pengaturan integrasi dan auth backend akan dikonfigurasi pada tahap berikutnya.
