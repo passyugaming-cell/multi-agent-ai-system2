@@ -249,9 +249,9 @@ async def select_tenant(
     }
     updated_token = create_access_token(new_token_payload)
 
-    # Revoke old token in Redis
+    # Revoke old token in Redis using old token's exp timestamp
     if token_payload.get("jti"):
-        await revoke_token_redis(token_payload["jti"])
+        await revoke_token_redis(token_payload["jti"], exp_timestamp=token_payload.get("exp"))
 
     return SelectTenantResponse(
         access_token=updated_token,
@@ -261,11 +261,11 @@ async def select_tenant(
 
 @router.post("/logout")
 async def logout(authorization: Optional[str] = Header(None)):
-    """Logout user and revoke active server-side JWT token in Redis."""
+    """Logout user and revoke active server-side JWT token in Redis using token's exp timestamp."""
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
         payload = await verify_and_decode_token(token)
         if payload and payload.get("jti"):
-            await revoke_token_redis(payload["jti"])
+            await revoke_token_redis(payload["jti"], exp_timestamp=payload.get("exp"))
 
     return {"message": "Logged out successfully"}

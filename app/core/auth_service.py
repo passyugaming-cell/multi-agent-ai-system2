@@ -16,10 +16,22 @@ ALGORITHM = "HS256"
 DEFAULT_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 
-async def revoke_token_redis(jti: str, ttl_seconds: int = 86400) -> None:
-    """Revoke a JWT token server-side by storing its JTI in Redis with TTL matching token expiration."""
+async def revoke_token_redis(jti: str, exp_timestamp: Optional[int] = None) -> None:
+    """Revoke a JWT token server-side in Redis with TTL strictly matching remaining token lifetime."""
     if not jti:
         return
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    if exp_timestamp is not None:
+        ttl_seconds = exp_timestamp - now_ts
+    else:
+        ttl_seconds = DEFAULT_EXPIRE_MINUTES * 60
+
+    if ttl_seconds <= 0:
+        # Token is already expired; no need to store a revocation entry
+        return
+
     client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
         await client.set(f"auth:revoked_jti:{jti}", "1", ex=ttl_seconds)
