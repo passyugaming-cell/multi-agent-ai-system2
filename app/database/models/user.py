@@ -7,7 +7,7 @@ from app.database.base import BaseModel
 
 
 class User(BaseModel):
-    """User entity representing tenant-scoped users."""
+    """User entity representing tenant-scoped users with per-tenant RBAC role."""
 
     __tablename__ = "users"
 
@@ -19,6 +19,7 @@ class User(BaseModel):
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default="owner", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     __table_args__ = (

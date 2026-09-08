@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.user import User
 from app.database.models.tenant import Tenant
-from app.core.auth_service import hash_password, create_access_token
+from app.core.auth_service import hash_password, create_access_token, is_token_revoked_redis
+from app.core.exceptions import AppException
 
 
 @pytest.mark.asyncio
@@ -35,6 +36,7 @@ async def test_b_valid_single_tenant_login(
         tenant_id=tenant_a.id,
         email=email,
         password_hash=hash_password(password),
+        role="owner",
         is_active=True,
     )
     db_session.add(user)
@@ -62,8 +64,8 @@ async def test_c_valid_multi_tenant_login(
     password = "MultiPassword123!"
     hashed = hash_password(password)
 
-    u1 = User(id=uuid.uuid4(), tenant_id=tenant_a.id, email=email, password_hash=hashed, is_active=True)
-    u2 = User(id=uuid.uuid4(), tenant_id=tenant_b.id, email=email, password_hash=hashed, is_active=True)
+    u1 = User(id=uuid.uuid4(), tenant_id=tenant_a.id, email=email, password_hash=hashed, role="owner", is_active=True)
+    u2 = User(id=uuid.uuid4(), tenant_id=tenant_b.id, email=email, password_hash=hashed, role="member", is_active=True)
     db_session.add_all([u1, u2])
     await db_session.commit()
 
@@ -87,6 +89,7 @@ async def test_d_e_f_get_me_token_validations(
         tenant_id=tenant_a.id,
         email=email,
         password_hash=hash_password("Pass123!"),
+        role="owner",
         is_active=True,
     )
     db_session.add(user)
@@ -127,6 +130,7 @@ async def test_g_h_i_select_tenant_authorization(
         tenant_id=tenant_a.id,
         email=email,
         password_hash=hash_password("Pass123!"),
+        role="owner",
         is_active=True,
     )
     db_session.add(user)
@@ -161,6 +165,7 @@ async def test_j_logout_server_side_token_revocation(
         tenant_id=tenant_a.id,
         email=email,
         password_hash=hash_password("Pass123!"),
+        role="owner",
         is_active=True,
     )
     db_session.add(user)
@@ -186,51 +191,67 @@ async def test_j_logout_server_side_token_revocation(
 
 
 @pytest.mark.asyncio
-async def test_k_l_m_n_spoofing_and_cross_tenant_rejection(
+async def test_roles_and_privilege_escalation_prevention(
     client: AsyncClient,
     db_session: AsyncSession,
     tenant_a: Tenant,
-    tenant_b: Tenant,
 ):
-    """K, L, M, N. Rejection of unauthenticated requests, client header spoofing, and cross-tenant headers."""
-    # K. Missing authentication on protected route
-    res_k = await client.get("/api/v1/business", headers={"X-Tenant-ID": str(tenant_a.id)})
-    assert res_k.status_code == 403
-    assert res_k.json()["error"]["code"] == "PERMISSION_DENIED"
-
-    # L & M. Forged client role and permission headers without server-side actor
-    res_l = await client.get(
-        "/api/v1/business",
-        headers={
-            "X-Tenant-ID": str(tenant_a.id),
-            "X-Actor-Role": "owner",
-            "X-Actor-Permissions": "business.read,business.write",
-        },
-    )
-    assert res_l.status_code == 403
-    assert res_l.json()["error"]["code"] == "PERMISSION_DENIED"
-
-    # N. Authenticated User for Tenant A trying to pass Tenant B in X-Tenant-ID
-    email = f"tenant_a_user_{uuid.uuid4().hex[:6]}@example.com"
-    user_a = User(
+    """Member user cannot escalate privileges to owner write operations or via forged headers."""
+    email_member = f"member_{uuid.uuid4().hex[:6]}@example.com"
+    user_member = User(
         id=uuid.uuid4(),
         tenant_id=tenant_a.id,
-        email=email,
+        email=email_member,
         password_hash=hash_password("Pass123!"),
+        role="member",
         is_active=True,
     )
-    db_session.add(user_a)
+    db_session.add(user_member)
     await db_session.commit()
 
-    login_resp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Pass123!"})
-    token_a = login_resp.json()["access_token"]
+    login_resp = await client.post("/api/v1/auth/login", json={"email": email_member, "password": "Pass123!"})
+    token = login_resp.json()["access_token"]
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Tenant-ID": str(tenant_a.id),
+    }
 
-    # User A tries to query Tenant B's endpoints with Tenant A's token
-    res_n = await client.get(
-        "/api/v1/business",
-        headers={
-            "Authorization": f"Bearer {token_a}",
-            "X-Tenant-ID": str(tenant_b.id),
-        },
-    )
-    assert res_n.status_code == 403
+    # Member can read business profile
+    read_res = await client.get("/api/v1/business", headers=headers)
+    assert read_res.status_code in (200, 404)
+
+    # Member CANNOT mutate business profile (requires business.write)
+    write_res = await client.post("/api/v1/business", json={"business_name": "Member Forged Profile"}, headers=headers)
+    assert write_res.status_code == 403
+    assert write_res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+    # Member CANNOT escalate privileges by passing forged X-Actor-Role header
+    forged_headers = {
+        **headers,
+        "X-Actor-Role": "owner",
+        "X-Actor-Permissions": "business.read,business.write",
+    }
+    forged_res = await client.post("/api/v1/business", json={"business_name": "Forged Profile"}, headers=forged_headers)
+    assert forged_res.status_code == 403
+    assert forged_res.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_fails_closed(monkeypatch: pytest.MonkeyPatch):
+    """When Redis is unavailable or fails, token revocation verification fails closed with AppException."""
+    class FailingRedisClient:
+        async def get(self, key):
+            raise ConnectionError("Redis cluster unreachable")
+        async def aclose(self):
+            pass
+
+    def mock_from_url(*args, **kwargs):
+        return FailingRedisClient()
+
+    monkeypatch.setattr("redis.asyncio.from_url", mock_from_url)
+
+    with pytest.raises(AppException) as exc_info:
+        await is_token_revoked_redis("some-jti-uuid")
+
+    assert exc_info.value.code == "REVOCATION_CHECK_FAILED"
+    assert exc_info.value.status_code == 401

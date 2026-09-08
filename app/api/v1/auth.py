@@ -1,6 +1,6 @@
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +11,8 @@ from app.database.models.tenant import Tenant
 from app.core.auth_service import (
     verify_password,
     create_access_token,
-    decode_access_token,
-    revoke_token,
+    verify_and_decode_token,
+    revoke_token_redis,
 )
 from app.core.exceptions import AppException
 
@@ -145,7 +145,7 @@ async def get_me(
         )
 
     token = authorization.split(" ", 1)[1]
-    payload = decode_access_token(token)
+    payload = await verify_and_decode_token(token)
     if not payload or "sub" not in payload:
         raise AppException(
             code="SESSION_EXPIRED",
@@ -206,7 +206,7 @@ async def select_tenant(
         )
 
     token = authorization.split(" ", 1)[1]
-    token_payload = decode_access_token(token)
+    token_payload = await verify_and_decode_token(token)
     if not token_payload or "tenant_ids" not in token_payload:
         raise AppException(
             code="SESSION_EXPIRED",
@@ -249,9 +249,9 @@ async def select_tenant(
     }
     updated_token = create_access_token(new_token_payload)
 
-    # Revoke old token
+    # Revoke old token in Redis
     if token_payload.get("jti"):
-        revoke_token(token_payload["jti"])
+        await revoke_token_redis(token_payload["jti"])
 
     return SelectTenantResponse(
         access_token=updated_token,
@@ -261,11 +261,11 @@ async def select_tenant(
 
 @router.post("/logout")
 async def logout(authorization: Optional[str] = Header(None)):
-    """Logout user and revoke active server-side JWT token."""
+    """Logout user and revoke active server-side JWT token in Redis."""
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
-        payload = decode_access_token(token)
+        payload = await verify_and_decode_token(token)
         if payload and payload.get("jti"):
-            revoke_token(payload["jti"])
+            await revoke_token_redis(payload["jti"])
 
     return {"message": "Logged out successfully"}

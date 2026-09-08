@@ -1,28 +1,57 @@
 import uuid
+import logging
 import hashlib
 import hmac
 import secrets
 import jwt
+import redis.asyncio as aioredis
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Any, Dict, Set
+from typing import Optional, Any, Dict
 from app.core.config import settings
+from app.core.exceptions import AppException
+
+logger = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
 DEFAULT_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
-# Server-side in-memory revoked token identifiers (JTIs)
-_revoked_jtis: Set[str] = set()
+
+async def revoke_token_redis(jti: str, ttl_seconds: int = 86400) -> None:
+    """Revoke a JWT token server-side by storing its JTI in Redis with TTL matching token expiration."""
+    if not jti:
+        return
+    client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        await client.set(f"auth:revoked_jti:{jti}", "1", ex=ttl_seconds)
+    except Exception as e:
+        logger.error(f"Failed to revoke token in Redis for JTI {jti}: {e}")
+        raise AppException(
+            code="REVOCATION_STORAGE_FAILED",
+            message="Failed to process session revocation securely",
+            status_code=500,
+        )
+    finally:
+        await client.aclose()
 
 
-def revoke_token(jti: str) -> None:
-    """Revoke a JWT token by adding its unique identifier (jti) to the revoked set."""
-    if jti:
-        _revoked_jtis.add(jti)
-
-
-def is_token_revoked(jti: str) -> bool:
-    """Check if a JWT token has been revoked server-side."""
-    return jti in _revoked_jtis
+async def is_token_revoked_redis(jti: str) -> bool:
+    """Check if a JWT token JTI is revoked in Redis. Fails closed on Redis errors."""
+    if not jti:
+        return True
+    client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        val = await client.get(f"auth:revoked_jti:{jti}")
+        return val is not None
+    except Exception as e:
+        logger.error(f"Redis error checking revocation for JTI {jti}: {e}")
+        # Fail closed: reject authentication if revocation check fails
+        raise AppException(
+            code="REVOCATION_CHECK_FAILED",
+            message="Security token status verification failed",
+            status_code=401,
+        )
+    finally:
+        await client.aclose()
 
 
 def hash_password(password: str) -> str:
@@ -58,7 +87,6 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=DEFAULT_EXPIRE_MINUTES)
 
-    # Ensure JTI exists
     if "jti" not in to_encode:
         to_encode["jti"] = str(uuid.uuid4())
 
@@ -68,12 +96,23 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
 
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decode, verify signature and expiration, and check revocation status of JWT access token."""
+    """Decode and verify JWT signature and expiration claims (without async revocation check)."""
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[ALGORITHM])
-        jti = payload.get("jti")
-        if jti and is_token_revoked(jti):
-            return None
         return payload
     except Exception:
         return None
+
+
+async def verify_and_decode_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decode JWT access token, verify signature, expiration, and check server-side Redis revocation status."""
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+
+    jti = payload.get("jti")
+    if jti:
+        if await is_token_revoked_redis(jti):
+            return None
+
+    return payload
