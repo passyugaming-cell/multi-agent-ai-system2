@@ -117,6 +117,91 @@ async def test_d_e_f_get_me_token_validations(
 
 
 @pytest.mark.asyncio
+async def test_get_me_hardened_db_membership_and_stale_jwt_clearing(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+    inactive_tenant: Tenant,
+):
+    """/me rebuilds active tenant list from DB truth, clears stale active_tenant_id, and strictly follows user_id."""
+    email = f"hardened_me_{uuid.uuid4().hex[:6]}@example.com"
+    hashed = hash_password("Pass123!")
+
+    # u1 in tenant_a (active), u2 in tenant_b (deactivated), u3 in inactive_tenant (active user, inactive tenant)
+    u1 = User(id=uuid.uuid4(), tenant_id=tenant_a.id, email=email, password_hash=hashed, role="owner", is_active=True)
+    u2 = User(id=uuid.uuid4(), tenant_id=tenant_b.id, email=email, password_hash=hashed, role="member", is_active=False)
+    u3 = User(id=uuid.uuid4(), tenant_id=inactive_tenant.id, email=email, password_hash=hashed, role="admin", is_active=True)
+    db_session.add_all([u1, u2, u3])
+    await db_session.commit()
+
+    # Create token claiming membership in all 3 tenants and active_tenant_id = tenant_b (inactive membership)
+    stale_token = create_access_token({
+        "sub": email,
+        "user_id": str(u1.id),
+        "tenant_ids": [str(tenant_a.id), str(tenant_b.id), str(inactive_tenant.id)],
+        "active_tenant_id": str(tenant_b.id),
+    })
+
+    me_res = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {stale_token}"})
+    assert me_res.status_code == 200
+    data = me_res.json()
+
+    # Primary user identity comes strictly from u1.id
+    assert data["user"]["id"] == str(u1.id)
+    assert data["user"]["email"] == email
+
+    # Tenant list contains ONLY tenant_a (tenant_b membership inactive, inactive_tenant is inactive)
+    tenant_ids = [t["id"] for t in data["tenants"]]
+    assert tenant_ids == [str(tenant_a.id)]
+
+    # Stale active_tenant_id (tenant_b) was cleared and updated to tenant_a (single remaining valid tenant)
+    assert data["active_tenant_id"] == str(tenant_a.id)
+
+
+@pytest.mark.asyncio
+async def test_get_me_user_id_mismatch_and_deactivated_primary_user(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_a: Tenant,
+):
+    """/me rejects tokens where primary user_id is deactivated or email mismatches."""
+    email = f"mismatch_{uuid.uuid4().hex[:6]}@example.com"
+    user = User(
+        id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        email=email,
+        password_hash=hash_password("Pass123!"),
+        role="owner",
+        is_active=False,  # Deactivated
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    token = create_access_token({
+        "sub": email,
+        "user_id": str(user.id),
+        "tenant_ids": [str(tenant_a.id)],
+    })
+
+    # Deactivated primary user -> 401 UNAUTHORIZED
+    res1 = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert res1.status_code == 401
+
+    # User email mismatch in sub claim -> 401 UNAUTHORIZED
+    user.is_active = True
+    await db_session.commit()
+    mismatch_token = create_access_token({
+        "sub": "forged_email@example.com",
+        "user_id": str(user.id),
+        "tenant_ids": [str(tenant_a.id)],
+    })
+
+    res2 = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {mismatch_token}"})
+    assert res2.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_g_h_i_select_tenant_authorization(
     client: AsyncClient,
     db_session: AsyncSession,

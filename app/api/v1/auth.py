@@ -136,7 +136,7 @@ async def get_me(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return current user info and authorized tenant list from validated Bearer token."""
+    """Return DB-authoritative user profile and active authorized tenant list from validated Bearer token."""
     if not authorization or not authorization.startswith("Bearer "):
         raise AppException(
             code="UNAUTHORIZED",
@@ -146,29 +146,70 @@ async def get_me(
 
     token = authorization.split(" ", 1)[1]
     payload = await verify_and_decode_token(token)
-    if not payload or "sub" not in payload:
+    if not payload or "sub" not in payload or "user_id" not in payload:
         raise AppException(
             code="SESSION_EXPIRED",
             message="Your session has expired. Please sign in again.",
             status_code=401,
         )
 
-    email = payload["sub"]
-    stmt = select(User).where(User.email == email, User.is_active == True)
-    result = await db.execute(stmt)
-    users = result.scalars().all()
+    user_id_str = payload["user_id"]
+    try:
+        user_uuid = uuid.UUID(user_id_str)
+    except ValueError:
+        raise AppException(
+            code="UNAUTHORIZED",
+            message="Invalid user identity in token",
+            status_code=401,
+        )
 
-    if not users:
+    # 1. Resolve primary user record strictly by user_id from database
+    primary_user = await db.get(User, user_uuid)
+    if not primary_user or not primary_user.is_active:
         raise AppException(
             code="UNAUTHORIZED",
             message="User not found or inactive",
             status_code=401,
         )
 
-    tenant_ids = [u.tenant_id for u in users]
-    tenant_stmt = select(Tenant).where(Tenant.id.in_(tenant_ids), Tenant.is_active == True)
+    # 2. Verify sub claim (email) matches DB primary user record
+    if primary_user.email != payload["sub"]:
+        raise AppException(
+            code="UNAUTHORIZED",
+            message="User identity mismatch",
+            status_code=401,
+        )
+
+    # 3. Rebuild DB-authoritative active tenant list for this user identity
+    user_stmt = select(User).where(
+        User.email == primary_user.email,
+        User.is_active == True,
+    )
+    user_result = await db.execute(user_stmt)
+    active_user_records = user_result.scalars().all()
+
+    if not active_user_records:
+        raise AppException(
+            code="NO_ACTIVE_TENANTS",
+            message="User has no active authorized tenants",
+            status_code=403,
+        )
+
+    authorized_tenant_ids = [u.tenant_id for u in active_user_records]
+
+    tenant_stmt = select(Tenant).where(
+        Tenant.id.in_(authorized_tenant_ids),
+        Tenant.is_active == True,
+    )
     tenant_result = await db.execute(tenant_stmt)
-    tenants = tenant_result.scalars().all()
+    active_tenants = tenant_result.scalars().all()
+
+    if not active_tenants:
+        raise AppException(
+            code="NO_ACTIVE_TENANTS",
+            message="User has no active authorized tenants",
+            status_code=403,
+        )
 
     tenant_responses = [
         TenantResponse(
@@ -177,17 +218,27 @@ async def get_me(
             slug=t.slug,
             lifecycle_state=t.lifecycle_state,
         )
-        for t in tenants
+        for t in active_tenants
     ]
+
+    # 4. Validate active_tenant_id against current DB active tenant list
+    active_tenant_id = payload.get("active_tenant_id")
+    valid_tenant_id_set = {str(t.id) for t in active_tenants}
+
+    if active_tenant_id and active_tenant_id not in valid_tenant_id_set:
+        active_tenant_id = None
+
+    if not active_tenant_id and len(active_tenants) == 1:
+        active_tenant_id = str(active_tenants[0].id)
 
     return AuthTokenResponse(
         access_token=token,
         user=UserAuthResponse(
-            id=str(users[0].id),
-            email=users[0].email,
+            id=str(primary_user.id),
+            email=primary_user.email,
         ),
         tenants=tenant_responses,
-        active_tenant_id=payload.get("active_tenant_id"),
+        active_tenant_id=active_tenant_id,
     )
 
 
