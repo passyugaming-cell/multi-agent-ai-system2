@@ -186,3 +186,69 @@ async def test_tenant_isolation_customers_and_orders(async_client: AsyncClient, 
     # Tenant B direct GET customer_a by ID returns 404
     res_get_cust_b = await async_client.get(f"/api/v1/customers/{customer_a.id}", headers=headers_b)
     assert res_get_cust_b.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_integration_connections_isolation(async_client: AsyncClient, test_session):
+    from app.database.models.integrations import Integration, IntegrationConnection
+
+    # Create Tenant A and Tenant B
+    tenant_a = Tenant(name="Tenant Int Iso A", slug="tenant-int-iso-a", is_active=True)
+    tenant_b = Tenant(name="Tenant Int Iso B", slug="tenant-int-iso-b", is_active=True)
+    test_session.add_all([tenant_a, tenant_b])
+    await test_session.commit()
+
+    user_a = User(tenant_id=tenant_a.id, email="owner_int_a@test.com", password_hash="hash_a", is_active=True)
+    user_b = User(tenant_id=tenant_b.id, email="owner_int_b@test.com", password_hash="hash_b", is_active=True)
+    test_session.add_all([user_a, user_b])
+    await test_session.commit()
+
+    # Create Catalog Integration
+    integration = Integration(
+        integration_key="rest_api",
+        provider_key="rest_api",
+        display_name="REST API Connector",
+        category="api",
+        is_enabled=True,
+    )
+    test_session.add(integration)
+    await test_session.commit()
+
+    # Create Connection owned by Tenant A
+    conn_a = IntegrationConnection(
+        tenant_id=tenant_a.id,
+        integration_id=integration.id,
+        integration_key="rest_api",
+        provider_key="rest_api",
+        status="ACTIVE",
+        auth_type="api_key",
+    )
+    test_session.add(conn_a)
+    await test_session.commit()
+
+    headers_a = {"X-Tenant-ID": str(tenant_a.id)}
+    headers_b = {"X-Tenant-ID": str(tenant_b.id)}
+
+    # 1. Tenant B calls GET /api/v1/integrations/connections -> Tenant A's connection is NOT in list
+    token_b = set_actor_context(AuthenticatedActor(user_id=user_b.id, tenant_id=tenant_b.id, role="owner", permissions=set(ROLE_PERMISSIONS["owner"])))
+    try:
+        res_b = await async_client.get("/api/v1/integrations/connections", headers=headers_b)
+        assert res_b.status_code == 200
+        conns_b = res_b.json()
+        assert not any(c["id"] == str(conn_a.id) for c in conns_b)
+
+        # Tenant B attempts to disconnect Tenant A's connection -> HTTP 404 or 403
+        res_disc_b = await async_client.post(f"/api/v1/integrations/connections/{conn_a.id}/disconnect", headers=headers_b)
+        assert res_disc_b.status_code in (404, 403)
+    finally:
+        reset_actor_context(token_b)
+
+    # 2. Tenant A calls GET /api/v1/integrations/connections -> Sees its connection
+    token_a = set_actor_context(AuthenticatedActor(user_id=user_a.id, tenant_id=tenant_a.id, role="owner", permissions=set(ROLE_PERMISSIONS["owner"])))
+    try:
+        res_a = await async_client.get("/api/v1/integrations/connections", headers=headers_a)
+        assert res_a.status_code == 200
+        conns_a = res_a.json()
+        assert any(c["id"] == str(conn_a.id) for c in conns_a)
+    finally:
+        reset_actor_context(token_a)

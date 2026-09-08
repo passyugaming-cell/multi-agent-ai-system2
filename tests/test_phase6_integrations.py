@@ -176,14 +176,32 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
 
 @pytest.mark.asyncio
 async def test_api_forged_permission_headers_rejection(async_client: AsyncClient, tenant_a):
-    # Attempt to bypass authentication by injecting client X-Actor-Permissions header
-    headers = {
-        "X-Tenant-ID": str(tenant_a.id),
-        "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS",
-    }
-    resp = await async_client.get("/api/v1/integrations", headers=headers)
-    assert resp.status_code == 403
-    assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
+    from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+    from app.core.auth import ROLE_PERMISSIONS
+
+    # Member role has VIEW_INTEGRATIONS but NOT MANAGE_INTEGRATIONS or MANAGE_CREDENTIALS
+    member_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions=set(ROLE_PERMISSIONS.get("member", {VIEW_INTEGRATIONS})),
+    )
+    token = set_actor_context(member_actor)
+    try:
+        # Member attempts to call endpoint requiring MANAGE_INTEGRATIONS by forging client X-Actor-Permissions header
+        headers = {
+            "X-Tenant-ID": str(tenant_a.id),
+            "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS,EXECUTE_INTEGRATION",
+        }
+        resp = await async_client.post(
+            "/api/v1/integrations/connect/rest_api",
+            json={"credentials": {"api_key": "test"}},
+            headers=headers,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
