@@ -76,7 +76,7 @@ export default function IntegrationsPage() {
     setErrorMsg(null);
 
     try {
-      const data = await apiGet<IntegrationConnection[]>("/integrations");
+      const data = await apiGet<IntegrationConnection[]>("/integrations/connections");
       setConnections(data || []);
     } catch (err) {
       if (err instanceof ApiError) {

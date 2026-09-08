@@ -28,6 +28,8 @@ from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
 from app.core.approvals import ApprovalService
 from app.integrations.oauth import generate_oauth_state, validate_oauth_state
+from app.core.auth import resolve_actor_permissions
+from app.core.context import get_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,22 +46,32 @@ def get_tenant_id_from_header(x_tenant_id: str = Header(...)) -> uuid.UUID:
         )
 
 
-def get_actor_permissions(x_actor_permissions: str | None = Header(None)) -> set[str] | None:
-    """Extract actor permissions from header if available."""
-    if x_actor_permissions:
-        return {p.strip() for p in x_actor_permissions.split(",") if p.strip()}
-    return None
+def _resolve_permissions_server(actor_perms: set[str] = Depends(resolve_actor_permissions)) -> set[str]:
+    return actor_perms
 
 
 @router.get("", response_model=list[IntegrationResponse])
 async def list_integrations(
     tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] | None = Depends(get_actor_permissions),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     service = IntegrationService(db)
     try:
         return await service.list_integrations(tenant_id, actor_permissions=permissions)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
+
+@router.get("/connections", response_model=list[IntegrationConnectionResponse])
+async def list_tenant_connections(
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] = Depends(_resolve_permissions_server),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    service = IntegrationService(db)
+    try:
+        return await service.list_tenant_connections(tenant_id, actor_permissions=permissions)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
 

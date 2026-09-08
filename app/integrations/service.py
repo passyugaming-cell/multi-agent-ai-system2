@@ -89,6 +89,25 @@ class IntegrationService:
         )
         return list((await self.session.execute(stmt)).scalars().all())
 
+    async def list_tenant_connections(
+        self,
+        tenant_id: uuid.UUID,
+        actor_permissions: set[str] | list[str] | None = None,
+        allow_internal: bool = False,
+    ) -> list[IntegrationConnection]:
+        """List all integration connections created for tenant."""
+        self._check_permission(actor_permissions, VIEW_INTEGRATIONS, allow_internal=allow_internal)
+        stmt = (
+            select(IntegrationConnection)
+            .where(IntegrationConnection.tenant_id == tenant_id)
+            .order_by(IntegrationConnection.created_at.desc())
+        )
+        conns = list((await self.session.execute(stmt)).scalars().all())
+        for conn in conns:
+            stmt_int = select(Integration).where(Integration.id == conn.integration_id)
+            conn.integration = (await self.session.execute(stmt_int)).scalar_one()
+        return conns
+
     async def connect_integration(
         self,
         tenant_id: uuid.UUID,
