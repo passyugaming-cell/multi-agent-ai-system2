@@ -197,7 +197,7 @@ async def select_tenant(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Validate requested tenant_id and issue updated active-tenant JWT token."""
+    """Validate requested tenant_id and verify active database membership before issuing updated active-tenant JWT token."""
     if not authorization or not authorization.startswith("Bearer "):
         raise AppException(
             code="UNAUTHORIZED",
@@ -207,7 +207,7 @@ async def select_tenant(
 
     token = authorization.split(" ", 1)[1]
     token_payload = await verify_and_decode_token(token)
-    if not token_payload or "tenant_ids" not in token_payload:
+    if not token_payload or "tenant_ids" not in token_payload or "sub" not in token_payload:
         raise AppException(
             code="SESSION_EXPIRED",
             message="Your session has expired. Please sign in again.",
@@ -239,10 +239,26 @@ async def select_tenant(
             status_code=403,
         )
 
-    # Issue updated access token bound to the selected active_tenant_id
+    # Verify active User membership in requested tenant from DB truth
+    user_stmt = select(User).where(
+        User.email == token_payload["sub"],
+        User.tenant_id == tenant_uuid,
+        User.is_active == True,
+    )
+    user_result = await db.execute(user_stmt)
+    active_user_record = user_result.scalars().first()
+
+    if not active_user_record:
+        raise AppException(
+            code="FORBIDDEN_TENANT_ACCESS",
+            message="Your membership for this business is inactive or revoked",
+            status_code=403,
+        )
+
+    # Issue updated access token bound to the selected active_tenant_id and active user_id
     new_token_payload = {
         "sub": token_payload["sub"],
-        "user_id": token_payload["user_id"],
+        "user_id": str(active_user_record.id),
         "tenant_ids": token_payload["tenant_ids"],
         "active_tenant_id": str(tenant.id),
         "jti": str(uuid.uuid4()),

@@ -153,6 +153,37 @@ async def test_g_h_i_select_tenant_authorization(
 
 
 @pytest.mark.asyncio
+async def test_select_tenant_db_membership_revocation(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+):
+    """Tenant present in old JWT claim but deactivated or deleted in DB cannot be selected."""
+    email = f"revoked_member_{uuid.uuid4().hex[:6]}@example.com"
+    hashed = hash_password("Pass123!")
+
+    u1 = User(id=uuid.uuid4(), tenant_id=tenant_a.id, email=email, password_hash=hashed, role="owner", is_active=True)
+    u2 = User(id=uuid.uuid4(), tenant_id=tenant_b.id, email=email, password_hash=hashed, role="member", is_active=True)
+    db_session.add_all([u1, u2])
+    await db_session.commit()
+
+    # User logs in and gets JWT containing both tenant_a and tenant_b in tenant_ids claim
+    login_resp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Pass123!"})
+    token = login_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Admin deactivates user u2 in tenant_b
+    u2.is_active = False
+    await db_session.commit()
+
+    # User attempts to select tenant_b -> rejected with 403 FORBIDDEN_TENANT_ACCESS
+    res = await client.post("/api/v1/auth/select-tenant", json={"tenant_id": str(tenant_b.id)}, headers=headers)
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "FORBIDDEN_TENANT_ACCESS"
+
+
+@pytest.mark.asyncio
 async def test_j_logout_server_side_token_revocation(
     client: AsyncClient,
     db_session: AsyncSession,
