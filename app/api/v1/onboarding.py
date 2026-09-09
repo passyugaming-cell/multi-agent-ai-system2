@@ -2,6 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import resolve_actor_permissions
 from app.core.context import get_tenant_context
 from app.core.exceptions import AppException
 from app.database.session import get_db
@@ -166,12 +167,11 @@ async def transition_lifecycle_state(
 async def connect_whatsapp_onboarding(
     tenant_id: uuid.UUID,
     payload: WhatsAppConnectRequest,
-    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppConnectResponse:
     """Connect WhatsApp Cloud API during onboarding."""
     verify_tenant_authorization(tenant_id)
-    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
     service = OnboardingService(db)
     return await service.connect_whatsapp(tenant_id, payload, actor_permissions=actor_perms)
 
@@ -180,12 +180,11 @@ async def connect_whatsapp_onboarding(
 async def verify_whatsapp_onboarding(
     tenant_id: uuid.UUID,
     connection_id: uuid.UUID,
-    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppVerifyResponse:
     """Verify health and credentials of WhatsApp connection."""
     verify_tenant_authorization(tenant_id)
-    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
     service = OnboardingService(db)
     return await service.verify_whatsapp_connection(tenant_id, connection_id, actor_permissions=actor_perms)
 
@@ -195,12 +194,11 @@ async def reconnect_whatsapp_onboarding(
     tenant_id: uuid.UUID,
     connection_id: uuid.UUID,
     payload: WhatsAppConnectRequest,
-    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppConnectResponse:
     """Reconnect and refresh credentials for an existing WhatsApp integration."""
     verify_tenant_authorization(tenant_id)
-    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
     service = OnboardingService(db)
     return await service.reconnect_whatsapp(tenant_id, connection_id, payload, actor_permissions=actor_perms)
 
@@ -209,12 +207,11 @@ async def reconnect_whatsapp_onboarding(
 async def disconnect_whatsapp_onboarding(
     tenant_id: uuid.UUID,
     connection_id: uuid.UUID,
-    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppConnectResponse:
     """Disconnect WhatsApp integration safely."""
     verify_tenant_authorization(tenant_id)
-    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
     service = OnboardingService(db)
     return await service.disconnect_whatsapp(tenant_id, connection_id, actor_permissions=actor_perms)
 
@@ -235,11 +232,10 @@ async def run_ai_test_gate(
 async def activate_tenant_onboarding(
     tenant_id: uuid.UUID,
     payload: TenantActivationRequest | None = None,
-    x_actor_permissions: str | None = Header(None, alias="X-Actor-Permissions"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> TenantActivationResponse:
     """Activate tenant after enforcing subscription, entitlement, readiness, and WhatsApp connection gates."""
     verify_tenant_authorization(tenant_id)
-    actor_perms = set(p.strip() for p in x_actor_permissions.split(",")) if x_actor_permissions is not None else set()
     service = OnboardingService(db)
     return await service.activate_tenant(tenant_id, actor_permissions=actor_perms)

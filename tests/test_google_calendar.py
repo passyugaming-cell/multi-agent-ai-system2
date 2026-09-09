@@ -26,6 +26,7 @@ from app.integrations.oauth import generate_oauth_state, validate_oauth_state
 from app.billing.plans import PlanService
 from app.billing.subscription import SubscriptionService
 from app.core.workflows.actions import ActionExecutor
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.agents.base.schemas import ToolRequest
 
 
@@ -563,49 +564,56 @@ async def test_google_calendar_api_routes(mock_google_http, async_client: AsyncC
         allow_internal=True,
     )
 
-    headers = {
-        "X-Tenant-ID": str(tenant_a.id),
-        "X-Actor-Permissions": f"{EXECUTE_INTEGRATION},{MANAGE_INTEGRATIONS},{MANAGE_CREDENTIALS}",
-    }
-
-    # 1. Authorize route
-    resp_auth = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers)
-    assert resp_auth.status_code == 200
-    state = resp_auth.json()["state"]
-
-    # 2. Permission Negative Tests for Authorize Route
-    # Case A: Missing header / permissions = None
-    headers_no_perm = {"X-Tenant-ID": str(tenant_a.id)}
-    resp_none = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_no_perm)
-    assert resp_none.status_code == 403
-
-    # Case B: Empty permissions string
-    headers_empty = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": ""}
-    resp_empty = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_empty)
-    assert resp_empty.status_code == 403
-
-    # Case C: Lacks MANAGE_INTEGRATIONS permission
-    headers_wrong = {"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": "VIEW_INTEGRATIONS"}
-    resp_wrong = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers_wrong)
-    assert resp_wrong.status_code == 403
-
-    # 3. Callback route
-    resp_cb = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=testcode&state={state}", headers=headers)
-    assert resp_cb.status_code == 200
-
-    # 4. Calendars route
-    resp_cal = await async_client.get(f"/api/v1/integrations/google-calendar/calendars?connection_id={conn.id}", headers=headers)
-    assert resp_cal.status_code == 200
-
-    # 5. Availability route
-    resp_avail = await async_client.post(
-        f"/api/v1/integrations/google-calendar/availability?connection_id={conn.id}",
-        json={
-            "time_min": "2026-09-10T14:00:00+07:00",
-            "time_max": "2026-09-10T15:00:00+07:00",
-            "timezone": "Asia/Jakarta",
-        },
-        headers=headers,
+    # Establish server-side actor context with required permissions
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},
     )
-    assert resp_avail.status_code == 200
-    assert resp_avail.json()["available"] is True
+    token = set_actor_context(actor)
+
+    try:
+        headers = {"X-Tenant-ID": str(tenant_a.id)}
+
+        # 1. Authorize route
+        resp_auth = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers)
+        assert resp_auth.status_code == 200
+        state = resp_auth.json()["state"]
+
+        # 2. Permission Negative Tests for Authorize Route with insufficient actor permissions
+        actor_limited = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={VIEW_INTEGRATIONS},
+        )
+        token_lim = set_actor_context(actor_limited)
+        try:
+            resp_wrong = await async_client.get("/api/v1/integrations/google-calendar/authorize", headers=headers)
+            assert resp_wrong.status_code == 403
+        finally:
+            reset_actor_context(token_lim)
+
+        # 3. Callback route
+        resp_cb = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=testcode&state={state}", headers=headers)
+        assert resp_cb.status_code == 200
+
+        # 4. Calendars route
+        resp_cal = await async_client.get(f"/api/v1/integrations/google-calendar/calendars?connection_id={conn.id}", headers=headers)
+        assert resp_cal.status_code == 200
+
+        # 5. Availability route
+        resp_avail = await async_client.post(
+            f"/api/v1/integrations/google-calendar/availability?connection_id={conn.id}",
+            json={
+                "time_min": "2026-09-10T14:00:00+07:00",
+                "time_max": "2026-09-10T15:00:00+07:00",
+                "timezone": "Asia/Jakarta",
+            },
+            headers=headers,
+        )
+        assert resp_avail.status_code == 200
+        assert resp_avail.json()["available"] is True
+    finally:
+        reset_actor_context(token)

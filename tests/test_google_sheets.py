@@ -21,6 +21,7 @@ from app.integrations.permissions import (
     MANAGE_CREDENTIALS,
     EXECUTE_INTEGRATION,
 )
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.integrations.service import IntegrationService
 from app.database.models.integrations import Integration
 from app.core.workflows.actions import ActionExecutor
@@ -198,16 +199,26 @@ async def test_05_disconnect(db_session: AsyncSession, tenant_a):
 
 @pytest.mark.asyncio
 async def test_06_authorize_url_generation(async_client: AsyncClient, tenant_a):
-    response = await async_client.get(
-        "/api/v1/integrations/google-sheets/authorize",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": MANAGE_INTEGRATIONS},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert "authorization_url" in data
-    assert "state" in data
-    assert "spreadsheets" in data["authorization_url"]
-    assert "drive.readonly" in data["authorization_url"]
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            "/api/v1/integrations/google-sheets/authorize",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "authorization_url" in data
+        assert "state" in data
+        assert "spreadsheets" in data["authorization_url"]
+        assert "drive.readonly" in data["authorization_url"]
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -264,16 +275,24 @@ async def test_12_oauth_callback_token_exchange(mock_sheets_http, async_client: 
 
     state = generate_oauth_state(tenant_id=tenant_a.id)
 
-    perms = f"{MANAGE_INTEGRATIONS},{MANAGE_CREDENTIALS}"
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": perms},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},
     )
-    print("DEBUG test_12 status_code:", response.status_code, "body:", response.text)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert "connection_id" in data
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert "connection_id" in data
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -846,13 +865,23 @@ async def test_36_api_list_spreadsheets_route(mock_sheets_http, async_client: As
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/spreadsheets?connection_id={conn.id}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": EXECUTE_INTEGRATION},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert "spreadsheets" in data
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/spreadsheets?connection_id={conn.id}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "spreadsheets" in data
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -869,13 +898,23 @@ async def test_37_api_get_spreadsheet_route(mock_sheets_http, async_client: Asyn
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/spreadsheets/s123?connection_id={conn.id}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": EXECUTE_INTEGRATION},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/spreadsheets/s123?connection_id={conn.id}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -892,13 +931,23 @@ async def test_38_api_read_values_route(mock_sheets_http, async_client: AsyncCli
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/spreadsheets/s123/values?connection_id={conn.id}&range=Sheet1!A1:B2",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": EXECUTE_INTEGRATION},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/spreadsheets/s123/values?connection_id={conn.id}&range=Sheet1!A1:B2",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -915,14 +964,24 @@ async def test_39_api_append_values_route(mock_sheets_http, async_client: AsyncC
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    response = await async_client.post(
-        f"/api/v1/integrations/google-sheets/spreadsheets/s123/append?connection_id={conn.id}",
-        json={"range": "Sheet1!A1", "values": [["A", "B"]]},
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": EXECUTE_INTEGRATION},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.post(
+            f"/api/v1/integrations/google-sheets/spreadsheets/s123/append?connection_id={conn.id}",
+            json={"range": "Sheet1!A1", "values": [["A", "B"]]},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -939,14 +998,24 @@ async def test_40_api_update_values_route(mock_sheets_http, async_client: AsyncC
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    response = await async_client.put(
-        f"/api/v1/integrations/google-sheets/spreadsheets/s123/values?connection_id={conn.id}",
-        json={"range": "Sheet1!A1:B1", "values": [["A_up", "B_up"]]},
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": EXECUTE_INTEGRATION},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS},
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.put(
+            f"/api/v1/integrations/google-sheets/spreadsheets/s123/values?connection_id={conn.id}",
+            json={"range": "Sheet1!A1:B1", "values": [["A_up", "B_up"]]},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -986,11 +1055,21 @@ async def test_44_sheets_callback_without_permissions_returns_403(async_client: 
 @pytest.mark.asyncio
 async def test_45_sheets_callback_with_only_manage_integrations_returns_403(async_client: AsyncClient, tenant_a):
     state = generate_oauth_state(tenant_id=tenant_a.id)
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": MANAGE_INTEGRATIONS},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions={MANAGE_INTEGRATIONS},
     )
-    assert response.status_code == 403
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 403
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -1001,13 +1080,22 @@ async def test_46_sheets_callback_with_both_required_permissions_allowed(mock_sh
     await db_session.commit()
 
     state = generate_oauth_state(tenant_id=tenant_a.id)
-    perms = f"{MANAGE_INTEGRATIONS},{MANAGE_CREDENTIALS}"
-    response = await async_client.get(
-        f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": perms},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
-    assert response.status_code == 200
-    assert response.json()["status"] == "success"
+    token = set_actor_context(actor)
+    try:
+        response = await async_client.get(
+            f"/api/v1/integrations/google-sheets/callback?code=mock_code&state={state}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio

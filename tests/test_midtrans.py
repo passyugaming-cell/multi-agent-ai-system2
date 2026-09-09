@@ -32,7 +32,8 @@ from app.integrations.permissions import (
     REQUEST_REFUND,
 )
 from app.core.workflows.actions import ActionExecutor
-from app.agents.owner_ai.tools import tool_get_midtrans_payment_status
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+from app.agents.owner_ai.tools import tool_get_midtrans_payment_status, tool_execute_integration_operation
 from app.agents.base.schemas import ToolRequest
 from app.core.approvals import ApprovalService
 
@@ -387,11 +388,22 @@ async def test_25_api_create_payment_route(async_client, tenant_a, db_session):
         items_data=[{"description": "Pro Plan", "unit_price": Decimal("799000.00"), "quantity": 1}],
     )
 
-    resp = await async_client.post(
-        "/api/v1/integrations/midtrans/payments",
-        json={"invoice_id": str(invoice.id)},
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{MANAGE_PAYMENTS}"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_PAYMENTS, MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.post(
+            "/api/v1/integrations/midtrans/payments",
+            json={"invoice_id": str(invoice.id)},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert resp.status_code == 200
     data = resp.json()
     assert data["invoice_id"] == str(invoice.id)
@@ -409,10 +421,21 @@ async def test_26_api_get_payment_status_route(async_client, tenant_a, db_sessio
     payment = await pay_service.create_payment_intent(tenant_id=tenant_a.id, invoice_id=invoice.id, amount=invoice.total)
     await db_session.commit()
 
-    resp = await async_client.get(
-        f"/api/v1/integrations/midtrans/payments/{payment.id}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{VIEW_PAYMENT_STATUS}"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions={VIEW_PAYMENT_STATUS, VIEW_INTEGRATIONS},
     )
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.get(
+            f"/api/v1/integrations/midtrans/payments/{payment.id}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert resp.status_code == 200
     data = resp.json()
     assert data["payment_id"] == str(payment.id)
@@ -430,11 +453,22 @@ async def test_27_api_refund_payment_creates_approval_request(async_client, tena
     payment = await pay_service.create_payment_intent(tenant_id=tenant_a.id, invoice_id=invoice.id, amount=invoice.total)
     await pay_service.confirm_payment_success(tenant_a.id, payment.id, "tx_settled")
 
-    resp = await async_client.post(
-        f"/api/v1/integrations/midtrans/payments/{payment.id}/refund",
-        json={"amount": "100000.00", "reason": "Customer request"},
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{REQUEST_REFUND}"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="admin",
+        permissions={REQUEST_REFUND, MANAGE_INTEGRATIONS},
     )
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.post(
+            f"/api/v1/integrations/midtrans/payments/{payment.id}/refund",
+            json={"amount": "100000.00", "reason": "Customer request"},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "APPROVAL_REQUIRED"
@@ -664,11 +698,22 @@ async def test_34_tenant_isolation_api_access_denied(async_client, tenant_a, ten
     payment_b = await pay_service.create_payment_intent(tenant_id=tenant_b.id, invoice_id=invoice_b.id, amount=invoice_b.total)
     await db_session.commit()
 
-    # Tenant A attempts to view Tenant B's payment
-    resp = await async_client.get(
-        f"/api/v1/integrations/midtrans/payments/{payment_b.id}",
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{VIEW_PAYMENT_STATUS}"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={VIEW_PAYMENT_STATUS, VIEW_INTEGRATIONS},
     )
+    token = set_actor_context(actor)
+    try:
+        # Tenant A attempts to view Tenant B's payment using Tenant A's tenant header
+        resp = await async_client.get(
+            f"/api/v1/integrations/midtrans/payments/{payment_b.id}",
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert resp.status_code == 404
 
 
@@ -683,12 +728,23 @@ async def test_35_tenant_isolation_refund_denied(async_client, tenant_a, tenant_
     payment_b = await pay_service.create_payment_intent(tenant_id=tenant_b.id, invoice_id=invoice_b.id, amount=invoice_b.total)
     await db_session.commit()
 
-    # Tenant A attempts to refund Tenant B's payment
-    resp = await async_client.post(
-        f"/api/v1/integrations/midtrans/payments/{payment_b.id}/refund",
-        json={"amount": "50000.00"},
-        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{REQUEST_REFUND}"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={REQUEST_REFUND, MANAGE_INTEGRATIONS},
     )
+    token = set_actor_context(actor)
+    try:
+        # Tenant A attempts to refund Tenant B's payment using Tenant A's tenant header
+        resp = await async_client.post(
+            f"/api/v1/integrations/midtrans/payments/{payment_b.id}/refund",
+            json={"amount": "50000.00"},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert resp.status_code == 404
 
 
@@ -967,17 +1023,124 @@ async def test_46_api_cancel_payment_route(async_client, tenant_a, db_session):
     payment = await pay_service.create_payment_intent(tenant_id=tenant_a.id, invoice_id=invoice.id, amount=invoice.total)
     await db_session.commit()
 
-    with patch.object(
-        MidtransAdapter,
-        "cancel_payment",
-        new=AsyncMock(return_value={"success": True, "order_id": str(invoice.id), "transaction_status": "cancel"}),
-    ):
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_PAYMENTS, MANAGE_INTEGRATIONS, EXECUTE_INTEGRATION},
+    )
+    token = set_actor_context(actor)
+    try:
+        with patch.object(
+            MidtransAdapter,
+            "cancel_payment",
+            new=AsyncMock(return_value={"success": True, "order_id": str(invoice.id), "transaction_status": "cancel"}),
+        ):
+            resp = await async_client.post(
+                f"/api/v1/integrations/midtrans/payments/{payment.id}/cancel",
+                headers={"X-Tenant-ID": str(tenant_a.id)},
+            )
+    finally:
+        reset_actor_context(token)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_49_midtrans_cancel_payment_permission_enforced(async_client, tenant_a, db_session):
+    """Verifies that midtrans_cancel_payment enforces caller permissions and does not hardcode bypass."""
+    service = IntegrationService(db_session)
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    await service.connect_integration(
+        tenant_id=tenant_a.id,
+        integration_key="midtrans",
+        credentials={"server_key": "key_cancel_perm"},
+        actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
+    )
+    await db_session.commit()
+
+    pay_service = PaymentService(db_session)
+    inv_service = InvoiceService(db_session)
+    invoice = await inv_service.create_invoice(
+        tenant_id=tenant_a.id,
+        items_data=[{"description": "Item 1", "unit_price": Decimal("100000.00"), "quantity": 1}],
+    )
+    payment = await pay_service.create_payment_intent(tenant_id=tenant_a.id, invoice_id=invoice.id, amount=invoice.total)
+    await db_session.commit()
+
+    # Actor has MANAGE_PAYMENTS but lacks EXECUTE_INTEGRATION required by IntegrationService.execute_operation
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions={MANAGE_PAYMENTS},
+    )
+    token = set_actor_context(actor)
+    try:
         resp = await async_client.post(
             f"/api/v1/integrations/midtrans/payments/{payment.id}/cancel",
-            headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": f"{MANAGE_PAYMENTS}"},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "CANCELLED"
+    finally:
+        reset_actor_context(token)
+
+    # Must be 403 because EXECUTE_INTEGRATION permission is missing in actor_permissions
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_50_onboarding_endpoints_reject_forged_headers(async_client, tenant_a):
+    """Verifies onboarding endpoints reject forged X-Actor-Permissions headers when unauthenticated."""
+    resp = await async_client.post(
+        f"/api/v1/tenants/{tenant_a.id}/onboarding/whatsapp/connect",
+        json={"phone_number_id": "123", "app_secret": "secret", "access_token": "token"},
+        headers={"X-Tenant-ID": str(tenant_a.id), "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_51_owner_ai_tool_execute_integration_operation_redacts_secrets(db_session, tenant_a):
+    """Verifies that Owner AI tool_execute_integration_operation redacts sensitive credential fields in tool output."""
+    service = IntegrationService(db_session)
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    conn = await service.connect_integration(
+        tenant_id=tenant_a.id,
+        integration_key="midtrans",
+        credentials={"server_key": "SUPER_SECRET_SERVER_KEY_123"},
+        actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
+    )
+    await db_session.commit()
+
+    # Mock execute_operation returning raw secrets
+    with patch.object(
+        IntegrationService,
+        "execute_operation",
+        new=AsyncMock(return_value=AsyncMock(
+            status="COMPLETED",
+            result={"access_token": "secret_access_token_abc", "server_key": "SUPER_SECRET_SERVER_KEY_123", "status": "ok"},
+            safe_error_message=None,
+        )),
+    ):
+        tool_req = ToolRequest(
+            tenant_id=str(tenant_a.id),
+            tool_name="execute_integration_operation",
+            parameters={"connection_id": str(conn.id), "operation": "refresh_token"},
+        )
+        res = await tool_execute_integration_operation(tool_req, db_session)
+        assert res.success is True
+        assert res.data["access_token"] in ("[REDACTED]", "[REDACTED_SECRET]")
+        assert res.data["server_key"] in ("[REDACTED]", "[REDACTED_SECRET]")
+        assert res.data["status"] == "ok"
 
 
 @pytest.mark.asyncio
