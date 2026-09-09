@@ -202,31 +202,56 @@ async def test_case_08_forged_tenant_header_rejected(async_client, tenant_a, ten
 
 # 9. Tenant A state + Tenant B actor -> rejected
 @pytest.mark.asyncio
-async def test_case_09_cross_tenant_actor_rejected(async_client, tenant_a, tenant_b):
-    user_a = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_a))
-    actor_b = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_b.id, role="owner", permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS})
-    token = set_actor_context(actor_b)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 403
-    finally:
-        reset_actor_context(token)
+async def test_case_09_cross_tenant_actor_rejected(async_client, db_session, tenant_a, tenant_b):
+    user_b = User(
+        email=f"owner_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_b.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(user_b)
+    await db_session.commit()
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user_b.id))
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code in (401, 403)
 
 
 # 10. Tenant A state + Tenant A different privileged actor (user_id mismatch) -> rejected
 @pytest.mark.asyncio
-async def test_case_10_same_tenant_different_actor_user_id_mismatch_rejected(async_client, tenant_a):
-    user_a = uuid.uuid4()
-    user_b = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_a))
-    actor_b = AuthenticatedActor(user_id=user_b, tenant_id=tenant_a.id, role="owner", permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS})
-    token = set_actor_context(actor_b)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code in (401, 403)
-    finally:
-        reset_actor_context(token)
+async def test_case_10_same_tenant_different_actor_user_id_mismatch_rejected(async_client, db_session, tenant_a, monkeypatch):
+    import app.core.auth_service as auth_service
+    async def mock_is_revoked(jti: str) -> bool:
+        return False
+    monkeypatch.setattr(auth_service, "is_token_revoked_redis", mock_is_revoked)
+
+    user_a = User(
+        email=f"owner_a_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    user_b = User(
+        email=f"owner_b_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add_all([user_a, user_b])
+    await db_session.commit()
+
+    from app.core.auth_service import create_access_token
+    token_b = create_access_token({"sub": user_b.email, "tenant_ids": [str(tenant_a.id)], "active_tenant_id": str(tenant_a.id)})
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user_a.id))
+    resp = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp.status_code == 403
 
 
 # 11. Invalid HMAC signature -> rejected
@@ -328,16 +353,11 @@ async def test_case_13_replayed_state_rejected(async_client, db_session, tenant_
     monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
     state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
-    actor = AuthenticatedActor(user_id=user.id, tenant_id=tenant_a.id, role="owner", permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS})
-    token = set_actor_context(actor)
-    try:
-        resp1 = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp1.status_code == 200
+    resp1 = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp1.status_code == 200
 
-        resp2 = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp2.status_code == 400
-    finally:
-        reset_actor_context(token)
+    resp2 = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp2.status_code == 400
 
 
 # 14. Missing user_id in state -> rejected
@@ -384,17 +404,38 @@ async def test_case_17_nonexistent_user_rejected(async_client, tenant_a):
 
 # 18. State user_id does not equal authenticated actor user_id -> rejected
 @pytest.mark.asyncio
-async def test_case_18_state_user_id_actor_mismatch_rejected(async_client, tenant_a):
-    user_a = uuid.uuid4()
-    user_b = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_a))
-    actor_b = AuthenticatedActor(user_id=user_b, tenant_id=tenant_a.id, role="owner", permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS})
-    token = set_actor_context(actor_b)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 403
-    finally:
-        reset_actor_context(token)
+async def test_case_18_state_user_id_actor_mismatch_rejected(async_client, db_session, tenant_a, monkeypatch):
+    import app.core.auth_service as auth_service
+    async def mock_is_revoked(jti: str) -> bool:
+        return False
+    monkeypatch.setattr(auth_service, "is_token_revoked_redis", mock_is_revoked)
+
+    user_a = User(
+        email=f"owner_a_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    user_b = User(
+        email=f"owner_b_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add_all([user_a, user_b])
+    await db_session.commit()
+
+    from app.core.auth_service import create_access_token
+    token_b = create_access_token({"sub": user_b.email, "tenant_ids": [str(tenant_a.id)], "active_tenant_id": str(tenant_a.id)})
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user_a.id))
+    resp = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert resp.status_code == 403
 
 
 # 19. Valid real HTTP browser callback succeeds using database user resolution
