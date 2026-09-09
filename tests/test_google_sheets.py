@@ -24,6 +24,7 @@ from app.integrations.permissions import (
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.integrations.service import IntegrationService
 from app.database.models.integrations import Integration
+from app.database.models.user import User
 from app.core.workflows.actions import ActionExecutor
 from app.agents.owner_ai.tools import tool_get_sheets_connection_status
 from app.agents.base.schemas import ToolRequest
@@ -271,12 +272,21 @@ async def test_12_oauth_callback_token_exchange(mock_sheets_http, async_client: 
     await seed_sheets_catalog(db_session)
     sub_srv = SubscriptionService(db_session)
     await sub_srv.create_trial_subscription(tenant_a.id)
+
+    user = User(
+        email=f"owner_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(user)
     await db_session.commit()
 
-    state = generate_oauth_state(tenant_id=tenant_a.id)
+    state = generate_oauth_state(tenant_id=tenant_a.id, user_id=str(user.id))
 
     actor = AuthenticatedActor(
-        user_id=uuid.uuid4(),
+        user_id=user.id,
         tenant_id=tenant_a.id,
         role="owner",
         permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},
@@ -1077,11 +1087,20 @@ async def test_46_sheets_callback_with_both_required_permissions_allowed(mock_sh
     await seed_sheets_catalog(db_session)
     sub_srv = SubscriptionService(db_session)
     await sub_srv.create_trial_subscription(tenant_a.id)
+
+    user = User(
+        email=f"owner_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(user)
     await db_session.commit()
 
-    state = generate_oauth_state(tenant_id=tenant_a.id)
+    state = generate_oauth_state(tenant_id=tenant_a.id, user_id=str(user.id))
     actor = AuthenticatedActor(
-        user_id=uuid.uuid4(),
+        user_id=user.id,
         tenant_id=tenant_a.id,
         role="owner",
         permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
