@@ -36,7 +36,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
 
-        # Skip tenant check for system, docs, auth endpoints, and external webhooks
+        # Skip tenant check for system, docs, auth endpoints, external webhooks, and OAuth callbacks (which validate tenant via state)
         if (
             path in EXCLUDED_PATHS
             or path.startswith("/docs")
@@ -44,6 +44,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
             or path.startswith("/api/v1/auth")
             or path.startswith("/api/v1/billing/webhooks")
             or path.startswith("/api/v1/webhooks")
+            or path.endswith("/google-calendar/callback")
+            or path.endswith("/google-sheets/callback")
         ):
             return await call_next(request)
 

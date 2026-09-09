@@ -25,6 +25,10 @@ SECRET_VALUE_PATTERNS = re.compile(
 def _get_fernet_key() -> bytes:
     """Derive a deterministic 32-byte url-safe Fernet key from settings.ENCRYPTION_KEY."""
     raw_key = getattr(settings, "ENCRYPTION_KEY", None) or "default_phase6_integration_key_32_bytes_long"
+    app_env = getattr(settings, "APP_ENV", "development")
+    if app_env in ("production", "staging"):
+        if raw_key in ("default_phase6_integration_key_32_bytes_long", "dev_encryption_key_32_bytes_long_secret"):
+            raise CredentialSecurityError("Production environment cannot use development fallback encryption key")
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,

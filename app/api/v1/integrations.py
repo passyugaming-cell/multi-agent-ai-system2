@@ -120,24 +120,46 @@ async def google_calendar_callback(
     code: str,
     state: str,
     redirect_uri: str | None = None,
-    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] = Depends(_resolve_permissions_server),
+    x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
-
     import httpx
     from app.core.config import settings
+    from app.core.context import get_actor_context, set_tenant_context
     service = IntegrationService(db)
+
     try:
-        validate_oauth_state(state, expected_tenant_id=tenant_id)
+        # 1. Recover and validate trusted tenant from OAuth state token
+        state_payload = validate_oauth_state(state)
+        state_tenant_id = uuid.UUID(state_payload["tenant_id"])
+
+        # 2. If client passed header, verify strict match with state tenant_id
+        if x_tenant_id:
+            try:
+                hdr_tenant_id = uuid.UUID(x_tenant_id)
+                if hdr_tenant_id != state_tenant_id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
+            except ValueError:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Tenant-ID header must be a valid UUID")
+
+        target_tenant_id = state_tenant_id
+
+        # Set tenant context dynamically for callback processing
+        set_tenant_context(target_tenant_id)
+
+        # 3. Resolve permissions from active actor context or fallback to permissions encoded in actor context
+        actor = get_actor_context()
+        actor_perms = set(actor.permissions) if actor else {MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS}
+
+        # Check actor authorization permissions
+        if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
 
         token_payload = {
             "code": code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "redirect_uri": redirect_uri or "http://localhost/callback",
+            "redirect_uri": redirect_uri or state_payload.get("redirect_uri") or "http://localhost/callback",
             "grant_type": "authorization_code",
         }
 
@@ -149,7 +171,7 @@ async def google_calendar_callback(
             tokens = resp.json()
 
         conn = await service.connect_integration(
-            tenant_id=tenant_id,
+            tenant_id=target_tenant_id,
             integration_key="google_calendar",
             credentials={
                 "access_token": tokens.get("access_token"),
@@ -157,7 +179,7 @@ async def google_calendar_callback(
                 "expires_in": tokens.get("expires_in"),
                 "token_type": tokens.get("token_type"),
             },
-            actor_permissions=permissions,
+            actor_permissions=actor_perms,
         )
         return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
     except HTTPException:
@@ -363,24 +385,46 @@ async def google_sheets_callback(
     code: str,
     state: str,
     redirect_uri: str | None = None,
-    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
-    permissions: set[str] = Depends(_resolve_permissions_server),
+    x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
-
     import httpx
     from app.core.config import settings
+    from app.core.context import get_actor_context, set_tenant_context
     service = IntegrationService(db)
+
     try:
-        validate_oauth_state(state, expected_tenant_id=tenant_id)
+        # 1. Recover and validate trusted tenant from OAuth state token
+        state_payload = validate_oauth_state(state)
+        state_tenant_id = uuid.UUID(state_payload["tenant_id"])
+
+        # 2. If client passed header, verify strict match with state tenant_id
+        if x_tenant_id:
+            try:
+                hdr_tenant_id = uuid.UUID(x_tenant_id)
+                if hdr_tenant_id != state_tenant_id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
+            except ValueError:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Tenant-ID header must be a valid UUID")
+
+        target_tenant_id = state_tenant_id
+
+        # Set tenant context dynamically for callback processing
+        set_tenant_context(target_tenant_id)
+
+        # 3. Resolve permissions from active actor context or fallback to permissions encoded in actor context
+        actor = get_actor_context()
+        actor_perms = set(actor.permissions) if actor else {MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS}
+
+        # Check actor authorization permissions
+        if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
 
         token_payload = {
             "code": code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "redirect_uri": redirect_uri or "http://localhost/callback",
+            "redirect_uri": redirect_uri or state_payload.get("redirect_uri") or "http://localhost/callback",
             "grant_type": "authorization_code",
         }
 
@@ -392,7 +436,7 @@ async def google_sheets_callback(
             tokens = resp.json()
 
         conn = await service.connect_integration(
-            tenant_id=tenant_id,
+            tenant_id=target_tenant_id,
             integration_key="google_sheets",
             credentials={
                 "access_token": tokens.get("access_token"),
@@ -400,7 +444,7 @@ async def google_sheets_callback(
                 "expires_in": tokens.get("expires_in"),
                 "token_type": tokens.get("token_type"),
             },
-            actor_permissions=permissions,
+            actor_permissions=actor_perms,
         )
         return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
     except HTTPException:

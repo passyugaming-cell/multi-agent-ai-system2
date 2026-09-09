@@ -342,8 +342,16 @@ async def receive_whatsapp_webhook(
 
     service = IntegrationService(db)
     stmt = (
-        select(IntegrationConnection)
+        select(IntegrationConnection, IntegrationCredential)
         .join(Integration, IntegrationConnection.integration_id == Integration.id)
+        .join(
+            IntegrationCredential,
+            and_(
+                IntegrationCredential.connection_id == IntegrationConnection.id,
+                IntegrationCredential.tenant_id == IntegrationConnection.tenant_id,
+                IntegrationCredential.revoked_at == None,
+            ),
+        )
         .where(
             and_(
                 IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
@@ -351,48 +359,34 @@ async def receive_whatsapp_webhook(
             )
         )
     )
-    connections = (await db.execute(stmt)).scalars().all()
+    results = (await db.execute(stmt)).all()
 
-    target_connection = None
-    target_credentials = None
+    matching_pairs = []
+    for conn, cred in results:
+        creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+        if conn.external_account_id == phone_number_id or creds.get("phone_number_id") == phone_number_id:
+            matching_pairs.append((conn, creds))
 
-    for conn in connections:
-        if conn.external_account_id == phone_number_id:
-            target_connection = conn
-            c_stmt = select(IntegrationCredential).where(
-                and_(
-                    IntegrationCredential.tenant_id == conn.tenant_id,
-                    IntegrationCredential.connection_id == conn.id,
-                    IntegrationCredential.revoked_at == None,
-                )
-            )
-            cred = (await db.execute(c_stmt)).scalar_one_or_none()
-            if cred:
-                target_credentials = service.vault.decrypt_credentials(cred.encrypted_secret)
-            break
-
-    if not target_connection:
-        for conn in connections:
-            c_stmt = select(IntegrationCredential).where(
-                and_(
-                    IntegrationCredential.tenant_id == conn.tenant_id,
-                    IntegrationCredential.connection_id == conn.id,
-                    IntegrationCredential.revoked_at == None,
-                )
-            )
-            cred = (await db.execute(c_stmt)).scalar_one_or_none()
-            if cred:
-                creds = service.vault.decrypt_credentials(cred.encrypted_secret)
-                if creds.get("phone_number_id") == phone_number_id:
-                    target_connection = conn
-                    target_credentials = creds
-                    break
-
-    if not target_connection or not target_credentials:
+    if not matching_pairs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No active WhatsApp connection mapped to phone_number_id '{phone_number_id}'",
         )
+
+    # Detect ambiguity: if phone_number_id maps to multiple active tenants, raise deterministic conflict error
+    active_tenant_ids = {str(conn.tenant_id) for conn, _ in matching_pairs}
+    if len(active_tenant_ids) > 1:
+        logger.error(
+            "Ambiguous WhatsApp phone_number_id mapping: '%s' maps to multiple active tenants %s",
+            phone_number_id,
+            active_tenant_ids,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous mapping: phone_number_id '{phone_number_id}' is mapped to multiple active tenants",
+        )
+
+    target_connection, target_credentials = matching_pairs[0]
 
     tenant_id = target_connection.tenant_id
     app_secret = target_credentials.get("app_secret") or target_credentials.get("secret")

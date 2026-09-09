@@ -16,7 +16,11 @@ _USED_NONCES: dict[str, int] = {}
 
 
 def _get_secret_key() -> bytes:
+    app_env = getattr(settings, "APP_ENV", "development")
     key_str = settings.JWT_SECRET or settings.ENCRYPTION_KEY or "default_secure_oauth_secret_key_32_bytes_long"
+    if app_env in ("production", "staging"):
+        if key_str in ("default_secure_oauth_secret_key_32_bytes_long", "dev_secret_jwt_key_32_characters_long_for_security", "dev_encryption_key_32_bytes_long_secret"):
+            raise PermanentIntegrationError("Production environment cannot use development fallback OAuth state secret key", error_code="INSECURE_OAUTH_CONFIG")
     return key_str.encode("utf-8")
 
 
@@ -43,8 +47,12 @@ def generate_oauth_state(tenant_id: uuid.UUID, user_id: str | None = None, redir
     return f"{payload_b64}.{sig}"
 
 
-def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID) -> dict[str, Any]:
-    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding."""
+def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding.
+
+    If expected_tenant_id is provided, enforces that the state payload tenant_id matches expected_tenant_id.
+    If expected_tenant_id is None, validates the HMAC signature and expiration, and returns the payload with verified tenant_id.
+    """
     if not state or "." not in state:
         raise PermanentIntegrationError("Invalid OAuth state format", error_code="INVALID_STATE")
 
@@ -65,7 +73,10 @@ def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID) -> dict[str,
 
     # Verify tenant binding
     state_tenant_id = state_payload.get("tenant_id")
-    if not state_tenant_id or state_tenant_id != str(expected_tenant_id):
+    if not state_tenant_id:
+        raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
+
+    if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
         raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
 
     # Verify expiration
