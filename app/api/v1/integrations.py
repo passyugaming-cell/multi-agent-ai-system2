@@ -26,6 +26,7 @@ from app.integrations.permissions import (
 from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
 from app.integrations.oauth import generate_oauth_state, validate_oauth_state
+from app.integrations.credentials import redact_secrets
 from app.core.auth import resolve_actor_permissions
 
 logger = logging.getLogger(__name__)
@@ -109,8 +110,12 @@ async def google_calendar_authorize(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
 
     from app.core.config import settings
+    from app.core.context import get_actor_context
+    actor = get_actor_context()
+    user_id_str = str(actor.user_id) if actor and actor.user_id else None
+
     client_id = settings.GOOGLE_CLIENT_ID
-    state = generate_oauth_state(tenant_id=tenant_id, redirect_uri=redirect_uri)
+    state = generate_oauth_state(tenant_id=tenant_id, user_id=user_id_str, redirect_uri=redirect_uri)
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={redirect_uri or 'http://localhost/callback'}&scope=https://www.googleapis.com/auth/calendar&state={state}&access_type=offline&prompt=consent"
     return {"authorization_url": auth_url, "state": state}
 
@@ -159,7 +164,7 @@ async def google_calendar_callback(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, resp.text)
+                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, redact_secrets(resp.text))
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
             tokens = resp.json()
 
@@ -366,8 +371,12 @@ async def google_sheets_authorize(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
 
     from app.core.config import settings
+    from app.core.context import get_actor_context
+    actor = get_actor_context()
+    user_id_str = str(actor.user_id) if actor and actor.user_id else None
+
     client_id = settings.GOOGLE_CLIENT_ID
-    state = generate_oauth_state(tenant_id=tenant_id, redirect_uri=redirect_uri)
+    state = generate_oauth_state(tenant_id=tenant_id, user_id=user_id_str, redirect_uri=redirect_uri)
     scope = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly"
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={redirect_uri or 'http://localhost/callback'}&scope={scope}&state={state}&access_type=offline&prompt=consent"
     return {"authorization_url": auth_url, "state": state}
@@ -417,7 +426,7 @@ async def google_sheets_callback(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, resp.text)
+                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, redact_secrets(resp.text))
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
             tokens = resp.json()
 

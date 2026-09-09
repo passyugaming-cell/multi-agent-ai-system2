@@ -20,6 +20,7 @@ from app.integrations.exceptions import (
     InvalidStateTransitionError,
     EntitlementDeniedError,
     PermissionDeniedError,
+    PermanentIntegrationError,
 )
 from app.integrations.schemas import OperationExecutionResult
 from app.integrations.credentials import CredentialVault, redact_secrets
@@ -140,6 +141,26 @@ class IntegrationService:
         integration = (await self.session.execute(stmt)).scalars().first()
         if not integration:
             raise IntegrationNotFoundError(integration_key)
+
+        if external_account_id:
+            conflict_stmt = (
+                select(IntegrationConnection)
+                .join(Integration, IntegrationConnection.integration_id == Integration.id)
+                .where(
+                    and_(
+                        IntegrationConnection.tenant_id != tenant_id,
+                        IntegrationConnection.external_account_id == external_account_id,
+                        IntegrationConnection.status.in_(["ACTIVE", "CONNECTED", "CONNECTING"]),
+                        Integration.provider_key == integration.provider_key,
+                    )
+                )
+            )
+            conflict_conn = (await self.session.execute(conflict_stmt)).scalars().first()
+            if conflict_conn:
+                raise PermanentIntegrationError(
+                    f"External account '{external_account_id}' is already connected to another tenant.",
+                    error_code="ACCOUNT_ALREADY_CONNECTED",
+                )
 
         conn_stmt = select(IntegrationConnection).where(
             and_(

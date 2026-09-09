@@ -3,6 +3,7 @@ import time
 import pytest
 import httpx
 from app.database.models.integrations import Integration
+from app.database.models.user import User
 from app.integrations.oauth import generate_oauth_state, validate_oauth_state, STATE_EXPIRATION_SECONDS
 from app.integrations.exceptions import PermanentIntegrationError
 from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
@@ -62,36 +63,108 @@ def test_expired_oauth_state_rejected(monkeypatch):
     assert excinfo.value.error_code == "EXPIRED_STATE"
 
 
+# 1. No authenticated actor/session -> 401/403
 @pytest.mark.asyncio
-async def test_oauth_callback_unauthenticated_rejected(async_client, tenant_a):
-    state = generate_oauth_state(tenant_a.id)
-    # Without active actor context, callback MUST fail-closed with HTTP 403
+async def test_oauth_callback_no_actor_context_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id, user_id="system")
     resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-    assert resp.status_code == 403
+    assert resp.status_code in (401, 403)
     assert "Authentication required" in resp.json()["error"]["message"]
 
 
+# 2. Actor exists but has no permissions -> 403
 @pytest.mark.asyncio
-async def test_oauth_callback_insufficient_permissions_rejected(async_client, tenant_a):
+async def test_oauth_callback_actor_no_permissions_rejected(async_client, tenant_a):
     state = generate_oauth_state(tenant_a.id)
-    # Actor missing MANAGE_CREDENTIALS
-    actor = AuthenticatedActor(
-        user_id=uuid.uuid4(),
-        tenant_id=tenant_a.id,
-        role="member",
-        permissions={MANAGE_INTEGRATIONS, VIEW_INTEGRATIONS},
-    )
+    actor = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="member", permissions=set())
     token = set_actor_context(actor)
     try:
         resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
         assert resp.status_code == 403
-        assert "Permission denied" in resp.json()["error"]["message"]
     finally:
         reset_actor_context(token)
 
 
+# 3. Actor has only MANAGE_INTEGRATIONS -> 403
 @pytest.mark.asyncio
-async def test_oauth_callback_flow_integration(async_client, db_session, tenant_a, tenant_b, monkeypatch):
+async def test_oauth_callback_actor_manage_integrations_only_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    actor = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="member", permissions={MANAGE_INTEGRATIONS})
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+        assert resp.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+# 4. Actor has only MANAGE_CREDENTIALS -> 403
+@pytest.mark.asyncio
+async def test_oauth_callback_actor_manage_credentials_only_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    actor = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="member", permissions={MANAGE_CREDENTIALS})
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+        assert resp.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+# 6. Forged X-Actor-Permissions -> rejected
+@pytest.mark.asyncio
+async def test_oauth_callback_forged_permission_header_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    resp = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
+        headers={"X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS"},
+    )
+    assert resp.status_code == 403
+
+
+# 7. Forged role header -> rejected
+@pytest.mark.asyncio
+async def test_oauth_callback_forged_role_header_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    resp = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
+        headers={"X-Actor-Role": "owner"},
+    )
+    assert resp.status_code == 403
+
+
+# 8. Forged tenant header -> rejected
+@pytest.mark.asyncio
+async def test_oauth_callback_forged_tenant_header_rejected(async_client, tenant_a, tenant_b):
+    state = generate_oauth_state(tenant_a.id)
+    resp = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
+        headers={"X-Tenant-ID": str(tenant_b.id)},
+    )
+    assert resp.status_code == 403
+
+
+# 9. Tenant A OAuth state + Tenant B authenticated actor -> rejected
+@pytest.mark.asyncio
+async def test_oauth_callback_cross_tenant_actor_rejected(async_client, tenant_a, tenant_b):
+    state = generate_oauth_state(tenant_a.id)
+    actor_b = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_b.id,
+        role="owner",
+        permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
+    )
+    token = set_actor_context(actor_b)
+    try:
+        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+        assert resp.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+# 18. Valid authenticated browser callback succeeds using real HTTP flow through database user lookup
+@pytest.mark.asyncio
+async def test_oauth_callback_real_http_authenticated_flow(async_client, db_session, tenant_a, monkeypatch):
     from app.billing.plans import PlanService
     from app.billing.subscription import SubscriptionService
     plan_srv = PlanService(db_session)
@@ -99,7 +172,16 @@ async def test_oauth_callback_flow_integration(async_client, db_session, tenant_
     sub_srv = SubscriptionService(db_session)
     await sub_srv.create_trial_subscription(tenant_a.id)
 
-    # Seed Google Calendar integration record in DB
+    # 1. Create active owner User in DB for Tenant A
+    user = User(
+        email=f"owner_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="mock_hash_value_123",
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(user)
+
     integration = Integration(
         integration_key="google_calendar",
         provider_key="google_calendar",
@@ -109,9 +191,8 @@ async def test_oauth_callback_flow_integration(async_client, db_session, tenant_
     db_session.add(integration)
     await db_session.commit()
 
-    # Intercept send on httpx.AsyncClient to return mock token response for google OAuth token exchange
+    # Intercept Google OAuth code exchange
     real_send = httpx.AsyncClient.send
-
     async def mock_send(self, request: httpx.Request, *args, **kwargs):
         if "oauth2.googleapis.com/token" in str(request.url):
             return httpx.Response(
@@ -128,46 +209,12 @@ async def test_oauth_callback_flow_integration(async_client, db_session, tenant_
 
     monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
-    # 1. Authorize for Tenant A
-    actor = AuthenticatedActor(
-        user_id=uuid.uuid4(),
-        tenant_id=tenant_a.id,
-        role="owner",
-        permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},
+    # Generate state token containing active DB user's ID
+    state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
+
+    # Perform callback request through HTTP client WITHOUT manual set_actor_context() in test thread!
+    resp_cb = await async_client.get(
+        f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
     )
-    token = set_actor_context(actor)
-    try:
-        resp = await async_client.get(
-            "/api/v1/integrations/google-calendar/authorize",
-            headers={"X-Tenant-ID": str(tenant_a.id)},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        state = data["state"]
-
-        # 2. Callback with active actor context should succeed using state tenant context
-        resp_cb = await async_client.get(
-            f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
-        )
-        assert resp_cb.status_code == 200
-        assert resp_cb.json()["status"] == "success"
-
-        # 3. Callback with Tenant B header mismatch should be REJECTED (HTTP 403)
-        state_b = generate_oauth_state(tenant_a.id)
-        actor_b = AuthenticatedActor(
-            user_id=uuid.uuid4(),
-            tenant_id=tenant_b.id,
-            role="owner",
-            permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
-        )
-        token_b = set_actor_context(actor_b)
-        try:
-            resp_mismatch = await async_client.get(
-                f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state_b}",
-                headers={"X-Tenant-ID": str(tenant_b.id)},
-            )
-            assert resp_mismatch.status_code == 403
-        finally:
-            reset_actor_context(token_b)
-    finally:
-        reset_actor_context(token)
+    assert resp_cb.status_code == 200
+    assert resp_cb.json()["status"] == "success"

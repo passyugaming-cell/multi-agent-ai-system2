@@ -146,6 +146,38 @@ class TenantMiddleware(BaseHTTPMiddleware):
                                 permissions=set(permissions),
                             )
                             actor_token = set_actor_context(actor)
+            elif (path.endswith("/google-calendar/callback") or path.endswith("/google-sheets/callback")):
+                # Resolve initiating user from cryptographically verified state token
+                state_param = request.query_params.get("state")
+                if state_param:
+                    try:
+                        from app.integrations.oauth import parse_oauth_state_payload
+                        state_payload = parse_oauth_state_payload(state_param)
+                        user_id_str = state_payload.get("user_id")
+                        if user_id_str and user_id_str != "system":
+                            try:
+                                target_user_id = UUID(user_id_str)
+                                user_stmt = select(User).where(
+                                    User.id == target_user_id,
+                                    User.tenant_id == tenant_id,
+                                    User.is_active == True,
+                                )
+                                user_result = await db.execute(user_stmt)
+                                user = user_result.scalars().first()
+                                if user:
+                                    role = getattr(user, "role", "owner")
+                                    permissions = ROLE_PERMISSIONS.get(role, set())
+                                    actor = AuthenticatedActor(
+                                        user_id=user.id,
+                                        tenant_id=tenant_id,
+                                        role=role,
+                                        permissions=set(permissions),
+                                    )
+                                    actor_token = set_actor_context(actor)
+                            except ValueError:
+                                pass
+                    except Exception:
+                        pass
 
         request.state.tenant_id = str(tenant_id)
         tenant_token = set_tenant_context(tenant_id)

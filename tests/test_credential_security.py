@@ -1,5 +1,28 @@
+import uuid
 import pytest
 from app.integrations.credentials import redact_secrets
+from app.agents.owner_ai.tools import tool_execute_integration_operation
+from app.agents.base.schemas import ToolRequest
+
+
+def test_redact_secrets_short_opaque_secrets():
+    credentials = {
+        "api_key": "abc",
+        "secret": "123",
+        "password": "x",
+        "token": "a",
+        "nested": {
+            "refresh_token": "rt_short",
+        },
+    }
+
+    redacted = redact_secrets(credentials)
+
+    assert redacted["api_key"] == "[REDACTED]"
+    assert redacted["secret"] == "[REDACTED]"
+    assert redacted["password"] == "[REDACTED]"
+    assert redacted["token"] == "[REDACTED]"
+    assert redacted["nested"]["refresh_token"] == "[REDACTED]"
 
 
 def test_redact_secrets_dict_keys():
@@ -53,3 +76,61 @@ def test_redact_secrets_long_string_detection():
 
     assert redact_secrets(long_secret) == "[REDACTED_SECRET]"
     assert redact_secrets(normal_string) == "Hello world from AI OS!"
+
+
+@pytest.mark.asyncio
+async def test_owner_ai_tool_redacts_credentials(db_session, tenant_a, monkeypatch):
+    from app.database.models.integrations import Integration
+    from app.integrations.service import IntegrationService
+    from app.billing.plans import PlanService
+    from app.billing.subscription import SubscriptionService
+
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    integration = Integration(
+        integration_key="google_calendar",
+        provider_key="google_calendar",
+        display_name="Google Calendar",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+
+    service = IntegrationService(db_session)
+    conn = await service.connect_integration(
+        tenant_id=tenant_a.id,
+        integration_key="google_calendar",
+        credentials={"access_token": "secret_token_123"},
+        allow_internal=True,
+    )
+
+    # Mock execute_operation to return sensitive keys in result
+    async def mock_execute(*args, **kwargs):
+        class MockResult:
+            status = "COMPLETED"
+            result = {
+                "access_token": "raw_sensitive_access_token_123",
+                "calendars": [{"id": "primary", "refresh_token": "raw_sensitive_refresh_token"}],
+            }
+            safe_error_message = None
+        return MockResult()
+
+    monkeypatch.setattr(IntegrationService, "execute_operation", mock_execute)
+
+    req = ToolRequest(
+        tenant_id=tenant_a.id,
+        tool_name="execute_integration_operation",
+        parameters={
+            "connection_id": str(conn.id),
+            "operation": "list_calendars",
+            "params": {},
+        },
+    )
+
+    res = await tool_execute_integration_operation(req, db_session)
+    assert res.success is True
+    assert res.data["access_token"] == "[REDACTED]"
+    assert res.data["calendars"][0]["refresh_token"] == "[REDACTED]"
