@@ -16,6 +16,7 @@ from app.billing.usage import UsageService, UsageMetric
 from app.billing.invoices import InvoiceService
 from app.billing.payments import PaymentService
 from app.analytics.services import AnalyticsService
+from app.integrations.credentials import redact_secrets
 
 
 async def tool_get_billing_summary(request: ToolRequest, db_session: AsyncSession) -> ToolResult:
@@ -475,7 +476,7 @@ async def tool_execute_integration_operation(request: ToolRequest, db_session: A
         return ToolResult(
             success=res.status == "COMPLETED",
             tool_name="execute_integration_operation",
-            data=res.result or {},
+            data=redact_secrets(res.result or {}),
             error=res.safe_error_message,
             evidence=[f"Executed integration operation '{operation}' with status {res.status}"],
             correlation_id=request.correlation_id,

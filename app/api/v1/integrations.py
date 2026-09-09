@@ -631,19 +631,24 @@ async def midtrans_cancel_payment(
     if not conn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Midtrans connection not active")
 
-    res = await service.execute_operation(
-        tenant_id=tenant_id,
-        connection_id=conn.id,
-        operation="cancel_payment",
-        params={"order_id": payment.provider_payment_id or str(payment.invoice_id)},
-        actor_permissions={EXECUTE_INTEGRATION},
-    )
+    try:
+        res = await service.execute_operation(
+            tenant_id=tenant_id,
+            connection_id=conn.id,
+            operation="cancel_payment",
+            params={"order_id": payment.provider_payment_id or str(payment.invoice_id)},
+            actor_permissions=permissions,
+        )
 
-    if res.result and res.result.get("success"):
-        payment.status = "CANCELLED"
-        await db.commit()
+        if res.result and res.result.get("success"):
+            payment.status = "CANCELLED"
+            await db.commit()
 
-    return {"status": "CANCELLED" if (res.result and res.result.get("success")) else payment.status, "result": res.result}
+        return {"status": "CANCELLED" if (res.result and res.result.get("success")) else payment.status, "result": res.result}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except IntegrationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @router.post("/midtrans/payments/{payment_id}/refund")

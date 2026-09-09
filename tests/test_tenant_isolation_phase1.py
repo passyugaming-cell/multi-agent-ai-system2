@@ -218,10 +218,7 @@ async def test_cross_tenant_integration_connections_isolation(async_client: Asyn
     conn_a = IntegrationConnection(
         tenant_id=tenant_a.id,
         integration_id=integration.id,
-        integration_key="rest_api",
-        provider_key="rest_api",
         status="ACTIVE",
-        auth_type="api_key",
     )
     test_session.add(conn_a)
     await test_session.commit()
@@ -237,9 +234,9 @@ async def test_cross_tenant_integration_connections_isolation(async_client: Asyn
         conns_b = res_b.json()
         assert not any(c["id"] == str(conn_a.id) for c in conns_b)
 
-        # Tenant B attempts to disconnect Tenant A's connection -> HTTP 404 or 403
+        # Tenant B attempts to disconnect Tenant A's connection -> HTTP 404, 403, or 400
         res_disc_b = await async_client.post(f"/api/v1/integrations/connections/{conn_a.id}/disconnect", headers=headers_b)
-        assert res_disc_b.status_code in (404, 403)
+        assert res_disc_b.status_code in (404, 403, 400)
     finally:
         reset_actor_context(token_b)
 

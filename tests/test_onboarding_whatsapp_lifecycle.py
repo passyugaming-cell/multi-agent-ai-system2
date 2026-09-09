@@ -14,10 +14,10 @@ from app.billing.plans import PlanService
 from app.agents.owner_ai.tools import tool_get_onboarding_status, tool_get_whatsapp_connection_status
 from app.agents.base.schemas import ToolRequest
 from app.core.ai_gateway.schemas import AIResponse
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 AUTH_HEADERS = lambda tenant_id: {
     "X-Tenant-ID": str(tenant_id),
-    "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS",
 }
 
 
@@ -104,17 +104,31 @@ async def test_05_permission_fail_closed_insufficient_permissions(
 async def test_06_whatsapp_connect_within_limit(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    conn_payload = {
-        "phone_number_id": "123456789",
-        "access_token": "mock_valid_token_abc",
-        "waba_id": "waba_999",
-    }
-    res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json=conn_payload,
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={
+            "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS",
+            "business.read", "business.write", "product.read", "product.write",
+        },
     )
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        conn_payload = {
+            "phone_number_id": "123456789",
+            "access_token": "mock_valid_token_abc",
+            "waba_id": "waba_999",
+        }
+        res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json=conn_payload,
+        )
+    finally:
+        reset_actor_context(token)
+
     assert res.status_code == 200, res.json()
     data = res.json()
     assert data["status"] in ("ACTIVE", "CONNECTED")
@@ -126,21 +140,32 @@ async def test_06_whatsapp_connect_within_limit(
 async def test_07_whatsapp_connect_exceed_limit_denied(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    # Connect 1st phone number (limit for trial/starter is 1)
-    c1 = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json={"phone_number_id": "111111111", "access_token": "token1"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
-    assert c1.status_code == 200
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        # Connect 1st phone number (limit for trial/starter is 1)
+        c1 = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json={"phone_number_id": "111111111", "access_token": "token1"},
+        )
+        assert c1.status_code == 200
 
-    # Connect 2nd different phone number -> must be DENIED (403 CONNECTION_LIMIT_EXCEEDED)
-    c2 = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json={"phone_number_id": "222222222", "access_token": "token2"},
-    )
+        # Connect 2nd different phone number -> must be DENIED (403 CONNECTION_LIMIT_EXCEEDED)
+        c2 = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json={"phone_number_id": "222222222", "access_token": "token2"},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert c2.status_code == 403
     assert c2.json()["error"]["code"] == "CONNECTION_LIMIT_EXCEEDED"
 
@@ -149,23 +174,34 @@ async def test_07_whatsapp_connect_exceed_limit_denied(
 async def test_08_whatsapp_reconnect_reuses_same_connection_id(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-
-    # Initial connect
-    c_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
-    assert c_res.status_code == 200
-    conn_id = c_res.json()["connection_id"]
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
 
-    # Reconnect with updated credentials using connection_id
-    r_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
-        headers=headers,
-        json={"phone_number_id": "123456789", "access_token": "mock_token_2"},
-    )
+        # Initial connect
+        c_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+        )
+        assert c_res.status_code == 200
+        conn_id = c_res.json()["connection_id"]
+
+        # Reconnect with updated credentials using connection_id
+        r_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
+            headers=headers,
+            json={"phone_number_id": "123456789", "access_token": "mock_token_2"},
+        )
+    finally:
+        reset_actor_context(token)
+
     assert r_res.status_code == 200
     r_data = r_res.json()
     assert r_data["connection_id"] == conn_id
@@ -176,21 +212,43 @@ async def test_08_whatsapp_reconnect_reuses_same_connection_id(
 async def test_09_whatsapp_reconnect_cross_tenant_denied(
     client: AsyncClient, active_tenant: Tenant, tenant_b: Tenant
 ) -> None:
-    headers_a = AUTH_HEADERS(active_tenant.id)
-    c_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers_a,
-        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+    actor_a = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
+    token_a = set_actor_context(actor_a)
+    try:
+        headers_a = AUTH_HEADERS(active_tenant.id)
+        c_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers_a,
+            json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+        )
+    finally:
+        reset_actor_context(token_a)
+
     conn_id = c_res.json()["connection_id"]
 
-    # Tenant B attempting to reconnect Tenant A's connection_id -> denied
-    headers_b = AUTH_HEADERS(tenant_b.id)
-    r_res = await client.post(
-        f"/api/v1/tenants/{tenant_b.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
-        headers=headers_b,
-        json={"phone_number_id": "123456789", "access_token": "mock_token_hacked"},
+    actor_b = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_b.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
+    token_b = set_actor_context(actor_b)
+    try:
+        # Tenant B attempting to reconnect Tenant A's connection_id -> denied
+        headers_b = AUTH_HEADERS(tenant_b.id)
+        r_res = await client.post(
+            f"/api/v1/tenants/{tenant_b.id}/onboarding/whatsapp/reconnect?connection_id={conn_id}",
+            headers=headers_b,
+            json={"phone_number_id": "123456789", "access_token": "mock_token_hacked"},
+        )
+    finally:
+        reset_actor_context(token_b)
+
     assert r_res.status_code in (403, 404)
 
 
@@ -198,67 +256,98 @@ async def test_09_whatsapp_reconnect_cross_tenant_denied(
 async def test_10_whatsapp_disconnect_and_repeated_disconnect(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    c_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
-    conn_id = c_res.json()["connection_id"]
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        c_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json={"phone_number_id": "123456789", "access_token": "mock_token_1"},
+        )
+        conn_id = c_res.json()["connection_id"]
 
-    # Disconnect 1st time
-    d1 = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
-        headers=headers,
-    )
-    assert d1.status_code == 200
-    assert d1.json()["status"] == "DISCONNECTED"
+        # Disconnect 1st time
+        d1 = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
+            headers=headers,
+        )
+        assert d1.status_code == 200
+        assert d1.json()["status"] == "DISCONNECTED"
 
-    # Disconnect 2nd time (idempotent)
-    d2 = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
-        headers=headers,
-    )
-    assert d2.status_code == 200
-    assert d2.json()["status"] == "DISCONNECTED"
+        # Disconnect 2nd time (idempotent)
+        d2 = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/disconnect?connection_id={conn_id}",
+            headers=headers,
+        )
+        assert d2.status_code == 200
+        assert d2.json()["status"] == "DISCONNECTED"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
 async def test_11_ai_test_gate(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    mock_resp = AIResponse(
-        text="AI Store Assistant is ready and operational.",
-        model="gemini-3.1-flash-lite",
-        input_tokens=10,
-        output_tokens=15,
-        total_tokens=25,
-        estimated_cost=0.0001,
-        request_id="req_test_123",
-        usage_status="EXACT",
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
-    with patch("app.core.ai_gateway.gateway.AIGateway.generate", new_callable=AsyncMock, return_value=mock_resp):
-        res = await client.post(
-            f"/api/v1/tenants/{active_tenant.id}/onboarding/ai-test",
-            headers=headers,
-            json={"test_message": "Hello AI assistant test"},
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        mock_resp = AIResponse(
+            text="AI Store Assistant is ready and operational.",
+            model="gemini-3.1-flash-lite",
+            input_tokens=10,
+            output_tokens=15,
+            total_tokens=25,
+            estimated_cost=0.0001,
+            request_id="req_test_123",
+            usage_status="EXACT",
         )
-        assert res.status_code == 200
-        data = res.json()
-        assert data["success"] is True
-        assert data["ai_gateway_status"] == "REACHABLE"
+        with patch("app.core.ai_gateway.gateway.AIGateway.generate", new_callable=AsyncMock, return_value=mock_resp):
+            res = await client.post(
+                f"/api/v1/tenants/{active_tenant.id}/onboarding/ai-test",
+                headers=headers,
+                json={"test_message": "Hello AI assistant test"},
+            )
+            assert res.status_code == 200
+            data = res.json()
+            assert data["success"] is True
+            assert data["ai_gateway_status"] == "REACHABLE"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
 async def test_12_activation_blocked_when_requirements_missing(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
-        headers=headers,
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
+            headers=headers,
+        )
+    finally:
+        reset_actor_context(token)
+
     assert res.status_code in (400, 422)
     err = res.json()
     assert "ACTIVATION_BLOCKED" in str(err) or "TENANT_NOT_READY" in str(err) or "Readiness score" in str(err)
@@ -268,65 +357,79 @@ async def test_12_activation_blocked_when_requirements_missing(
 async def test_13_activation_success_and_idempotency(
     client: AsyncClient, db_session: AsyncSession, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-
-    provisioner = TenantProvisioner(db_session)
-    await provisioner.provision_tenant(active_tenant.id)
-
-    bp = BusinessProfile(
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
-        business_name="Beta Shop",
-        business_type="E-commerce",
-        description="Beta Shop store description",
-        operating_hours={"mon": "09:00-18:00"},
-        payment_methods={"bank_transfer": True},
-        shipping_information={"regular": True},
-        return_policy="Return within 14 days",
-        exchange_policy="Exchange within 7 days",
-        refund_policy="Refund within 30 days",
+        role="owner",
+        permissions={
+            "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS",
+            "business.read", "business.write", "product.read", "product.write",
+        },
     )
-    db_session.add(bp)
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
 
-    p1 = Product(
-        tenant_id=active_tenant.id,
-        name="Product B",
-        price=150.00,
-        stock=20,
-        is_active=True,
-    )
-    db_session.add(p1)
-    await db_session.commit()
+        provisioner = TenantProvisioner(db_session)
+        await provisioner.provision_tenant(active_tenant.id)
 
-    conn_payload = {
-        "phone_number_id": "987654321",
-        "access_token": "mock_token_beta",
-    }
-    await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json=conn_payload,
-    )
+        bp = BusinessProfile(
+            tenant_id=active_tenant.id,
+            business_name="Beta Shop",
+            business_type="E-commerce",
+            description="Beta Shop store description",
+            operating_hours={"mon": "09:00-18:00"},
+            payment_methods={"bank_transfer": True},
+            shipping_information={"regular": True},
+            return_policy="Return within 14 days",
+            exchange_policy="Exchange within 7 days",
+            refund_policy="Refund within 30 days",
+        )
+        db_session.add(bp)
 
-    await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/validate",
-        headers=headers,
-    )
+        p1 = Product(
+            tenant_id=active_tenant.id,
+            name="Product B",
+            price=150.00,
+            stock=20,
+            is_active=True,
+        )
+        db_session.add(p1)
+        await db_session.commit()
 
-    act_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
-        headers=headers,
-    )
-    assert act_res.status_code == 200
-    act_data = act_res.json()
-    assert act_data["current_state"] == "ACTIVE"
+        conn_payload = {
+            "phone_number_id": "987654321",
+            "access_token": "mock_token_beta",
+        }
+        conn_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json=conn_payload,
+        )
+        assert conn_res.status_code == 200
 
-    # Idempotent second call on already ACTIVE tenant (must NOT crash or duplicate)
-    act_res2 = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
-        headers=headers,
-    )
-    assert act_res2.status_code == 200
-    assert act_res2.json()["current_state"] == "ACTIVE"
+        await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/validate",
+            headers=headers,
+        )
+
+        act_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
+            headers=headers,
+        )
+        assert act_res.status_code == 200
+        act_data = act_res.json()
+        assert act_data["current_state"] == "ACTIVE"
+
+        # Idempotent second call on already ACTIVE tenant (must NOT crash or duplicate)
+        act_res2 = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
+            headers=headers,
+        )
+        assert act_res2.status_code == 200
+        assert act_res2.json()["current_state"] == "ACTIVE"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -356,18 +459,29 @@ async def test_14_owner_ai_read_only_tools(
 async def test_15_credential_security_no_secret_leakage(
     client: AsyncClient, active_tenant: Tenant
 ) -> None:
-    headers = AUTH_HEADERS(active_tenant.id)
-    conn_payload = {
-        "phone_number_id": "123456789",
-        "access_token": "super_secret_access_token_123",
-        "app_secret": "super_secret_app_secret_456",
-        "webhook_secret": "super_secret_wh_secret_789",
-    }
-    c_res = await client.post(
-        f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
-        headers=headers,
-        json=conn_payload,
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
     )
+    token = set_actor_context(actor)
+    try:
+        headers = AUTH_HEADERS(active_tenant.id)
+        conn_payload = {
+            "phone_number_id": "123456789",
+            "access_token": "super_secret_access_token_123",
+            "app_secret": "super_secret_app_secret_456",
+            "webhook_secret": "super_secret_wh_secret_789",
+        }
+        c_res = await client.post(
+            f"/api/v1/tenants/{active_tenant.id}/onboarding/whatsapp/connect",
+            headers=headers,
+            json=conn_payload,
+        )
+    finally:
+        reset_actor_context(token)
+
     body_str = c_res.text
     assert "super_secret_access_token_123" not in body_str
     assert "super_secret_app_secret_456" not in body_str
