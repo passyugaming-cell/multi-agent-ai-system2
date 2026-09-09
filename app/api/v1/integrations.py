@@ -121,11 +121,12 @@ async def google_calendar_callback(
     state: str,
     redirect_uri: str | None = None,
     x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     import httpx
     from app.core.config import settings
-    from app.core.context import get_actor_context, set_tenant_context
+    from app.core.context import get_tenant_context
     service = IntegrationService(db)
 
     try:
@@ -133,27 +134,19 @@ async def google_calendar_callback(
         state_payload = validate_oauth_state(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
 
-        # 2. If client passed header, verify strict match with state tenant_id
-        if x_tenant_id:
-            try:
-                hdr_tenant_id = uuid.UUID(x_tenant_id)
-                if hdr_tenant_id != state_tenant_id:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
-            except ValueError:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Tenant-ID header must be a valid UUID")
+        # 2. Verify match between state tenant_id and request tenant context
+        request_tenant_id = get_tenant_context()
+        if request_tenant_id and request_tenant_id != state_tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
 
         target_tenant_id = state_tenant_id
 
-        # Set tenant context dynamically for callback processing
-        set_tenant_context(target_tenant_id)
-
-        # 3. Resolve permissions from active actor context or fallback to permissions encoded in actor context
-        actor = get_actor_context()
-        actor_perms = set(actor.permissions) if actor else {MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS}
-
-        # Check actor authorization permissions
+        # 3. Fail closed if permissions are missing
         if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required",
+            )
 
         token_payload = {
             "code": code,
@@ -386,11 +379,12 @@ async def google_sheets_callback(
     state: str,
     redirect_uri: str | None = None,
     x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
     import httpx
     from app.core.config import settings
-    from app.core.context import get_actor_context, set_tenant_context
+    from app.core.context import get_tenant_context
     service = IntegrationService(db)
 
     try:
@@ -398,27 +392,19 @@ async def google_sheets_callback(
         state_payload = validate_oauth_state(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
 
-        # 2. If client passed header, verify strict match with state tenant_id
-        if x_tenant_id:
-            try:
-                hdr_tenant_id = uuid.UUID(x_tenant_id)
-                if hdr_tenant_id != state_tenant_id:
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
-            except ValueError:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Tenant-ID header must be a valid UUID")
+        # 2. Verify match between state tenant_id and request tenant context
+        request_tenant_id = get_tenant_context()
+        if request_tenant_id and request_tenant_id != state_tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
 
         target_tenant_id = state_tenant_id
 
-        # Set tenant context dynamically for callback processing
-        set_tenant_context(target_tenant_id)
-
-        # 3. Resolve permissions from active actor context or fallback to permissions encoded in actor context
-        actor = get_actor_context()
-        actor_perms = set(actor.permissions) if actor else {MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS}
-
-        # Check actor authorization permissions
+        # 3. Fail closed if permissions are missing
         if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required",
+            )
 
         token_payload = {
             "code": code,

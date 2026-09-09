@@ -47,31 +47,39 @@ def generate_oauth_state(tenant_id: uuid.UUID, user_id: str | None = None, redir
     return f"{payload_b64}.{sig}"
 
 
-def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
-    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding.
-
-    If expected_tenant_id is provided, enforces that the state payload tenant_id matches expected_tenant_id.
-    If expected_tenant_id is None, validates the HMAC signature and expiration, and returns the payload with verified tenant_id.
-    """
+def parse_oauth_state_payload(state: str) -> dict[str, Any]:
+    """Verifies HMAC signature and expiration of an OAuth state token without consuming anti-replay nonce."""
     if not state or "." not in state:
         raise PermanentIntegrationError("Invalid OAuth state format", error_code="INVALID_STATE")
 
     parts = state.split(".", 1)
     payload_b64, sig = parts[0], parts[1]
 
-    # Verify signature
     expected_sig = hmac.new(_get_secret_key(), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
         raise PermanentIntegrationError("Tampered or invalid OAuth state signature", error_code="INVALID_STATE_SIGNATURE")
 
-    # Decode payload
     try:
         payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
         state_payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception as e:
         raise PermanentIntegrationError(f"Malformed OAuth state payload: {e}", error_code="MALFORMED_STATE")
 
-    # Verify tenant binding
+    expires_at = state_payload.get("expires_at", 0)
+    if int(time.time()) > expires_at:
+        raise PermanentIntegrationError("OAuth state has expired", error_code="EXPIRED_STATE")
+
+    return state_payload
+
+
+def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding.
+
+    If expected_tenant_id is provided, enforces that the state payload tenant_id matches expected_tenant_id.
+    If expected_tenant_id is None, validates the HMAC signature, expiration, and anti-replay nonce, returning payload.
+    """
+    state_payload = parse_oauth_state_payload(state)
+
     state_tenant_id = state_payload.get("tenant_id")
     if not state_tenant_id:
         raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
@@ -79,11 +87,8 @@ def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None
     if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
         raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
 
-    # Verify expiration
-    expires_at = state_payload.get("expires_at", 0)
     now = int(time.time())
-    if now > expires_at:
-        raise PermanentIntegrationError("OAuth state has expired", error_code="EXPIRED_STATE")
+    expires_at = state_payload.get("expires_at", 0)
 
     # Cleanup expired nonces from memory cache
     expired_nonces = [n for n, exp in _USED_NONCES.items() if now > exp]

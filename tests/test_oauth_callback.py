@@ -63,6 +63,34 @@ def test_expired_oauth_state_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oauth_callback_unauthenticated_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    # Without active actor context, callback MUST fail-closed with HTTP 403
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code == 403
+    assert "Authentication required" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_callback_insufficient_permissions_rejected(async_client, tenant_a):
+    state = generate_oauth_state(tenant_a.id)
+    # Actor missing MANAGE_CREDENTIALS
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        permissions={MANAGE_INTEGRATIONS, VIEW_INTEGRATIONS},
+    )
+    token = set_actor_context(actor)
+    try:
+        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+        assert resp.status_code == 403
+        assert "Permission denied" in resp.json()["error"]["message"]
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
 async def test_oauth_callback_flow_integration(async_client, db_session, tenant_a, tenant_b, monkeypatch):
     from app.billing.plans import PlanService
     from app.billing.subscription import SubscriptionService
@@ -117,7 +145,7 @@ async def test_oauth_callback_flow_integration(async_client, db_session, tenant_
         data = resp.json()
         state = data["state"]
 
-        # 2. Callback without X-Tenant-ID header should succeed using state tenant context
+        # 2. Callback with active actor context should succeed using state tenant context
         resp_cb = await async_client.get(
             f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}",
         )
