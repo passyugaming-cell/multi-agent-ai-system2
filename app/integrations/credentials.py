@@ -13,7 +13,11 @@ from app.integrations.exceptions import CredentialSecurityError
 logger = logging.getLogger(__name__)
 
 SECRET_KEY_PATTERNS = re.compile(
-    r"(secret|password|token|api_key|apikey|private|credential|authorization|bearer|auth|access_token|refresh_token)",
+    r"(secret|password|token|api_key|apikey|private|credential|authorization|bearer|auth|access_token|refresh_token|server_key|client_secret|app_secret|verify_token|webhook_secret|private_key)",
+    re.IGNORECASE,
+)
+SECRET_VALUE_PATTERNS = re.compile(
+    r"(bearer\s+[a-zA-Z0-9_\-\.]+|ya29\.[a-zA-Z0-9_\-]+|GOCSPX\-[a-zA-Z0-9_\-]+|SB\-Mid\-[a-zA-Z0-9_\-]+|sk\-[a-zA-Z0-9_\-]+|ghp_[a-zA-Z0-9_\-]+)",
     re.IGNORECASE,
 )
 
@@ -75,7 +79,7 @@ def redact_secrets(data: Any) -> Any:
     elif isinstance(data, list):
         return [redact_secrets(item) for item in data]
     elif isinstance(data, str):
-        if SECRET_KEY_PATTERNS.search(data) and len(data) > 20:
+        if SECRET_VALUE_PATTERNS.search(data) or (SECRET_KEY_PATTERNS.search(data) and len(data) > 20 and "=" in data):
             return "[REDACTED_SECRET]"
         return data
     return data

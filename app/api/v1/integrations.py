@@ -144,7 +144,8 @@ async def google_calendar_callback(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
+                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, resp.text)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
             tokens = resp.json()
 
         conn = await service.connect_integration(
@@ -386,7 +387,8 @@ async def google_sheets_callback(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
+                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, resp.text)
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
             tokens = resp.json()
 
         conn = await service.connect_integration(
