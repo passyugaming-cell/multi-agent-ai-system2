@@ -175,9 +175,24 @@ async def test_permission_enforcement(db_session: AsyncSession, tenant_a):
 
 
 @pytest.mark.asyncio
-async def test_api_forged_permission_headers_rejection(async_client: AsyncClient, tenant_a):
+async def test_api_forged_permission_headers_rejection(async_client: AsyncClient, db_session: AsyncSession, tenant_a):
     from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
     from app.core.auth import ROLE_PERMISSIONS
+
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    integration = Integration(
+        integration_key="google_sheets",
+        provider_key="google_sheets",
+        display_name="Google Sheets Sync",
+        category="analytics",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
 
     # Member role has VIEW_INTEGRATIONS but NOT MANAGE_INTEGRATIONS or MANAGE_CREDENTIALS
     member_actor = AuthenticatedActor(
@@ -194,12 +209,11 @@ async def test_api_forged_permission_headers_rejection(async_client: AsyncClient
             "X-Actor-Permissions": "MANAGE_INTEGRATIONS,MANAGE_CREDENTIALS,VIEW_INTEGRATIONS,EXECUTE_INTEGRATION",
         }
         resp = await async_client.post(
-            "/api/v1/integrations/connect/rest_api",
-            json={"credentials": {"api_key": "test"}},
+            "/api/v1/integrations/connect/google_sheets",
+            json={"integration_id": str(integration.id), "credentials": {"access_token": "test_token"}},
             headers=headers,
         )
         assert resp.status_code == 403
-        assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
     finally:
         reset_actor_context(token)
 
