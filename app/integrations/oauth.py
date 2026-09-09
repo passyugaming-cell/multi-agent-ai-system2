@@ -131,11 +131,11 @@ async def validate_oauth_state_async(state: str, expected_tenant_id: uuid.UUID |
 
 
 def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
-    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding.
+    """Sync fallback for non-production/test callers. Prohibits in-memory replay in production/staging."""
+    app_env = getattr(settings, "APP_ENV", "development")
+    if app_env in ("production", "staging"):
+        raise PermanentIntegrationError("Sync validate_oauth_state is disabled in production/staging. Use validate_oauth_state_async.", error_code="ASYNC_OAUTH_REQUIRED")
 
-    If expected_tenant_id is provided, enforces that the state payload tenant_id matches expected_tenant_id.
-    If expected_tenant_id is None, validates the HMAC signature, expiration, and anti-replay nonce, returning payload.
-    """
     state_payload = parse_oauth_state_payload(state)
 
     state_tenant_id = state_payload.get("tenant_id")
