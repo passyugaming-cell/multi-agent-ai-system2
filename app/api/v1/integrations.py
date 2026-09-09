@@ -135,9 +135,10 @@ async def google_calendar_callback(
     service = IntegrationService(db)
 
     try:
-        # 1. Recover and validate trusted tenant from OAuth state token
+        # 1. Recover and validate trusted tenant and user from OAuth state token
         state_payload = validate_oauth_state(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
+        state_user_id = state_payload.get("user_id")
 
         # 2. Verify match between state tenant_id and request tenant context
         request_tenant_id = get_tenant_context()
@@ -146,7 +147,16 @@ async def google_calendar_callback(
 
         target_tenant_id = state_tenant_id
 
-        # 3. Fail closed if permissions are missing
+        # 3. Verify user identity match between signed state and authenticated actor context
+        from app.core.context import get_actor_context
+        actor = get_actor_context()
+        if not actor or not actor.user_id or str(actor.user_id) != state_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Identity mismatch between OAuth state and authenticated actor",
+            )
+
+        # 4. Fail closed if permissions are missing
         if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -397,9 +407,10 @@ async def google_sheets_callback(
     service = IntegrationService(db)
 
     try:
-        # 1. Recover and validate trusted tenant from OAuth state token
+        # 1. Recover and validate trusted tenant and user from OAuth state token
         state_payload = validate_oauth_state(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
+        state_user_id = state_payload.get("user_id")
 
         # 2. Verify match between state tenant_id and request tenant context
         request_tenant_id = get_tenant_context()
@@ -408,7 +419,16 @@ async def google_sheets_callback(
 
         target_tenant_id = state_tenant_id
 
-        # 3. Fail closed if permissions are missing
+        # 3. Verify user identity match between signed state and authenticated actor context
+        from app.core.context import get_actor_context
+        actor = get_actor_context()
+        if not actor or not actor.user_id or str(actor.user_id) != state_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Identity mismatch between OAuth state and authenticated actor",
+            )
+
+        # 4. Fail closed if permissions are missing
         if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
