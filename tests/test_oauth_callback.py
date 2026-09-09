@@ -73,47 +73,59 @@ async def test_case_01_no_actor_context_rejected(async_client, tenant_a):
 
 # 2. Actor exists but has no permissions -> 403
 @pytest.mark.asyncio
-async def test_case_02_actor_no_permissions_rejected(async_client, tenant_a):
-    user_id = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_id))
-    actor = AuthenticatedActor(user_id=user_id, tenant_id=tenant_a.id, role="member", permissions=set())
-    token = set_actor_context(actor)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 403
-    finally:
-        reset_actor_context(token)
+async def test_case_02_actor_no_permissions_rejected(async_client, db_session, tenant_a):
+    user = User(
+        email=f"member_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="member",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code == 403
 
 
 # 3. MANAGE_INTEGRATIONS only -> 403
 @pytest.mark.asyncio
-async def test_case_03_manage_integrations_only_rejected(async_client, tenant_a):
-    user_id = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_id))
-    actor = AuthenticatedActor(user_id=user_id, tenant_id=tenant_a.id, role="member", permissions={MANAGE_INTEGRATIONS})
-    token = set_actor_context(actor)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 403
-    finally:
-        reset_actor_context(token)
+async def test_case_03_manage_integrations_only_rejected(async_client, db_session, tenant_a):
+    user = User(
+        email=f"member_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="member",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code == 403
 
 
 # 4. MANAGE_CREDENTIALS only -> 403
 @pytest.mark.asyncio
-async def test_case_04_manage_credentials_only_rejected(async_client, tenant_a):
-    user_id = uuid.uuid4()
-    state = generate_oauth_state(tenant_a.id, user_id=str(user_id))
-    actor = AuthenticatedActor(user_id=user_id, tenant_id=tenant_a.id, role="member", permissions={MANAGE_CREDENTIALS})
-    token = set_actor_context(actor)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 403
-    finally:
-        reset_actor_context(token)
+async def test_case_04_manage_credentials_only_rejected(async_client, db_session, tenant_a):
+    user = User(
+        email=f"member_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash="hash",
+        tenant_id=tenant_a.id,
+        role="member",
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+
+    state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code == 403
 
 
-# 5. Both permissions -> success
+# 5. Both permissions -> success via real HTTP middleware traversal
 @pytest.mark.asyncio
 async def test_case_05_both_permissions_success(async_client, db_session, tenant_a, monkeypatch):
     from app.billing.plans import PlanService
@@ -150,14 +162,9 @@ async def test_case_05_both_permissions_success(async_client, db_session, tenant
     monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
     state = generate_oauth_state(tenant_a.id, user_id=str(user.id))
-    actor = AuthenticatedActor(user_id=user.id, tenant_id=tenant_a.id, role="owner", permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS})
-    token = set_actor_context(actor)
-    try:
-        resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "success"
-    finally:
-        reset_actor_context(token)
+    resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={state}")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
 
 
 # 6. Forged X-Actor-Permissions -> rejected
@@ -230,6 +237,48 @@ async def test_case_11_invalid_signature_rejected(async_client, tenant_a):
     tampered_state = f"{payload_b64}.{'0' * len(sig)}"
     resp = await async_client.get(f"/api/v1/integrations/google-calendar/callback?code=mock_code&state={tampered_state}")
     assert resp.status_code == 400
+
+
+# 21. Production environment fail-closed when Redis replay store fails
+@pytest.mark.asyncio
+async def test_case_21_production_redis_store_failure_fails_closed(monkeypatch, tenant_a):
+    from app.integrations.oauth import consume_oauth_jti_redis
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+
+    import redis.asyncio as aioredis
+    def mock_from_url(*args, **kwargs):
+        raise ConnectionError("Redis connection refused")
+
+    monkeypatch.setattr(aioredis, "from_url", mock_from_url)
+
+    with pytest.raises(PermanentIntegrationError) as exc_info:
+        await consume_oauth_jti_redis("test_nonce_123", int(time.time()) + 900)
+    assert exc_info.value.error_code == "OAUTH_STORE_UNAVAILABLE"
+
+
+# 22. Concurrent double use allows only first consumption
+@pytest.mark.asyncio
+async def test_case_22_concurrent_double_use_allows_only_one(tenant_a):
+    import asyncio
+    from app.integrations.oauth import validate_oauth_state_async
+
+    state = generate_oauth_state(tenant_a.id)
+
+    res1, res2 = await asyncio.gather(
+        validate_oauth_state_async(state),
+        validate_oauth_state_async(state),
+        return_exceptions=True,
+    )
+
+    results = [res1, res2]
+    successes = [r for r in results if isinstance(r, dict)]
+    errors = [r for r in results if isinstance(r, PermanentIntegrationError)]
+
+    assert len(successes) == 1
+    assert len(errors) == 1
+    assert errors[0].error_code == "REUSED_STATE"
 
 
 # 12. Expired state -> rejected

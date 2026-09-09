@@ -72,6 +72,64 @@ def parse_oauth_state_payload(state: str) -> dict[str, Any]:
     return state_payload
 
 
+async def consume_oauth_jti_redis(nonce: str, expires_at: int) -> bool:
+    """Atomically claims an OAuth state nonce/JTI in Redis with TTL matching remaining lifetime.
+
+    Returns True if successfully claimed, False if already consumed.
+    Fails closed in production/staging if Redis is unavailable.
+    """
+    import logging
+    import redis.asyncio as aioredis
+    logger = logging.getLogger(__name__)
+
+    now = int(time.time())
+    ttl = max(1, expires_at - now)
+    key = f"oauth_state_jti:{nonce}"
+    app_env = getattr(settings, "APP_ENV", "development")
+
+    try:
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            acquired = await redis_client.set(key, "used", nx=True, ex=ttl)
+            return bool(acquired)
+        finally:
+            await redis_client.aclose()
+    except PermanentIntegrationError:
+        raise
+    except Exception as exc:
+        logger.warning("Redis OAuth JTI check failed for nonce %s: %s", nonce, exc)
+        if app_env in ("production", "staging"):
+            raise PermanentIntegrationError("OAuth replay store unavailable", error_code="OAUTH_STORE_UNAVAILABLE")
+        if nonce in _USED_NONCES:
+            return False
+        _USED_NONCES[nonce] = expires_at
+        return True
+
+
+async def validate_oauth_state_async(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Async variant of validate_oauth_state enforcing durable, atomic Redis anti-replay tracking."""
+    state_payload = parse_oauth_state_payload(state)
+
+    state_tenant_id = state_payload.get("tenant_id")
+    if not state_tenant_id:
+        raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
+
+    if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
+        raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
+
+    nonce = state_payload.get("nonce")
+    expires_at = state_payload.get("expires_at", 0)
+    if not nonce:
+        raise PermanentIntegrationError("OAuth state is missing anti-replay nonce", error_code="REUSED_STATE")
+
+    consumed = await consume_oauth_jti_redis(nonce, expires_at)
+    if not consumed:
+        raise PermanentIntegrationError("OAuth state has already been used or missing nonce", error_code="REUSED_STATE")
+
+    _USED_NONCES[nonce] = expires_at
+    return state_payload
+
+
 def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
     """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding.
 

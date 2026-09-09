@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.database.models.integrations import (
     Integration,
@@ -261,7 +262,14 @@ class IntegrationService:
             connection.last_error_at = now
             connection.error_message = redact_secrets(str(e))
 
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
 
         await publish_integration_event(
             tenant_id=tenant_id,

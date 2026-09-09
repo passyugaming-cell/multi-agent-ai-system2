@@ -25,7 +25,7 @@ from app.integrations.permissions import (
 )
 from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
-from app.integrations.oauth import generate_oauth_state, validate_oauth_state
+from app.integrations.oauth import generate_oauth_state, validate_oauth_state, validate_oauth_state_async
 from app.integrations.credentials import redact_secrets
 from app.core.auth import resolve_actor_permissions
 
@@ -96,6 +96,8 @@ async def connect_integration(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     except IntegrationError as exc:
+        if getattr(exc, "error_code", None) == "ACCOUNT_ALREADY_CONNECTED":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
@@ -136,7 +138,7 @@ async def google_calendar_callback(
 
     try:
         # 1. Recover and validate trusted tenant and user from OAuth state token
-        state_payload = validate_oauth_state(state)
+        state_payload = await validate_oauth_state_async(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
         state_user_id = state_payload.get("user_id")
 
@@ -408,7 +410,7 @@ async def google_sheets_callback(
 
     try:
         # 1. Recover and validate trusted tenant and user from OAuth state token
-        state_payload = validate_oauth_state(state)
+        state_payload = await validate_oauth_state_async(state)
         state_tenant_id = uuid.UUID(state_payload["tenant_id"])
         state_user_id = state_payload.get("user_id")
 
