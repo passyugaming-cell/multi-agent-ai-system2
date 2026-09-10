@@ -10,9 +10,13 @@ class FakeDiag:
 
 
 class FakeOrigExc(Exception):
-    def __init__(self, diag: FakeDiag | None = None, msg: str = ""):
+    def __init__(self, diag: FakeDiag | None = None, msg: str = "", sqlstate: str | None = None, is_postgres: bool = False):
         super().__init__(msg)
         self.diag = diag
+        if sqlstate:
+            self.sqlstate = sqlstate
+        if is_postgres:
+            self.is_postgres = is_postgres
 
 
 # 1. PostgreSQL target unique constraint
@@ -88,8 +92,32 @@ def test_pg_6_check_violation(db_session):
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# 7. SQLite target active uniqueness
-def test_sqlite_7_target_active_uniqueness(db_session):
+# TEST A: PostgreSQL with orig.diag=None but error message contains target index name -> DATABASE_INTEGRITY_ERROR
+def test_pg_test_a_no_diag_with_target_string_fails_closed(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=None, sqlstate="23505", msg="duplicate key value violates unique constraint uq_active_provider_external_account")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
+
+
+# TEST B: PostgreSQL with diag present but constraint_name=None and message contains target index name -> DATABASE_INTEGRITY_ERROR
+def test_pg_test_b_diag_no_constraint_name_with_target_string_fails_closed(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=FakeDiag(constraint_name=None), msg="duplicate key value violates unique constraint uq_active_provider_external_account")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
+
+
+# TEST C / 7. SQLite exact target column tuple -> ACCOUNT_ALREADY_CONNECTED
+def test_sqlite_c_exact_target_column_tuple(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id")
     exc = IntegrityError("statement", "params", orig)
@@ -100,10 +128,22 @@ def test_sqlite_7_target_active_uniqueness(db_session):
     assert excinfo.value.error_code == "ACCOUNT_ALREADY_CONNECTED"
 
 
-# 8. SQLite unrelated UNIQUE
-def test_sqlite_8_unrelated_unique(db_session):
+# TEST D / 8. SQLite unrelated UNIQUE containing integration_connections -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_d_unrelated_unique_containing_integration_connections(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.tenant_id, integration_connections.integration_id, integration_connections.external_account_id")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
+
+
+# TEST E: SQLite text merely containing provider_key/external_account_id but not the exact driver signature -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_e_partial_field_mentions_not_exact_signature(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=None, msg="NOT NULL constraint failed: integration_connections.external_account_id on provider_key")
     exc = IntegrityError("statement", "params", orig)
 
     with pytest.raises(PermanentIntegrationError) as excinfo:

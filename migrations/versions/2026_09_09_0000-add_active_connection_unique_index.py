@@ -20,7 +20,7 @@ def upgrade() -> None:
     inspector = sa.inspect(conn)
     existing_cols = [c['name'] for c in inspector.get_columns('integration_connections')]
 
-    # 1. Preflight check for orphaned integration_connections referencing non-existent integrations
+    # STEP 1: Preflight check for orphaned integration_connections referencing non-existent integrations
     orphan_check = sa.text("""
         SELECT ic.id, ic.integration_id
         FROM integration_connections ic
@@ -34,14 +34,14 @@ def upgrade() -> None:
             f"Deployment blocked: Orphaned integration connections found without matching parent integration (e.g., {orphan_ids}). Clean orphan records before migration."
         )
 
-    # 2. Add provider_key column to integration_connections if not exists
+    # STEP 2: Add provider_key column to integration_connections if not exists
     if 'provider_key' not in existing_cols:
         op.add_column(
             'integration_connections',
             sa.Column('provider_key', sa.String(length=100), nullable=False, server_default='', index=True),
         )
 
-    # Populate provider_key from integrations for existing connection records
+    # STEP 3: Populate provider_key from integrations for existing connection records
     conn.execute(sa.text("""
         UPDATE integration_connections
         SET provider_key = (
@@ -52,7 +52,7 @@ def upgrade() -> None:
         WHERE provider_key = '' OR provider_key IS NULL
     """))
 
-    # Verify post-backfill provider_key consistency
+    # STEP 4: Verify post-backfill provider_key consistency
     empty_provider_check = sa.text("""
         SELECT COUNT(*)
         FROM integration_connections
@@ -64,7 +64,7 @@ def upgrade() -> None:
             f"Deployment blocked: {empty_count} connection records still have empty provider_key after backfill."
         )
 
-    # 3. Preflight check for duplicate catalog integration records
+    # STEP 5: Preflight check for duplicate catalog integration records
     catalog_dup_check = sa.text("""
         SELECT provider_key, COUNT(*) as cnt
         FROM integrations
@@ -78,17 +78,7 @@ def upgrade() -> None:
             "Deployment blocked: Pre-existing duplicate catalog integrations found for provider_key; clean duplicates before migration."
         )
 
-    # 4. Create catalog integration provider singleton index
-    op.create_index(
-        'uq_catalog_integrations_provider',
-        'integrations',
-        ['provider_key'],
-        unique=True,
-        postgresql_where=sa.text("tenant_id IS NULL"),
-        sqlite_where=sa.text("tenant_id IS NULL"),
-    )
-
-    # 5. Preflight check for duplicate active integration connections
+    # STEP 6: Preflight check for duplicate active integration connections
     conn_dup_check = sa.text("""
         SELECT provider_key, external_account_id, COUNT(*) as cnt
         FROM integration_connections
@@ -104,7 +94,17 @@ def upgrade() -> None:
             f"Deployment blocked: Pre-existing active duplicate connections found. Resolve duplicate integration connections before applying uq_active_provider_external_account: {conn_desc}."
         )
 
-    # 6. Create active connection provider/external account unique index
+    # STEP 7: ONLY AFTER ALL PREFLIGHTS PASS -> Create catalog integration provider singleton index
+    op.create_index(
+        'uq_catalog_integrations_provider',
+        'integrations',
+        ['provider_key'],
+        unique=True,
+        postgresql_where=sa.text("tenant_id IS NULL"),
+        sqlite_where=sa.text("tenant_id IS NULL"),
+    )
+
+    # STEP 8: Create active connection provider/external account unique index
     op.create_index(
         'uq_active_provider_external_account',
         'integration_connections',

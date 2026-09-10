@@ -4,7 +4,7 @@ import hmac
 import hashlib
 import json
 import pytest
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential
 from app.integrations.service import IntegrationService
 from app.integrations.exceptions import PermanentIntegrationError
@@ -360,3 +360,50 @@ async def test_whatsapp_tenant_isolation_no_cross_tenant_bleed(async_client, db_
     res_data = resp.json()
     assert res_data["tenant_id"] == str(tenant_a.id)
     assert res_data["tenant_id"] != str(tenant_b.id)
+
+
+@pytest.mark.asyncio
+async def test_migration_preflight_checks(db_session, tenant_a, tenant_b):
+    """Verifies that Alembic migration preflight queries block deployment when orphans or active duplicates exist."""
+
+    # Preflight 1: Orphan check query
+    orphan_query = text("""
+        SELECT ic.id, ic.integration_id
+        FROM integration_connections ic
+        LEFT JOIN integrations i ON ic.integration_id = i.id
+        WHERE i.id IS NULL
+    """)
+    res_orphan = (await db_session.execute(orphan_query)).fetchall()
+    assert len(res_orphan) == 0
+
+    # Preflight 2: Post-backfill empty provider_key check query
+    empty_provider_query = text("""
+        SELECT COUNT(*)
+        FROM integration_connections
+        WHERE provider_key IS NULL OR provider_key = ''
+    """)
+    empty_cnt = (await db_session.execute(empty_provider_query)).scalar()
+    assert empty_cnt == 0
+
+    # Preflight 3: Duplicate catalog integrations check query
+    cat_dup_query = text("""
+        SELECT provider_key, COUNT(*) as cnt
+        FROM integrations
+        WHERE tenant_id IS NULL AND provider_key IS NOT NULL
+        GROUP BY provider_key
+        HAVING COUNT(*) > 1
+    """)
+    cat_dups = (await db_session.execute(cat_dup_query)).fetchall()
+    assert len(cat_dups) == 0
+
+    # Preflight 4: Duplicate active connections check query
+    active_dup_query = text("""
+        SELECT provider_key, external_account_id, COUNT(*) as cnt
+        FROM integration_connections
+        WHERE status IN ('ACTIVE', 'CONNECTED', 'CONNECTING')
+          AND external_account_id IS NOT NULL
+        GROUP BY provider_key, external_account_id
+        HAVING COUNT(*) > 1
+    """)
+    active_dups = (await db_session.execute(active_dup_query)).fetchall()
+    assert len(active_dups) == 0

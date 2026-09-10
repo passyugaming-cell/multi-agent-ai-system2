@@ -551,10 +551,18 @@ class IntegrationService:
     def _handle_integrity_error(self, exc: IntegrityError, external_account_id: str | None) -> None:
         orig = getattr(exc, "orig", None)
 
-        # 1. PostgreSQL check via DBAPI driver diagnostic info
-        diag = getattr(orig, "diag", None)
-        if diag is not None:
-            cname = getattr(diag, "constraint_name", None)
+        # 1. Detect PostgreSQL context explicitly
+        is_postgres = (
+            getattr(orig, "diag", None) is not None
+            or hasattr(orig, "sqlstate")
+            or getattr(orig, "is_postgres", False)
+            or "asyncpg" in getattr(type(orig), "__module__", "")
+            or "psycopg" in getattr(type(orig), "__module__", "")
+        )
+
+        if is_postgres:
+            diag = getattr(orig, "diag", None)
+            cname = getattr(diag, "constraint_name", None) if diag is not None else None
             if cname == "uq_active_provider_external_account":
                 raise PermanentIntegrationError(
                     f"External account '{external_account_id}' is already connected to another tenant.",
@@ -564,7 +572,13 @@ class IntegrationService:
 
         # 2. SQLite / fallback check strictly targeting the uq_active_provider_external_account index name or columns
         exc_str = str(exc)
-        if "uq_active_provider_external_account" in exc_str or "integration_connections.provider_key, integration_connections.external_account_id" in exc_str:
+        orig_str = str(orig) if orig is not None else ""
+        if (
+            "uq_active_provider_external_account" in exc_str
+            or "uq_active_provider_external_account" in orig_str
+            or "UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id" in exc_str
+            or "UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id" in orig_str
+        ):
             raise PermanentIntegrationError(
                 f"External account '{external_account_id}' is already connected to another tenant.",
                 error_code="ACCOUNT_ALREADY_CONNECTED",
