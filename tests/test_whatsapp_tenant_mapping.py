@@ -1,3 +1,4 @@
+import os
 import uuid
 import asyncio
 import hmac
@@ -5,11 +6,14 @@ import hashlib
 import json
 import pytest
 from sqlalchemy import select, func, text
+from alembic.config import Config
+from alembic import command
 from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential
 from app.integrations.service import IntegrationService
 from app.integrations.exceptions import PermanentIntegrationError
 from app.billing.plans import PlanService
 from app.billing.subscription import SubscriptionService
+from app.core.config import settings
 
 
 @pytest.mark.asyncio
@@ -411,10 +415,16 @@ async def test_migration_preflight_checks(db_session, tenant_a, tenant_b):
 
 @pytest.mark.asyncio
 async def test_migration_active_duplicate_prevents_both_indexes(db_session, tenant_a, tenant_b):
-    """Proves that a duplicate active connection blocks migration preflight before creating unique indexes."""
+    """Invokes actual Alembic upgrade head against DB with active duplicate connections and asserts failure and index absence."""
     # Drop unique indexes temporarily to simulate pre-migration state
     await db_session.execute(text("DROP INDEX IF EXISTS uq_active_provider_external_account;"))
     await db_session.execute(text("DROP INDEX IF EXISTS uq_catalog_integrations_provider;"))
+    await db_session.commit()
+
+    # Stamp alembic_version to revision prior to index creation
+    await db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL, CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num));"))
+    await db_session.execute(text("DELETE FROM alembic_version;"))
+    await db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('add_users_role_col');"))
     await db_session.commit()
 
     integration = Integration(
@@ -443,20 +453,21 @@ async def test_migration_active_duplicate_prevents_both_indexes(db_session, tena
     db_session.add_all([conn1, conn2])
     await db_session.commit()
 
-    # Preflight check 7 detects active duplicate count > 1
-    conn_dup_check = text("""
-        SELECT provider_key, external_account_id, COUNT(*) as cnt
-        FROM integration_connections
-        WHERE status IN ('ACTIVE', 'CONNECTED', 'CONNECTING')
-          AND external_account_id IS NOT NULL
-        GROUP BY provider_key, external_account_id
-        HAVING COUNT(*) > 1
-    """)
-    dups = (await db_session.execute(conn_dup_check)).fetchall()
-    assert len(dups) >= 1
-    assert any(d[0] == "whatsapp_dup" and d[1] == "shared_dup_account_123" for d in dups)
+    # Invoke Alembic upgrade head using current active database engine configuration
+    alembic_cfg = Config("alembic.ini")
+    active_db_url = os.getenv("TEST_DATABASE_URL") or settings.DATABASE_URL
+    alembic_cfg.set_main_option("sqlalchemy.url", active_db_url)
 
-    # Re-verify that neither index exists prior to step 8
+    with pytest.raises(Exception) as exc_info:
+        command.upgrade(alembic_cfg, "head")
+
+    assert "Deployment blocked: Pre-existing active duplicate connections found" in str(exc_info.value)
+
+    # Assert neither unique index was created
     idx_check = text("PRAGMA index_list('integration_connections')")
     idx_list = [r[1] for r in (await db_session.execute(idx_check)).fetchall()]
     assert "uq_active_provider_external_account" not in idx_list
+
+    idx_check_cat = text("PRAGMA index_list('integrations')")
+    idx_list_cat = [r[1] for r in (await db_session.execute(idx_check_cat)).fetchall()]
+    assert "uq_catalog_integrations_provider" not in idx_list_cat
