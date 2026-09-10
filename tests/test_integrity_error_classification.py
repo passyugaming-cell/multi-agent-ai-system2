@@ -116,8 +116,20 @@ def test_pg_test_b_diag_no_constraint_name_with_target_string_fails_closed(db_se
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# TEST C / 7. SQLite exact target column tuple -> ACCOUNT_ALREADY_CONNECTED
-def test_sqlite_c_exact_target_column_tuple(db_session):
+# TEST C: PostgreSQL with is_postgres=True, no valid diag, target message -> DATABASE_INTEGRITY_ERROR
+def test_pg_test_c_is_postgres_flag_no_diag_fails_closed(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=None, is_postgres=True, msg="duplicate key value violates unique constraint uq_active_provider_external_account")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
+
+
+# TEST D: SQLite exact target column tuple -> ACCOUNT_ALREADY_CONNECTED
+def test_sqlite_d_exact_target_column_tuple(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id")
     exc = IntegrityError("statement", "params", orig)
@@ -128,8 +140,8 @@ def test_sqlite_c_exact_target_column_tuple(db_session):
     assert excinfo.value.error_code == "ACCOUNT_ALREADY_CONNECTED"
 
 
-# TEST D / 8. SQLite unrelated UNIQUE containing integration_connections -> DATABASE_INTEGRITY_ERROR
-def test_sqlite_d_unrelated_unique_containing_integration_connections(db_session):
+# TEST E: SQLite unrelated UNIQUE containing integration_connections -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_e_unrelated_unique_containing_integration_connections(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.tenant_id, integration_connections.integration_id, integration_connections.external_account_id")
     exc = IntegrityError("statement", "params", orig)
@@ -140,8 +152,8 @@ def test_sqlite_d_unrelated_unique_containing_integration_connections(db_session
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# TEST E: SQLite text merely containing provider_key/external_account_id but not the exact driver signature -> DATABASE_INTEGRITY_ERROR
-def test_sqlite_e_partial_field_mentions_not_exact_signature(db_session):
+# TEST F: SQLite text merely containing provider_key/external_account_id but not the exact driver signature -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_f_partial_field_mentions_not_exact_signature(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="NOT NULL constraint failed: integration_connections.external_account_id on provider_key")
     exc = IntegrityError("statement", "params", orig)
