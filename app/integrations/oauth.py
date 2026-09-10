@@ -48,8 +48,8 @@ def generate_oauth_state(tenant_id: uuid.UUID, user_id: str | None = None, redir
 
 
 def parse_oauth_state_payload(state: str) -> dict[str, Any]:
-    """Verifies HMAC signature and expiration of an OAuth state token without consuming anti-replay nonce."""
-    if not state or "." not in state:
+    """Verifies HMAC signature, payload structure, field types, and expiration of an OAuth state token."""
+    if not state or not isinstance(state, str) or "." not in state:
         raise PermanentIntegrationError("Invalid OAuth state format", error_code="INVALID_STATE")
 
     parts = state.split(".", 1)
@@ -65,7 +65,35 @@ def parse_oauth_state_payload(state: str) -> dict[str, Any]:
     except Exception as e:
         raise PermanentIntegrationError(f"Malformed OAuth state payload: {e}", error_code="MALFORMED_STATE")
 
-    expires_at = state_payload.get("expires_at", 0)
+    if not isinstance(state_payload, dict):
+        raise PermanentIntegrationError("Malformed OAuth state payload: expected JSON object", error_code="MALFORMED_STATE")
+
+    # Strict field type and value validations
+    tenant_id_str = state_payload.get("tenant_id")
+    if not isinstance(tenant_id_str, str) or not tenant_id_str:
+        raise PermanentIntegrationError("Missing or invalid tenant_id in OAuth state payload", error_code="MALFORMED_STATE_TENANT")
+
+    try:
+        uuid.UUID(tenant_id_str)
+    except (ValueError, TypeError, AttributeError):
+        raise PermanentIntegrationError("Malformed tenant_id UUID in OAuth state payload", error_code="MALFORMED_STATE_TENANT")
+
+    nonce = state_payload.get("nonce")
+    if not isinstance(nonce, str) or not nonce or len(nonce) > 255:
+        raise PermanentIntegrationError("Invalid nonce in OAuth state payload", error_code="INVALID_STATE_NONCE")
+
+    created_at = state_payload.get("created_at")
+    if not isinstance(created_at, int) or isinstance(created_at, bool):
+        raise PermanentIntegrationError("Invalid created_at timestamp in OAuth state payload", error_code="INVALID_STATE_TIMESTAMP")
+
+    expires_at = state_payload.get("expires_at")
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        raise PermanentIntegrationError("Invalid expires_at timestamp in OAuth state payload", error_code="INVALID_STATE_TIMESTAMP")
+
+    redirect_uri = state_payload.get("redirect_uri")
+    if redirect_uri is not None and not isinstance(redirect_uri, str):
+        raise PermanentIntegrationError("Invalid redirect_uri in OAuth state payload", error_code="INVALID_STATE_REDIRECT_URI")
+
     if int(time.time()) > expires_at:
         raise PermanentIntegrationError("OAuth state has expired", error_code="EXPIRED_STATE")
 
