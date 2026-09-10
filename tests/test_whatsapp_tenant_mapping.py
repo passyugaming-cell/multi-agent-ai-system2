@@ -55,27 +55,35 @@ async def test_whatsapp_tenant_mapping_connect_time_duplicate_rejection(async_cl
 
 @pytest.mark.asyncio
 async def test_whatsapp_webhook_ambiguity_rejection(async_client, db_session, tenant_a, tenant_b):
-    # Manually insert active connections with duplicate external_account_id for Tenant A and Tenant B
-    integration = Integration(
-        integration_key="whatsapp_cloud_api",
+    # Insert two active connections with different integrations sharing external_account_id
+    integration1 = Integration(
+        integration_key="whatsapp_cloud_api_a",
         provider_key="whatsapp_cloud_api",
-        display_name="WhatsApp Cloud API",
+        display_name="WhatsApp Cloud API A",
+        tenant_id=tenant_a.id,
         is_enabled=True,
     )
-    db_session.add(integration)
+    integration2 = Integration(
+        integration_key="whatsapp_cloud_api_b",
+        provider_key="whatsapp",
+        display_name="WhatsApp Cloud API B",
+        tenant_id=tenant_b.id,
+        is_enabled=True,
+    )
+    db_session.add_all([integration1, integration2])
     await db_session.commit()
 
     phone_id = "duplicate_phone_number_999"
 
     conn_a = IntegrationConnection(
         tenant_id=tenant_a.id,
-        integration_id=integration.id,
+        integration_id=integration1.id,
         status="ACTIVE",
         external_account_id=phone_id,
     )
     conn_b = IntegrationConnection(
         tenant_id=tenant_b.id,
-        integration_id=integration.id,
+        integration_id=integration2.id,
         status="ACTIVE",
         external_account_id=phone_id,
     )
@@ -116,6 +124,31 @@ async def test_whatsapp_webhook_ambiguity_rejection(async_client, db_session, te
     resp = await async_client.post("/api/v1/webhooks/whatsapp", json=payload)
     assert resp.status_code == 409
     assert "Ambiguous mapping" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_integration_singleton_enforcement(db_session):
+    # System catalog integration (tenant_id IS NULL) with duplicate provider_key MUST fail unique constraint
+    cat1 = Integration(
+        tenant_id=None,
+        integration_key="whatsapp_cloud_api_v1",
+        provider_key="whatsapp_cloud_api",
+        display_name="WhatsApp V1",
+    )
+    db_session.add(cat1)
+    await db_session.commit()
+
+    cat2 = Integration(
+        tenant_id=None,
+        integration_key="whatsapp_cloud_api_v2",
+        provider_key="whatsapp_cloud_api",
+        display_name="WhatsApp V2",
+    )
+    db_session.add(cat2)
+    from sqlalchemy.exc import IntegrityError
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
 
 
 @pytest.mark.asyncio

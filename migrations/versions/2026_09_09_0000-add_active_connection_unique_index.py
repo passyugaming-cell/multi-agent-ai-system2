@@ -16,6 +16,50 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    conn = op.get_bind()
+
+    # 1. Preflight check for duplicate catalog integration records
+    catalog_dup_check = sa.text("""
+        SELECT provider_key, COUNT(*) as cnt
+        FROM integrations
+        WHERE tenant_id IS NULL AND provider_key IS NOT NULL
+        GROUP BY provider_key
+        HAVING COUNT(*) > 1
+    """)
+    cat_dups = conn.execute(catalog_dup_check).fetchall()
+    if cat_dups:
+        cat_desc = ", ".join([f"(provider_key={r[0]}, count={r[1]})" for r in cat_dups])
+        raise Exception(
+            f"Deployment blocked: Pre-existing duplicate catalog integrations found for provider_key; clean duplicates before migration: {cat_desc}."
+        )
+
+    # 2. Create catalog integration provider singleton index
+    op.create_index(
+        'uq_catalog_integrations_provider',
+        'integrations',
+        ['provider_key'],
+        unique=True,
+        postgresql_where=sa.text("tenant_id IS NULL"),
+        sqlite_where=sa.text("tenant_id IS NULL"),
+    )
+
+    # 3. Preflight check for duplicate active integration connections
+    conn_dup_check = sa.text("""
+        SELECT integration_id, external_account_id, COUNT(*) as cnt
+        FROM integration_connections
+        WHERE status IN ('ACTIVE', 'CONNECTED', 'CONNECTING')
+          AND external_account_id IS NOT NULL
+        GROUP BY integration_id, external_account_id
+        HAVING COUNT(*) > 1
+    """)
+    conn_dups = conn.execute(conn_dup_check).fetchall()
+    if conn_dups:
+        conn_desc = ", ".join([f"(integration_id={r[0]}, account={r[1]}, count={r[2]})" for r in conn_dups])
+        raise Exception(
+            f"Deployment blocked: Pre-existing active duplicate connections found. Resolve duplicate integration connections before applying uq_active_provider_external_account: {conn_desc}."
+        )
+
+    # 4. Create active connection provider/external account unique index
     op.create_index(
         'uq_active_provider_external_account',
         'integration_connections',
@@ -28,3 +72,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index('uq_active_provider_external_account', table_name='integration_connections')
+    op.drop_index('uq_catalog_integrations_provider', table_name='integrations')

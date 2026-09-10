@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, UniqueConstraint, Index, DateTime
+from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, UniqueConstraint, Index, DateTime, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +16,13 @@ class Integration(BaseModel):
         UniqueConstraint("integration_key", "tenant_id", name="uq_integrations_key_tenant"),
         Index("ix_integrations_provider", "provider_key"),
         Index("ix_integrations_tenant", "tenant_id"),
+        Index(
+            "uq_catalog_integrations_provider",
+            "provider_key",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL"),
+            sqlite_where=text("tenant_id IS NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -42,6 +49,14 @@ class IntegrationConnection(BaseModel):
     __table_args__ = (
         UniqueConstraint("tenant_id", "integration_id", "external_account_id", name="uq_integration_connections_account"),
         Index("ix_integration_connections_tenant_status", "tenant_id", "status"),
+        Index(
+            "uq_active_provider_external_account",
+            "integration_id",
+            "external_account_id",
+            unique=True,
+            postgresql_where=text("status IN ('ACTIVE', 'CONNECTED', 'CONNECTING') AND external_account_id IS NOT NULL"),
+            sqlite_where=text("status IN ('ACTIVE', 'CONNECTED', 'CONNECTING') AND external_account_id IS NOT NULL"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
