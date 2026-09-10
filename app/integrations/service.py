@@ -172,71 +172,75 @@ class IntegrationService:
         connection = (await self.session.execute(conn_stmt)).scalar_one_or_none()
 
         now = datetime.now(timezone.utc)
-        if not connection:
-            connection = IntegrationConnection(
-                tenant_id=tenant_id,
-                integration_id=integration.id,
-                status="CONNECTING",
-                external_account_id=external_account_id,
-                meta_data=config,
-            )
-            self.session.add(connection)
-            await self.session.flush()
-        else:
-            self._validate_transition(connection.status, "CONNECTING")
-            connection.status = "CONNECTING"
-            if external_account_id:
-                connection.external_account_id = external_account_id
-            if config:
-                connection.meta_data = config
+        try:
+            if not connection:
+                connection = IntegrationConnection(
+                    tenant_id=tenant_id,
+                    integration_id=integration.id,
+                    status="CONNECTING",
+                    external_account_id=external_account_id,
+                    meta_data=config,
+                )
+                self.session.add(connection)
+                await self.session.flush()
+            else:
+                self._validate_transition(connection.status, "CONNECTING")
+                connection.status = "CONNECTING"
+                if external_account_id:
+                    connection.external_account_id = external_account_id
+                if config:
+                    connection.meta_data = config
 
-        encrypted_str = self.vault.encrypt_credentials(credentials)
+            encrypted_str = self.vault.encrypt_credentials(credentials)
 
-        cred_stmt = select(IntegrationCredential).where(
-            and_(
-                IntegrationCredential.tenant_id == tenant_id,
-                IntegrationCredential.connection_id == connection.id,
-            )
-        )
-        credential = (await self.session.execute(cred_stmt)).scalar_one_or_none()
-
-        if credential:
-            credential.encrypted_secret = encrypted_str
-            credential.revoked_at = None
-        else:
-            credential = IntegrationCredential(
-                tenant_id=tenant_id,
-                connection_id=connection.id,
-                credential_type="api_key",
-                encrypted_secret=encrypted_str,
-            )
-            self.session.add(credential)
-
-        # Store WebhookConfig if secret or url provided
-        webhook_secret = credentials.get("webhook_secret") or credentials.get("secret")
-        if webhook_secret:
-            web_stmt = select(WebhookConfig).where(
+            cred_stmt = select(IntegrationCredential).where(
                 and_(
-                    WebhookConfig.tenant_id == tenant_id,
-                    WebhookConfig.connection_id == connection.id,
+                    IntegrationCredential.tenant_id == tenant_id,
+                    IntegrationCredential.connection_id == connection.id,
                 )
             )
-            web_cfg = (await self.session.execute(web_stmt)).scalar_one_or_none()
-            enc_web_secret = self.vault.encrypt_credentials({"secret": webhook_secret})
-            if web_cfg:
-                web_cfg.encrypted_secret = enc_web_secret
-                web_cfg.is_active = True
+            credential = (await self.session.execute(cred_stmt)).scalar_one_or_none()
+
+            if credential:
+                credential.encrypted_secret = encrypted_str
+                credential.revoked_at = None
             else:
-                web_cfg = WebhookConfig(
+                credential = IntegrationCredential(
                     tenant_id=tenant_id,
                     connection_id=connection.id,
-                    webhook_type="INBOUND",
-                    encrypted_secret=enc_web_secret,
-                    is_active=True,
+                    credential_type="api_key",
+                    encrypted_secret=encrypted_str,
                 )
-                self.session.add(web_cfg)
+                self.session.add(credential)
 
-        await self.session.flush()
+            # Store WebhookConfig if secret or url provided
+            webhook_secret = credentials.get("webhook_secret") or credentials.get("secret")
+            if webhook_secret:
+                web_stmt = select(WebhookConfig).where(
+                    and_(
+                        WebhookConfig.tenant_id == tenant_id,
+                        WebhookConfig.connection_id == connection.id,
+                    )
+                )
+                web_cfg = (await self.session.execute(web_stmt)).scalar_one_or_none()
+                enc_web_secret = self.vault.encrypt_credentials({"secret": webhook_secret})
+                if web_cfg:
+                    web_cfg.encrypted_secret = enc_web_secret
+                    web_cfg.is_active = True
+                else:
+                    web_cfg = WebhookConfig(
+                        tenant_id=tenant_id,
+                        connection_id=connection.id,
+                        webhook_type="INBOUND",
+                        encrypted_secret=enc_web_secret,
+                        is_active=True,
+                    )
+                    self.session.add(web_cfg)
+
+            await self.session.flush()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            self._handle_integrity_error(exc, external_account_id)
 
         adapter = integration_registry.get_adapter(integration.provider_key)
         try:
@@ -266,13 +270,7 @@ class IntegrationService:
             await self.session.commit()
         except IntegrityError as exc:
             await self.session.rollback()
-            exc_str = str(exc).lower()
-            if "uq_active_provider_external_account" in exc_str or "uq_integration_connections" in exc_str or "external_account_id" in exc_str:
-                raise PermanentIntegrationError(
-                    f"External account '{external_account_id}' is already connected to another tenant.",
-                    error_code="ACCOUNT_ALREADY_CONNECTED",
-                )
-            raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
+            self._handle_integrity_error(exc, external_account_id)
 
         await publish_integration_event(
             tenant_id=tenant_id,
@@ -285,6 +283,30 @@ class IntegrationService:
         )
 
         return connection
+
+    def _handle_integrity_error(self, exc: IntegrityError, external_account_id: str | None) -> None:
+        orig = getattr(exc, "orig", None)
+        diag = getattr(orig, "diag", None)
+        constraint_name = str(getattr(diag, "constraint_name", "") or "").lower()
+        exc_str = str(exc).lower()
+
+        if "uq_active_provider_external_account" in constraint_name or "uq_active_provider_external_account" in exc_str:
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
+        if "uq_integration_connections_account" in constraint_name:
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
+        if "sqlite" in exc_str and "integration_connections" in exc_str and "external_account_id" in exc_str:
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
+
+        raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
 
     async def disconnect_integration(
         self,
