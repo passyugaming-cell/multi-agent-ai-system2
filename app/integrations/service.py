@@ -570,24 +570,30 @@ class IntegrationService:
                 )
             raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
 
-        # 2. SQLite exact matching on driver signature / exact index name
+        # 2. SQLite exact matching using strict anchored regex patterns on supported forms ONLY
+        import re
         exc_str = str(exc)
         orig_str = str(orig) if orig is not None else ""
         raw_msg = orig_str if orig_str else exc_str
 
-        if "UNIQUE constraint failed:" in raw_msg:
-            parts = raw_msg.split("UNIQUE constraint failed:", 1)
-            payload = parts[1].split("[SQL:")[0].split("\n")[0].strip()
-            if payload in (
-                "uq_active_provider_external_account",
-                "index uq_active_provider_external_account",
-                "integration_connections (uq_active_provider_external_account)",
-                "integration_connections.provider_key, integration_connections.external_account_id",
-                "integration_connections.external_account_id, integration_connections.provider_key",
-            ):
-                raise PermanentIntegrationError(
-                    f"External account '{external_account_id}' is already connected to another tenant.",
-                    error_code="ACCOUNT_ALREADY_CONNECTED",
-                )
+        clean_msg = raw_msg.split("[SQL:")[0].strip()
+        if clean_msg.startswith("(sqlite3.IntegrityError)"):
+            clean_msg = clean_msg[len("(sqlite3.IntegrityError)"):].strip()
+
+        # Strict anchored regex patterns matching ONLY exact supported SQLite driver forms:
+        # 1. ^unique constraint failed:\s*(index\s+)?uq_active_provider_external_account$
+        # 2. ^unique constraint failed:\s*integration_connections\.provider_key,\s*integration_connections\.external_account_id$
+        # 3. ^unique constraint failed:\s*integration_connections\.external_account_id,\s*integration_connections\.provider_key$
+        sqlite_patterns = [
+            re.compile(r"^unique constraint failed:\s*(?:index\s+)?uq_active_provider_external_account$", re.IGNORECASE),
+            re.compile(r"^unique constraint failed:\s*integration_connections\.provider_key,\s*integration_connections\.external_account_id$", re.IGNORECASE),
+            re.compile(r"^unique constraint failed:\s*integration_connections\.external_account_id,\s*integration_connections\.provider_key$", re.IGNORECASE),
+        ]
+
+        if any(pat.match(clean_msg) for pat in sqlite_patterns):
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
 
         raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
