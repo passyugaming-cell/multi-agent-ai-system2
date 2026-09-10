@@ -51,7 +51,7 @@ class IntegrationConnection(BaseModel):
         Index("ix_integration_connections_tenant_status", "tenant_id", "status"),
         Index(
             "uq_active_provider_external_account",
-            "integration_id",
+            "provider_key",
             "external_account_id",
             unique=True,
             postgresql_where=text("status IN ('ACTIVE', 'CONNECTED', 'CONNECTING') AND external_account_id IS NOT NULL"),
@@ -64,6 +64,9 @@ class IntegrationConnection(BaseModel):
         ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+    provider_key: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="", index=True
     )
     integration_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

@@ -177,6 +177,7 @@ class IntegrationService:
                 connection = IntegrationConnection(
                     tenant_id=tenant_id,
                     integration_id=integration.id,
+                    provider_key=integration.provider_key,
                     status="CONNECTING",
                     external_account_id=external_account_id,
                     meta_data=config,
@@ -186,6 +187,7 @@ class IntegrationService:
             else:
                 self._validate_transition(connection.status, "CONNECTING")
                 connection.status = "CONNECTING"
+                connection.provider_key = integration.provider_key
                 if external_account_id:
                     connection.external_account_id = external_account_id
                 if config:
@@ -300,7 +302,7 @@ class IntegrationService:
                 f"External account '{external_account_id}' is already connected to another tenant.",
                 error_code="ACCOUNT_ALREADY_CONNECTED",
             )
-        if "sqlite" in exc_str and "integration_connections" in exc_str and "external_account_id" in exc_str:
+        if "sqlite" in exc_str and "integration_connections" in exc_str and ("external_account_id" in exc_str or "provider_key" in exc_str):
             raise PermanentIntegrationError(
                 f"External account '{external_account_id}' is already connected to another tenant.",
                 error_code="ACCOUNT_ALREADY_CONNECTED",

@@ -78,12 +78,14 @@ async def test_whatsapp_webhook_ambiguity_rejection(async_client, db_session, te
     conn_a = IntegrationConnection(
         tenant_id=tenant_a.id,
         integration_id=integration1.id,
+        provider_key=integration1.provider_key,
         status="ACTIVE",
         external_account_id=phone_id,
     )
     conn_b = IntegrationConnection(
         tenant_id=tenant_b.id,
         integration_id=integration2.id,
+        provider_key=integration2.provider_key,
         status="ACTIVE",
         external_account_id=phone_id,
     )
