@@ -128,8 +128,20 @@ def test_pg_test_c_is_postgres_flag_no_diag_fails_closed(db_session):
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# TEST D: SQLite exact target column tuple -> ACCOUNT_ALREADY_CONNECTED
-def test_sqlite_d_exact_target_column_tuple(db_session):
+# TEST 1: SQLite exact target index name -> ACCOUNT_ALREADY_CONNECTED
+def test_sqlite_1_exact_target_index_name(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: uq_active_provider_external_account")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "ACCOUNT_ALREADY_CONNECTED"
+
+
+# TEST 2 / D: SQLite exact target column tuple -> ACCOUNT_ALREADY_CONNECTED
+def test_sqlite_2_exact_target_column_tuple(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id")
     exc = IntegrityError("statement", "params", orig)
@@ -140,8 +152,20 @@ def test_sqlite_d_exact_target_column_tuple(db_session):
     assert excinfo.value.error_code == "ACCOUNT_ALREADY_CONNECTED"
 
 
-# TEST E: SQLite unrelated UNIQUE containing integration_connections -> DATABASE_INTEGRITY_ERROR
-def test_sqlite_e_unrelated_unique_containing_integration_connections(db_session):
+# TEST 3: SQLite embedded / partial target index-name mention -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_3_partial_embedded_target_index_mention(db_session):
+    service = IntegrationService(db_session)
+    orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: some_table.uq_active_provider_external_account")
+    exc = IntegrityError("statement", "params", orig)
+
+    with pytest.raises(PermanentIntegrationError) as excinfo:
+        service._handle_integrity_error(exc, external_account_id="acc_123")
+
+    assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
+
+
+# TEST 4 / E: SQLite unrelated UNIQUE containing integration_connections -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_4_unrelated_unique_containing_integration_connections(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="UNIQUE constraint failed: integration_connections.tenant_id, integration_connections.integration_id, integration_connections.external_account_id")
     exc = IntegrityError("statement", "params", orig)
@@ -164,8 +188,8 @@ def test_sqlite_f_partial_field_mentions_not_exact_signature(db_session):
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# 9. SQLite FK
-def test_sqlite_9_fk_violation(db_session):
+# 9 / 5. SQLite FK -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_5_fk_violation(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="FOREIGN KEY constraint failed")
     exc = IntegrityError("statement", "params", orig)
@@ -176,8 +200,8 @@ def test_sqlite_9_fk_violation(db_session):
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# 10. SQLite NOT NULL
-def test_sqlite_10_not_null_violation(db_session):
+# 10 / 6. SQLite NOT NULL -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_6_not_null_violation(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="NOT NULL constraint failed: integration_connections.tenant_id")
     exc = IntegrityError("statement", "params", orig)
@@ -188,8 +212,8 @@ def test_sqlite_10_not_null_violation(db_session):
     assert excinfo.value.error_code == "DATABASE_INTEGRITY_ERROR"
 
 
-# 11. SQLite CHECK
-def test_sqlite_11_check_violation(db_session):
+# 11 / 7. SQLite CHECK -> DATABASE_INTEGRITY_ERROR
+def test_sqlite_7_check_violation(db_session):
     service = IntegrationService(db_session)
     orig = FakeOrigExc(diag=None, msg="CHECK constraint failed: status IN ('ACTIVE')")
     exc = IntegrityError("statement", "params", orig)

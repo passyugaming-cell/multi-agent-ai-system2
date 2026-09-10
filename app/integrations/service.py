@@ -570,18 +570,24 @@ class IntegrationService:
                 )
             raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
 
-        # 2. SQLite / fallback check strictly targeting the uq_active_provider_external_account index name or columns
+        # 2. SQLite exact matching on driver signature / exact index name
         exc_str = str(exc)
         orig_str = str(orig) if orig is not None else ""
-        if (
-            "uq_active_provider_external_account" in exc_str
-            or "uq_active_provider_external_account" in orig_str
-            or "UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id" in exc_str
-            or "UNIQUE constraint failed: integration_connections.provider_key, integration_connections.external_account_id" in orig_str
-        ):
-            raise PermanentIntegrationError(
-                f"External account '{external_account_id}' is already connected to another tenant.",
-                error_code="ACCOUNT_ALREADY_CONNECTED",
-            )
+        raw_msg = orig_str if orig_str else exc_str
+
+        if "UNIQUE constraint failed:" in raw_msg:
+            parts = raw_msg.split("UNIQUE constraint failed:", 1)
+            payload = parts[1].split("[SQL:")[0].split("\n")[0].strip()
+            if payload in (
+                "uq_active_provider_external_account",
+                "index uq_active_provider_external_account",
+                "integration_connections (uq_active_provider_external_account)",
+                "integration_connections.provider_key, integration_connections.external_account_id",
+                "integration_connections.external_account_id, integration_connections.provider_key",
+            ):
+                raise PermanentIntegrationError(
+                    f"External account '{external_account_id}' is already connected to another tenant.",
+                    error_code="ACCOUNT_ALREADY_CONNECTED",
+                )
 
         raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
