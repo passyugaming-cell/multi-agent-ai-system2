@@ -28,9 +28,8 @@ def upgrade() -> None:
     """)
     cat_dups = conn.execute(catalog_dup_check).fetchall()
     if cat_dups:
-        cat_desc = ", ".join([f"(provider_key={r[0]}, count={r[1]})" for r in cat_dups])
         raise Exception(
-            f"Deployment blocked: Pre-existing duplicate catalog integrations found for provider_key; clean duplicates before migration: {cat_desc}."
+            "Deployment blocked: Pre-existing duplicate catalog integrations found for provider_key; clean duplicates before migration."
         )
 
     # 2. Create catalog integration provider singleton index
