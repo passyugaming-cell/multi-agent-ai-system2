@@ -13,11 +13,7 @@ from app.integrations.exceptions import CredentialSecurityError
 logger = logging.getLogger(__name__)
 
 SECRET_KEY_PATTERNS = re.compile(
-    r"(secret|password|token|api_key|apikey|private|credential|authorization|bearer|auth|access_token|refresh_token|server_key|client_secret|app_secret|verify_token|webhook_secret|private_key)",
-    re.IGNORECASE,
-)
-SECRET_VALUE_PATTERNS = re.compile(
-    r"(bearer\s+[a-zA-Z0-9_\-\.]+|ya29\.[a-zA-Z0-9_\-]+|GOCSPX\-[a-zA-Z0-9_\-]+|SB\-Mid\-[a-zA-Z0-9_\-]+|sk\-[a-zA-Z0-9_\-]+|ghp_[a-zA-Z0-9_\-]+)",
+    r"(secret|password|token|api_key|apikey|private|credential|authorization|bearer|auth|access_token|refresh_token)",
     re.IGNORECASE,
 )
 
@@ -25,10 +21,6 @@ SECRET_VALUE_PATTERNS = re.compile(
 def _get_fernet_key() -> bytes:
     """Derive a deterministic 32-byte url-safe Fernet key from settings.ENCRYPTION_KEY."""
     raw_key = getattr(settings, "ENCRYPTION_KEY", None) or "default_phase6_integration_key_32_bytes_long"
-    app_env = getattr(settings, "APP_ENV", "development")
-    if app_env in ("production", "staging"):
-        if raw_key in ("default_phase6_integration_key_32_bytes_long", "dev_encryption_key_32_bytes_long_secret"):
-            raise CredentialSecurityError("Production environment cannot use development fallback encryption key")
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -83,7 +75,7 @@ def redact_secrets(data: Any) -> Any:
     elif isinstance(data, list):
         return [redact_secrets(item) for item in data]
     elif isinstance(data, str):
-        if SECRET_VALUE_PATTERNS.search(data) or (SECRET_KEY_PATTERNS.search(data) and len(data) > 20 and "=" in data):
+        if SECRET_KEY_PATTERNS.search(data) and len(data) > 20:
             return "[REDACTED_SECRET]"
         return data
     return data

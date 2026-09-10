@@ -342,16 +342,8 @@ async def receive_whatsapp_webhook(
 
     service = IntegrationService(db)
     stmt = (
-        select(IntegrationConnection, IntegrationCredential)
+        select(IntegrationConnection)
         .join(Integration, IntegrationConnection.integration_id == Integration.id)
-        .join(
-            IntegrationCredential,
-            and_(
-                IntegrationCredential.connection_id == IntegrationConnection.id,
-                IntegrationCredential.tenant_id == IntegrationConnection.tenant_id,
-                IntegrationCredential.revoked_at == None,
-            ),
-        )
         .where(
             and_(
                 IntegrationConnection.status.in_(["ACTIVE", "CONNECTED"]),
@@ -359,47 +351,60 @@ async def receive_whatsapp_webhook(
             )
         )
     )
-    results = (await db.execute(stmt)).all()
+    connections = (await db.execute(stmt)).scalars().all()
 
-    matching_pairs = []
-    for conn, cred in results:
-        creds = service.vault.decrypt_credentials(cred.encrypted_secret)
-        if conn.external_account_id == phone_number_id or creds.get("phone_number_id") == phone_number_id:
-            matching_pairs.append((conn, creds))
+    matches = []
+    for conn in connections:
+        c_stmt = select(IntegrationCredential).where(
+            and_(
+                IntegrationCredential.tenant_id == conn.tenant_id,
+                IntegrationCredential.connection_id == conn.id,
+                IntegrationCredential.revoked_at == None,
+            )
+        )
+        cred = (await db.execute(c_stmt)).scalar_one_or_none()
+        if cred:
+            creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+            if conn.external_account_id == phone_number_id or creds.get("phone_number_id") == phone_number_id:
+                matches.append((conn, creds))
 
-    if not matching_pairs:
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous mapping: Multiple active WhatsApp connections mapped to phone_number_id '{phone_number_id}'",
+        )
+
+    if not matches:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No active WhatsApp connection mapped to phone_number_id '{phone_number_id}'",
         )
 
-    # Detect ambiguity: if phone_number_id maps to multiple active tenants, raise deterministic conflict error
-    active_tenant_ids = {str(conn.tenant_id) for conn, _ in matching_pairs}
-    if len(active_tenant_ids) > 1:
-        logger.error(
-            "Ambiguous WhatsApp phone_number_id mapping: '%s' maps to multiple active tenants %s",
-            phone_number_id,
-            active_tenant_ids,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ambiguous mapping: phone_number_id '{phone_number_id}' is mapped to multiple active tenants",
-        )
-
-    target_connection, target_credentials = matching_pairs[0]
+    target_connection, target_credentials = matches[0]
 
     tenant_id = target_connection.tenant_id
     app_secret = target_credentials.get("app_secret") or target_credentials.get("secret")
 
     # 1. VERIFY SIGNATURE FIRST (SECURITY FIRST)
+    if not app_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="WhatsApp app_secret missing from connection credentials",
+        )
+
     x_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Signature")
+    if not x_signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing required X-Hub-Signature-256 header",
+        )
+
     adapter = WhatsAppCloudApiAdapter()
-    if app_secret:
-        if not x_signature or not adapter.verify_webhook_signature(raw_body, x_signature, app_secret):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing X-Hub-Signature-256 signature",
-            )
+    if not adapter.verify_webhook_signature(raw_body, x_signature, app_secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Hub-Signature-256 signature",
+        )
 
     # 2. ACTIVE TENANT GATE
     tenant_obj = await db.get(Tenant, tenant_id)

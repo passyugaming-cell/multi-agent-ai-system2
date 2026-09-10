@@ -564,20 +564,9 @@ async def test_google_calendar_api_routes(mock_google_http, async_client: AsyncC
         allow_internal=True,
     )
 
-    from app.database.models.user import User
-    user = User(
-        email=f"gcal_owner_{uuid.uuid4().hex[:6]}@example.com",
-        password_hash="mock_hash",
-        tenant_id=tenant_a.id,
-        role="owner",
-        is_active=True,
-    )
-    db_session.add(user)
-    await db_session.commit()
-
     # Establish server-side actor context with required permissions
     actor = AuthenticatedActor(
-        user_id=user.id,
+        user_id=uuid.uuid4(),
         tenant_id=tenant_a.id,
         role="owner",
         permissions={EXECUTE_INTEGRATION, MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS, VIEW_INTEGRATIONS},

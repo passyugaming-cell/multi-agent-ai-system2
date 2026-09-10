@@ -17,15 +17,29 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    existing_cols = [c['name'] for c in inspector.get_columns('integration_connections')]
 
-    # 1. Add provider_key column to integration_connections if not exists
-    try:
+    # 1. Preflight check for orphaned integration_connections referencing non-existent integrations
+    orphan_check = sa.text("""
+        SELECT ic.id, ic.integration_id
+        FROM integration_connections ic
+        LEFT JOIN integrations i ON ic.integration_id = i.id
+        WHERE i.id IS NULL
+    """)
+    orphans = conn.execute(orphan_check).fetchall()
+    if orphans:
+        orphan_ids = ", ".join([str(r[0]) for r in orphans[:5]])
+        raise Exception(
+            f"Deployment blocked: Orphaned integration connections found without matching parent integration (e.g., {orphan_ids}). Clean orphan records before migration."
+        )
+
+    # 2. Add provider_key column to integration_connections if not exists
+    if 'provider_key' not in existing_cols:
         op.add_column(
             'integration_connections',
             sa.Column('provider_key', sa.String(length=100), nullable=False, server_default='', index=True),
         )
-    except Exception:
-        pass
 
     # Populate provider_key from integrations for existing connection records
     conn.execute(sa.text("""
@@ -38,7 +52,19 @@ def upgrade() -> None:
         WHERE provider_key = '' OR provider_key IS NULL
     """))
 
-    # 2. Preflight check for duplicate catalog integration records
+    # Verify post-backfill provider_key consistency
+    empty_provider_check = sa.text("""
+        SELECT COUNT(*)
+        FROM integration_connections
+        WHERE provider_key IS NULL OR provider_key = ''
+    """)
+    empty_count = conn.execute(empty_provider_check).scalar()
+    if empty_count and empty_count > 0:
+        raise Exception(
+            f"Deployment blocked: {empty_count} connection records still have empty provider_key after backfill."
+        )
+
+    # 3. Preflight check for duplicate catalog integration records
     catalog_dup_check = sa.text("""
         SELECT provider_key, COUNT(*) as cnt
         FROM integrations
@@ -52,7 +78,7 @@ def upgrade() -> None:
             "Deployment blocked: Pre-existing duplicate catalog integrations found for provider_key; clean duplicates before migration."
         )
 
-    # 3. Create catalog integration provider singleton index
+    # 4. Create catalog integration provider singleton index
     op.create_index(
         'uq_catalog_integrations_provider',
         'integrations',
@@ -62,7 +88,7 @@ def upgrade() -> None:
         sqlite_where=sa.text("tenant_id IS NULL"),
     )
 
-    # 4. Preflight check for duplicate active integration connections
+    # 5. Preflight check for duplicate active integration connections
     conn_dup_check = sa.text("""
         SELECT provider_key, external_account_id, COUNT(*) as cnt
         FROM integration_connections
@@ -78,7 +104,7 @@ def upgrade() -> None:
             f"Deployment blocked: Pre-existing active duplicate connections found. Resolve duplicate integration connections before applying uq_active_provider_external_account: {conn_desc}."
         )
 
-    # 5. Create active connection provider/external account unique index
+    # 6. Create active connection provider/external account unique index
     op.create_index(
         'uq_active_provider_external_account',
         'integration_connections',
@@ -90,9 +116,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    existing_cols = [c['name'] for c in inspector.get_columns('integration_connections')]
+
     op.drop_index('uq_active_provider_external_account', table_name='integration_connections')
     op.drop_index('uq_catalog_integrations_provider', table_name='integrations')
-    try:
+    if 'provider_key' in existing_cols:
         op.drop_column('integration_connections', 'provider_key')
-    except Exception:
-        pass

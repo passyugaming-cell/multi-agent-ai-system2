@@ -25,8 +25,7 @@ from app.integrations.permissions import (
 )
 from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
-from app.integrations.oauth import generate_oauth_state, validate_oauth_state, validate_oauth_state_async
-from app.integrations.credentials import redact_secrets
+from app.integrations.oauth import generate_oauth_state, validate_oauth_state
 from app.core.auth import resolve_actor_permissions
 
 logger = logging.getLogger(__name__)
@@ -96,8 +95,6 @@ async def connect_integration(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     except IntegrationError as exc:
-        if getattr(exc, "error_code", None) == "ACCOUNT_ALREADY_CONNECTED":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
@@ -112,12 +109,8 @@ async def google_calendar_authorize(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
 
     from app.core.config import settings
-    from app.core.context import get_actor_context
-    actor = get_actor_context()
-    user_id_str = str(actor.user_id) if actor and actor.user_id else None
-
     client_id = settings.GOOGLE_CLIENT_ID
-    state = generate_oauth_state(tenant_id=tenant_id, user_id=user_id_str, redirect_uri=redirect_uri)
+    state = generate_oauth_state(tenant_id=tenant_id, redirect_uri=redirect_uri)
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={redirect_uri or 'http://localhost/callback'}&scope=https://www.googleapis.com/auth/calendar&state={state}&access_type=offline&prompt=consent"
     return {"authorization_url": auth_url, "state": state}
 
@@ -127,61 +120,35 @@ async def google_calendar_callback(
     code: str,
     state: str,
     redirect_uri: str | None = None,
-    x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+
     import httpx
     from app.core.config import settings
-    from app.core.context import get_tenant_context
     service = IntegrationService(db)
-
     try:
-        # 1. Recover and validate trusted tenant and user from OAuth state token
-        state_payload = await validate_oauth_state_async(state)
-        state_tenant_id = uuid.UUID(state_payload["tenant_id"])
-        state_user_id = state_payload.get("user_id")
-
-        # 2. Verify match between state tenant_id and request tenant context
-        request_tenant_id = get_tenant_context()
-        if request_tenant_id and request_tenant_id != state_tenant_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
-
-        target_tenant_id = state_tenant_id
-
-        # 3. Verify user identity match between signed state and authenticated actor context
-        from app.core.context import get_actor_context
-        actor = get_actor_context()
-        if not actor or not actor.user_id or str(actor.user_id) != state_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Identity mismatch between OAuth state and authenticated actor",
-            )
-
-        # 4. Fail closed if permissions are missing
-        if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required",
-            )
+        validate_oauth_state(state, expected_tenant_id=tenant_id)
 
         token_payload = {
             "code": code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "redirect_uri": redirect_uri or state_payload.get("redirect_uri") or "http://localhost/callback",
+            "redirect_uri": redirect_uri or "http://localhost/callback",
             "grant_type": "authorization_code",
         }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, redact_secrets(resp.text))
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
             tokens = resp.json()
 
         conn = await service.connect_integration(
-            tenant_id=target_tenant_id,
+            tenant_id=tenant_id,
             integration_key="google_calendar",
             credentials={
                 "access_token": tokens.get("access_token"),
@@ -189,7 +156,7 @@ async def google_calendar_callback(
                 "expires_in": tokens.get("expires_in"),
                 "token_type": tokens.get("token_type"),
             },
-            actor_permissions=actor_perms,
+            actor_permissions=permissions,
         )
         return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
     except HTTPException:
@@ -383,12 +350,8 @@ async def google_sheets_authorize(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS required")
 
     from app.core.config import settings
-    from app.core.context import get_actor_context
-    actor = get_actor_context()
-    user_id_str = str(actor.user_id) if actor and actor.user_id else None
-
     client_id = settings.GOOGLE_CLIENT_ID
-    state = generate_oauth_state(tenant_id=tenant_id, user_id=user_id_str, redirect_uri=redirect_uri)
+    state = generate_oauth_state(tenant_id=tenant_id, redirect_uri=redirect_uri)
     scope = "https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly"
     auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={redirect_uri or 'http://localhost/callback'}&scope={scope}&state={state}&access_type=offline&prompt=consent"
     return {"authorization_url": auth_url, "state": state}
@@ -399,61 +362,35 @@ async def google_sheets_callback(
     code: str,
     state: str,
     redirect_uri: str | None = None,
-    x_tenant_id: str | None = Header(None, alias="X-Tenant-ID"),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    tenant_id: uuid.UUID = Depends(get_tenant_id_from_header),
+    permissions: set[str] = Depends(_resolve_permissions_server),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
+    if permissions is None or MANAGE_INTEGRATIONS not in permissions or MANAGE_CREDENTIALS not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required")
+
     import httpx
     from app.core.config import settings
-    from app.core.context import get_tenant_context
     service = IntegrationService(db)
-
     try:
-        # 1. Recover and validate trusted tenant and user from OAuth state token
-        state_payload = await validate_oauth_state_async(state)
-        state_tenant_id = uuid.UUID(state_payload["tenant_id"])
-        state_user_id = state_payload.get("user_id")
-
-        # 2. Verify match between state tenant_id and request tenant context
-        request_tenant_id = get_tenant_context()
-        if request_tenant_id and request_tenant_id != state_tenant_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-tenant mismatch between state and request header")
-
-        target_tenant_id = state_tenant_id
-
-        # 3. Verify user identity match between signed state and authenticated actor context
-        from app.core.context import get_actor_context
-        actor = get_actor_context()
-        if not actor or not actor.user_id or str(actor.user_id) != state_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Identity mismatch between OAuth state and authenticated actor",
-            )
-
-        # 4. Fail closed if permissions are missing
-        if actor_perms is None or MANAGE_INTEGRATIONS not in actor_perms or MANAGE_CREDENTIALS not in actor_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Permission denied: MANAGE_INTEGRATIONS and MANAGE_CREDENTIALS required",
-            )
+        validate_oauth_state(state, expected_tenant_id=tenant_id)
 
         token_payload = {
             "code": code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "redirect_uri": redirect_uri or state_payload.get("redirect_uri") or "http://localhost/callback",
+            "redirect_uri": redirect_uri or "http://localhost/callback",
             "grant_type": "authorization_code",
         }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=token_payload)
             if resp.status_code != 200:
-                logger.error("OAuth token exchange failed for tenant %s: %s", target_tenant_id, redact_secrets(resp.text))
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OAuth code exchange failed")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"OAuth code exchange failed: {resp.text}")
             tokens = resp.json()
 
         conn = await service.connect_integration(
-            tenant_id=target_tenant_id,
+            tenant_id=tenant_id,
             integration_key="google_sheets",
             credentials={
                 "access_token": tokens.get("access_token"),
@@ -461,7 +398,7 @@ async def google_sheets_callback(
                 "expires_in": tokens.get("expires_in"),
                 "token_type": tokens.get("token_type"),
             },
-            actor_permissions=actor_perms,
+            actor_permissions=permissions,
         )
         return {"status": "success", "connection_id": str(conn.id), "integration_status": conn.status}
     except HTTPException:

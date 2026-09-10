@@ -40,24 +40,5 @@ class Settings(BaseSettings):
     WORKFLOW_MAX_RETRIES: int = 3
     WORKFLOW_TIMEOUT_SECONDS: int = 300
 
-    from pydantic import model_validator
-
-    @model_validator(mode="after")
-    def validate_production_secrets(self) -> "Settings":
-        if self.APP_ENV in ("production", "staging"):
-            dev_jwt = "dev_secret_jwt_key_32_characters_long_for_security"
-            dev_enc = "dev_encryption_key_32_bytes_long_secret"
-            dev_db = "postgresql+asyncpg://user:password@localhost:5432/ai_business_os"
-
-            if not self.JWT_SECRET or self.JWT_SECRET == dev_jwt or len(self.JWT_SECRET) < 32:
-                raise ValueError("JWT_SECRET must be explicitly configured with a secure 32+ character key in production/staging")
-            if not self.ENCRYPTION_KEY or self.ENCRYPTION_KEY == dev_enc or self.ENCRYPTION_KEY == "default_phase6_integration_key_32_bytes_long" or len(self.ENCRYPTION_KEY) < 32:
-                raise ValueError("ENCRYPTION_KEY must be explicitly configured with a secure 32+ character key in production/staging")
-            if not self.DATABASE_URL or self.DATABASE_URL == dev_db or "user:password@localhost" in self.DATABASE_URL:
-                raise ValueError("DATABASE_URL must be explicitly configured for production/staging (cannot use default development database)")
-            if "mock_google" in self.GOOGLE_CLIENT_ID or "mock_google" in self.GOOGLE_CLIENT_SECRET:
-                raise ValueError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be explicitly configured in production/staging")
-        return self
-
 
 settings = Settings()

@@ -98,8 +98,7 @@ class GoogleCalendarAdapter:
             try:
                 resp = await client.post(GOOGLE_TOKEN_URL, data=payload)
                 if resp.status_code != 200:
-                    logger.error("Token refresh failed for tenant %s: status %s", tenant_id, resp.status_code)
-                    raise PermanentIntegrationError(f"Token refresh failed with status {resp.status_code}", error_code="AUTHENTICATION_ERROR")
+                    raise PermanentIntegrationError(f"Token refresh failed: {resp.text}", error_code="AUTHENTICATION_ERROR")
                 data = resp.json()
                 new_access_token = data.get("access_token")
 
@@ -455,8 +454,7 @@ class GoogleCalendarAdapter:
         if resp.status_code >= 500:
             raise TransientIntegrationError(f"Google Calendar API internal server error ({resp.status_code})", error_code="PROVIDER_ERROR")
 
-        logger.error("Google Calendar API HTTP error status %s", resp.status_code)
-        raise PermanentIntegrationError(f"Google API request failed with status {resp.status_code}", error_code="PROVIDER_ERROR")
+        raise PermanentIntegrationError(f"Google API request failed: {resp.text}", error_code="PROVIDER_ERROR")
 
     async def normalize_event(
         self,
