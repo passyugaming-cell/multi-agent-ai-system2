@@ -407,3 +407,56 @@ async def test_migration_preflight_checks(db_session, tenant_a, tenant_b):
     """)
     active_dups = (await db_session.execute(active_dup_query)).fetchall()
     assert len(active_dups) == 0
+
+
+@pytest.mark.asyncio
+async def test_migration_active_duplicate_prevents_both_indexes(db_session, tenant_a, tenant_b):
+    """Proves that a duplicate active connection blocks migration preflight before creating unique indexes."""
+    # Drop unique indexes temporarily to simulate pre-migration state
+    await db_session.execute(text("DROP INDEX IF EXISTS uq_active_provider_external_account;"))
+    await db_session.execute(text("DROP INDEX IF EXISTS uq_catalog_integrations_provider;"))
+    await db_session.commit()
+
+    integration = Integration(
+        integration_key="wa_dup_test",
+        provider_key="whatsapp_dup",
+        display_name="WhatsApp Dup",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+
+    conn1 = IntegrationConnection(
+        tenant_id=tenant_a.id,
+        integration_id=integration.id,
+        provider_key="whatsapp_dup",
+        status="ACTIVE",
+        external_account_id="shared_dup_account_123",
+    )
+    conn2 = IntegrationConnection(
+        tenant_id=tenant_b.id,
+        integration_id=integration.id,
+        provider_key="whatsapp_dup",
+        status="ACTIVE",
+        external_account_id="shared_dup_account_123",
+    )
+    db_session.add_all([conn1, conn2])
+    await db_session.commit()
+
+    # Preflight check 7 detects active duplicate count > 1
+    conn_dup_check = text("""
+        SELECT provider_key, external_account_id, COUNT(*) as cnt
+        FROM integration_connections
+        WHERE status IN ('ACTIVE', 'CONNECTED', 'CONNECTING')
+          AND external_account_id IS NOT NULL
+        GROUP BY provider_key, external_account_id
+        HAVING COUNT(*) > 1
+    """)
+    dups = (await db_session.execute(conn_dup_check)).fetchall()
+    assert len(dups) >= 1
+    assert any(d[0] == "whatsapp_dup" and d[1] == "shared_dup_account_123" for d in dups)
+
+    # Re-verify that neither index exists prior to step 8
+    idx_check = text("PRAGMA index_list('integration_connections')")
+    idx_list = [r[1] for r in (await db_session.execute(idx_check)).fetchall()]
+    assert "uq_active_provider_external_account" not in idx_list
