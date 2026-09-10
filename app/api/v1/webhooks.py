@@ -353,59 +353,58 @@ async def receive_whatsapp_webhook(
     )
     connections = (await db.execute(stmt)).scalars().all()
 
-    target_connection = None
-    target_credentials = None
-
+    matches = []
     for conn in connections:
-        if conn.external_account_id == phone_number_id:
-            target_connection = conn
-            c_stmt = select(IntegrationCredential).where(
-                and_(
-                    IntegrationCredential.tenant_id == conn.tenant_id,
-                    IntegrationCredential.connection_id == conn.id,
-                    IntegrationCredential.revoked_at == None,
-                )
+        c_stmt = select(IntegrationCredential).where(
+            and_(
+                IntegrationCredential.tenant_id == conn.tenant_id,
+                IntegrationCredential.connection_id == conn.id,
+                IntegrationCredential.revoked_at == None,
             )
-            cred = (await db.execute(c_stmt)).scalar_one_or_none()
-            if cred:
-                target_credentials = service.vault.decrypt_credentials(cred.encrypted_secret)
-            break
+        )
+        cred = (await db.execute(c_stmt)).scalar_one_or_none()
+        if cred:
+            creds = service.vault.decrypt_credentials(cred.encrypted_secret)
+            if conn.external_account_id == phone_number_id or creds.get("phone_number_id") == phone_number_id:
+                matches.append((conn, creds))
 
-    if not target_connection:
-        for conn in connections:
-            c_stmt = select(IntegrationCredential).where(
-                and_(
-                    IntegrationCredential.tenant_id == conn.tenant_id,
-                    IntegrationCredential.connection_id == conn.id,
-                    IntegrationCredential.revoked_at == None,
-                )
-            )
-            cred = (await db.execute(c_stmt)).scalar_one_or_none()
-            if cred:
-                creds = service.vault.decrypt_credentials(cred.encrypted_secret)
-                if creds.get("phone_number_id") == phone_number_id:
-                    target_connection = conn
-                    target_credentials = creds
-                    break
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ambiguous mapping: Multiple active WhatsApp connections mapped to phone_number_id '{phone_number_id}'",
+        )
 
-    if not target_connection or not target_credentials:
+    if not matches:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No active WhatsApp connection mapped to phone_number_id '{phone_number_id}'",
         )
 
+    target_connection, target_credentials = matches[0]
+
     tenant_id = target_connection.tenant_id
     app_secret = target_credentials.get("app_secret") or target_credentials.get("secret")
 
     # 1. VERIFY SIGNATURE FIRST (SECURITY FIRST)
+    if not app_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="WhatsApp app_secret missing from connection credentials",
+        )
+
     x_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Signature")
+    if not x_signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing required X-Hub-Signature-256 header",
+        )
+
     adapter = WhatsAppCloudApiAdapter()
-    if app_secret:
-        if not x_signature or not adapter.verify_webhook_signature(raw_body, x_signature, app_secret):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing X-Hub-Signature-256 signature",
-            )
+    if not adapter.verify_webhook_signature(raw_body, x_signature, app_secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Hub-Signature-256 signature",
+        )
 
     # 2. ACTIVE TENANT GATE
     tenant_obj = await db.get(Tenant, tenant_id)

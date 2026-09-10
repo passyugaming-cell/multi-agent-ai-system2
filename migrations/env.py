@@ -1,4 +1,6 @@
+import os
 import asyncio
+import concurrent.futures
 from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
@@ -15,8 +17,9 @@ config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from app settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Set database URL dynamically from TEST_DATABASE_URL env or app settings
+db_url = os.getenv("TEST_DATABASE_URL") or settings.DATABASE_URL
+config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
 
@@ -58,7 +61,17 @@ async def run_async_migrations() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    asyncio.run(run_async_migrations())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: asyncio.run(run_async_migrations()))
+            future.result()
+    else:
+        asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():

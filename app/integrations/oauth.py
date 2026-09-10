@@ -16,7 +16,11 @@ _USED_NONCES: dict[str, int] = {}
 
 
 def _get_secret_key() -> bytes:
+    app_env = getattr(settings, "APP_ENV", "development")
     key_str = settings.JWT_SECRET or settings.ENCRYPTION_KEY or "default_secure_oauth_secret_key_32_bytes_long"
+    if app_env in ("production", "staging"):
+        if key_str in ("default_secure_oauth_secret_key_32_bytes_long", "dev_secret_jwt_key_32_characters_long_for_security", "dev_encryption_key_32_bytes_long_secret"):
+            raise PermanentIntegrationError("Production environment cannot use development fallback OAuth state secret key", error_code="INSECURE_OAUTH_CONFIG")
     return key_str.encode("utf-8")
 
 
@@ -43,36 +47,147 @@ def generate_oauth_state(tenant_id: uuid.UUID, user_id: str | None = None, redir
     return f"{payload_b64}.{sig}"
 
 
-def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID) -> dict[str, Any]:
-    """Validates an OAuth state token against CSRF, expiration, replay, and cross-tenant binding."""
-    if not state or "." not in state:
+def parse_oauth_state_payload(state: str) -> dict[str, Any]:
+    """Verifies HMAC signature, payload structure, field types, and expiration of an OAuth state token."""
+    if not state or not isinstance(state, str) or "." not in state:
         raise PermanentIntegrationError("Invalid OAuth state format", error_code="INVALID_STATE")
 
     parts = state.split(".", 1)
     payload_b64, sig = parts[0], parts[1]
 
-    # Verify signature
     expected_sig = hmac.new(_get_secret_key(), payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
         raise PermanentIntegrationError("Tampered or invalid OAuth state signature", error_code="INVALID_STATE_SIGNATURE")
 
-    # Decode payload
     try:
         payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
         state_payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception as e:
         raise PermanentIntegrationError(f"Malformed OAuth state payload: {e}", error_code="MALFORMED_STATE")
 
-    # Verify tenant binding
+    if not isinstance(state_payload, dict):
+        raise PermanentIntegrationError("Malformed OAuth state payload: expected JSON object", error_code="MALFORMED_STATE")
+
+    # Strict field type and value validations
+    tenant_id_str = state_payload.get("tenant_id")
+    if not isinstance(tenant_id_str, str) or not tenant_id_str:
+        raise PermanentIntegrationError("Missing or invalid tenant_id in OAuth state payload", error_code="MALFORMED_STATE_TENANT")
+
+    try:
+        uuid.UUID(tenant_id_str)
+    except (ValueError, TypeError, AttributeError):
+        raise PermanentIntegrationError("Malformed tenant_id UUID in OAuth state payload", error_code="MALFORMED_STATE_TENANT")
+
+    nonce = state_payload.get("nonce")
+    if not isinstance(nonce, str) or not nonce or len(nonce) > 255:
+        raise PermanentIntegrationError("Invalid nonce in OAuth state payload", error_code="INVALID_STATE_NONCE")
+
+    created_at = state_payload.get("created_at")
+    if not isinstance(created_at, int) or isinstance(created_at, bool):
+        raise PermanentIntegrationError("Invalid created_at timestamp in OAuth state payload", error_code="INVALID_STATE_TIMESTAMP")
+
+    expires_at = state_payload.get("expires_at")
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        raise PermanentIntegrationError("Invalid expires_at timestamp in OAuth state payload", error_code="INVALID_STATE_TIMESTAMP")
+
+    redirect_uri = state_payload.get("redirect_uri")
+    if redirect_uri is not None and not isinstance(redirect_uri, str):
+        raise PermanentIntegrationError("Invalid redirect_uri in OAuth state payload", error_code="INVALID_STATE_REDIRECT_URI")
+
+    if int(time.time()) > expires_at:
+        raise PermanentIntegrationError("OAuth state has expired", error_code="EXPIRED_STATE")
+
+    return state_payload
+
+
+async def consume_oauth_jti_redis(nonce: str, expires_at: int) -> bool:
+    """Atomically claims an OAuth state nonce/JTI in Redis with TTL matching remaining lifetime.
+
+    Returns True if successfully claimed, False if already consumed.
+    Fails closed in production/staging if Redis is unavailable.
+    """
+    import logging
+    import redis.asyncio as aioredis
+    logger = logging.getLogger(__name__)
+
+    now = int(time.time())
+    ttl = max(1, expires_at - now)
+    key = f"oauth_state_jti:{nonce}"
+    app_env = getattr(settings, "APP_ENV", "development")
+
+    try:
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            acquired = await redis_client.set(key, "used", nx=True, ex=ttl)
+            return bool(acquired)
+        finally:
+            await redis_client.aclose()
+    except PermanentIntegrationError:
+        raise
+    except Exception as exc:
+        logger.warning("Redis OAuth JTI check failed for nonce %s: %s", nonce, exc)
+        if app_env in ("production", "staging"):
+            raise PermanentIntegrationError("OAuth replay store unavailable", error_code="OAUTH_STORE_UNAVAILABLE")
+        if nonce in _USED_NONCES:
+            return False
+        _USED_NONCES[nonce] = expires_at
+        return True
+
+
+async def validate_oauth_state_async(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Async variant of validate_oauth_state enforcing durable, atomic Redis anti-replay tracking."""
+    # 1. Format, 2. HMAC, 3. Payload structure, 4. Expiration
+    state_payload = parse_oauth_state_payload(state)
+
+    # 5. Tenant validation
     state_tenant_id = state_payload.get("tenant_id")
-    if not state_tenant_id or state_tenant_id != str(expected_tenant_id):
+    if not state_tenant_id:
+        raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
+
+    if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
         raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
 
-    # Verify expiration
+    # 6. User_id presence and structure validation BEFORE Redis claim
+    state_user_id = state_payload.get("user_id")
+    if not state_user_id or state_user_id == "system":
+        raise PermanentIntegrationError("Missing or invalid user_id in OAuth state payload", error_code="MISSING_STATE_USER")
+
+    try:
+        uuid.UUID(state_user_id)
+    except (ValueError, TypeError, AttributeError):
+        raise PermanentIntegrationError("Malformed user_id UUID in OAuth state payload", error_code="MALFORMED_STATE_USER")
+
+    # 7. Atomic Redis JTI claim/consume
+    nonce = state_payload.get("nonce")
     expires_at = state_payload.get("expires_at", 0)
+    if not nonce:
+        raise PermanentIntegrationError("OAuth state is missing anti-replay nonce", error_code="REUSED_STATE")
+
+    consumed = await consume_oauth_jti_redis(nonce, expires_at)
+    if not consumed:
+        raise PermanentIntegrationError("OAuth state has already been used or missing nonce", error_code="REUSED_STATE")
+
+    _USED_NONCES[nonce] = expires_at
+    return state_payload
+
+
+def validate_oauth_state(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Sync fallback for non-production/test callers. Prohibits in-memory replay in production/staging."""
+    app_env = getattr(settings, "APP_ENV", "development")
+    if app_env in ("production", "staging"):
+        raise PermanentIntegrationError("Sync validate_oauth_state is disabled in production/staging. Use validate_oauth_state_async.", error_code="ASYNC_OAUTH_REQUIRED")
+
+    state_payload = parse_oauth_state_payload(state)
+
+    state_tenant_id = state_payload.get("tenant_id")
+    if not state_tenant_id:
+        raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
+
+    if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
+        raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
+
     now = int(time.time())
-    if now > expires_at:
-        raise PermanentIntegrationError("OAuth state has expired", error_code="EXPIRED_STATE")
+    expires_at = state_payload.get("expires_at", 0)
 
     # Cleanup expired nonces from memory cache
     expired_nonces = [n for n, exp in _USED_NONCES.items() if now > exp]

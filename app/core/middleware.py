@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -16,6 +17,8 @@ from app.core.auth_service import verify_and_decode_token
 from app.database.session import async_session_factory
 from app.database.models.user import User
 from app.tenants.repository import TenantRepository
+
+logger = logging.getLogger(__name__)
 
 
 EXCLUDED_PATHS = {
@@ -48,27 +51,57 @@ class TenantMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         tenant_header = request.headers.get("X-Tenant-ID")
+        tenant_id = None
 
-        if not tenant_header:
+        if tenant_header:
+            try:
+                tenant_id = UUID(tenant_header)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "INVALID_TENANT_ID",
+                            "message": "X-Tenant-ID header must be a valid UUID",
+                        }
+                    },
+                )
+        elif path.endswith("/google-calendar/callback") or path.endswith("/google-sheets/callback"):
+            # Recover tenant_id from cryptographically signed OAuth state when X-Tenant-ID header is absent on redirect
+            state_param = request.query_params.get("state")
+            if not state_param:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "INVALID_OAUTH_STATE",
+                            "message": "Invalid OAuth state",
+                        }
+                    },
+                )
+            try:
+                from app.integrations.oauth import parse_oauth_state_payload
+                state_payload = parse_oauth_state_payload(state_param)
+                tenant_id = UUID(state_payload["tenant_id"])
+            except Exception as exc:
+                logger.warning("OAuth callback state parsing failed: %s", exc)
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "INVALID_OAUTH_STATE",
+                            "message": "Invalid OAuth state",
+                        }
+                    },
+                )
+
+        if not tenant_id:
             return JSONResponse(
                 status_code=400,
                 content={
                     "error": {
                         "code": "MISSING_TENANT_HEADER",
                         "message": "X-Tenant-ID header is required",
-                    }
-                },
-            )
-
-        try:
-            tenant_id = UUID(tenant_header)
-        except ValueError:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "INVALID_TENANT_ID",
-                        "message": "X-Tenant-ID header must be a valid UUID",
                     }
                 },
             )

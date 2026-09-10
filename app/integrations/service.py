@@ -13,6 +13,7 @@ from app.database.models.integrations import (
     IntegrationExecution,
     WebhookConfig,
 )
+from sqlalchemy.exc import IntegrityError
 from app.integrations.exceptions import (
     IntegrationNotFoundError,
     ConnectionNotFoundError,
@@ -20,6 +21,7 @@ from app.integrations.exceptions import (
     InvalidStateTransitionError,
     EntitlementDeniedError,
     PermissionDeniedError,
+    PermanentIntegrationError,
 )
 from app.integrations.schemas import OperationExecutionResult
 from app.integrations.credentials import CredentialVault, redact_secrets
@@ -150,23 +152,29 @@ class IntegrationService:
         connection = (await self.session.execute(conn_stmt)).scalar_one_or_none()
 
         now = datetime.now(timezone.utc)
-        if not connection:
-            connection = IntegrationConnection(
-                tenant_id=tenant_id,
-                integration_id=integration.id,
-                status="CONNECTING",
-                external_account_id=external_account_id,
-                meta_data=config,
-            )
-            self.session.add(connection)
-            await self.session.flush()
-        else:
-            self._validate_transition(connection.status, "CONNECTING")
-            connection.status = "CONNECTING"
-            if external_account_id:
-                connection.external_account_id = external_account_id
-            if config:
-                connection.meta_data = config
+        try:
+            if not connection:
+                connection = IntegrationConnection(
+                    tenant_id=tenant_id,
+                    integration_id=integration.id,
+                    provider_key=integration.provider_key,
+                    status="CONNECTING",
+                    external_account_id=external_account_id,
+                    meta_data=config,
+                )
+                self.session.add(connection)
+                await self.session.flush()
+            else:
+                self._validate_transition(connection.status, "CONNECTING")
+                connection.status = "CONNECTING"
+                connection.provider_key = integration.provider_key
+                if external_account_id:
+                    connection.external_account_id = external_account_id
+                if config:
+                    connection.meta_data = config
+        except IntegrityError as exc:
+            await self.session.rollback()
+            self._handle_integrity_error(exc, external_account_id)
 
         encrypted_str = self.vault.encrypt_credentials(credentials)
 
@@ -214,7 +222,11 @@ class IntegrationService:
                 )
                 self.session.add(web_cfg)
 
-        await self.session.flush()
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            self._handle_integrity_error(exc, external_account_id)
 
         adapter = integration_registry.get_adapter(integration.provider_key)
         try:
@@ -240,7 +252,11 @@ class IntegrationService:
             connection.last_error_at = now
             connection.error_message = redact_secrets(str(e))
 
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            self._handle_integrity_error(exc, external_account_id)
 
         await publish_integration_event(
             tenant_id=tenant_id,
@@ -531,3 +547,53 @@ class IntegrationService:
         allowed = VALID_TRANSITIONS.get(current_status, set())
         if target_status not in allowed and current_status != target_status:
             raise InvalidStateTransitionError(current_status, target_status)
+
+    def _handle_integrity_error(self, exc: IntegrityError, external_account_id: str | None) -> None:
+        orig = getattr(exc, "orig", None)
+
+        # 1. Detect PostgreSQL context explicitly
+        is_postgres = (
+            getattr(orig, "diag", None) is not None
+            or hasattr(orig, "sqlstate")
+            or getattr(orig, "is_postgres", False)
+            or "asyncpg" in getattr(type(orig), "__module__", "")
+            or "psycopg" in getattr(type(orig), "__module__", "")
+        )
+
+        if is_postgres:
+            diag = getattr(orig, "diag", None)
+            cname = getattr(diag, "constraint_name", None) if diag is not None else None
+            if cname == "uq_active_provider_external_account":
+                raise PermanentIntegrationError(
+                    f"External account '{external_account_id}' is already connected to another tenant.",
+                    error_code="ACCOUNT_ALREADY_CONNECTED",
+                )
+            raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
+
+        # 2. SQLite exact matching using strict anchored regex patterns on supported forms ONLY
+        import re
+        exc_str = str(exc)
+        orig_str = str(orig) if orig is not None else ""
+        raw_msg = orig_str if orig_str else exc_str
+
+        clean_msg = raw_msg.split("[SQL:")[0].strip()
+        if clean_msg.startswith("(sqlite3.IntegrityError)"):
+            clean_msg = clean_msg[len("(sqlite3.IntegrityError)"):].strip()
+
+        # Strict anchored regex patterns matching ONLY exact supported SQLite driver forms:
+        # 1. ^unique constraint failed:\s*(index\s+)?uq_active_provider_external_account$
+        # 2. ^unique constraint failed:\s*integration_connections\.provider_key,\s*integration_connections\.external_account_id$
+        # 3. ^unique constraint failed:\s*integration_connections\.external_account_id,\s*integration_connections\.provider_key$
+        sqlite_patterns = [
+            re.compile(r"^unique constraint failed:\s*(?:index\s+)?uq_active_provider_external_account$", re.IGNORECASE),
+            re.compile(r"^unique constraint failed:\s*integration_connections\.provider_key,\s*integration_connections\.external_account_id$", re.IGNORECASE),
+            re.compile(r"^unique constraint failed:\s*integration_connections\.external_account_id,\s*integration_connections\.provider_key$", re.IGNORECASE),
+        ]
+
+        if any(pat.match(clean_msg) for pat in sqlite_patterns):
+            raise PermanentIntegrationError(
+                f"External account '{external_account_id}' is already connected to another tenant.",
+                error_code="ACCOUNT_ALREADY_CONNECTED",
+            )
+
+        raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")

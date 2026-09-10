@@ -10,6 +10,23 @@ from app.core.auth_service import hash_password, create_access_token, is_token_r
 from app.core.exceptions import AppException
 
 
+@pytest.fixture(autouse=True)
+def mock_redis_revocation_for_auth_tests(monkeypatch):
+    revoked_jtis = set()
+
+    async def mock_is_revoked(jti: str) -> bool:
+        return jti in revoked_jtis
+
+    async def mock_revoke(jti: str, exp_timestamp: int | None = None, ttl: int = 86400):
+        revoked_jtis.add(jti)
+
+    import app.core.auth_service as auth_srv
+    import app.api.v1.auth as auth_api
+    monkeypatch.setattr(auth_srv, "is_token_revoked_redis", mock_is_revoked)
+    monkeypatch.setattr(auth_srv, "revoke_token_redis", mock_revoke)
+    monkeypatch.setattr(auth_api, "revoke_token_redis", mock_revoke)
+
+
 @pytest.mark.asyncio
 async def test_a_invalid_credentials(client: AsyncClient):
     """A. Attempting login with nonexistent email or bad password fails with 401."""
