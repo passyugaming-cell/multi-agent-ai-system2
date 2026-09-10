@@ -264,12 +264,15 @@ class IntegrationService:
 
         try:
             await self.session.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             await self.session.rollback()
-            raise PermanentIntegrationError(
-                f"External account '{external_account_id}' is already connected to another tenant.",
-                error_code="ACCOUNT_ALREADY_CONNECTED",
-            )
+            exc_str = str(exc).lower()
+            if "uq_active_provider_external_account" in exc_str or "uq_integration_connections" in exc_str or "external_account_id" in exc_str:
+                raise PermanentIntegrationError(
+                    f"External account '{external_account_id}' is already connected to another tenant.",
+                    error_code="ACCOUNT_ALREADY_CONNECTED",
+                )
+            raise PermanentIntegrationError("Integration database constraint error.", error_code="DATABASE_INTEGRITY_ERROR")
 
         await publish_integration_event(
             tenant_id=tenant_id,

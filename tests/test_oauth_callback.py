@@ -289,7 +289,8 @@ async def test_case_22_concurrent_double_use_allows_only_one(tenant_a):
     import asyncio
     from app.integrations.oauth import validate_oauth_state_async
 
-    state = generate_oauth_state(tenant_a.id)
+    user_id = str(uuid.uuid4())
+    state = generate_oauth_state(tenant_a.id, user_id=user_id)
 
     res1, res2 = await asyncio.gather(
         validate_oauth_state_async(state),

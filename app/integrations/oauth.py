@@ -108,8 +108,10 @@ async def consume_oauth_jti_redis(nonce: str, expires_at: int) -> bool:
 
 async def validate_oauth_state_async(state: str, expected_tenant_id: uuid.UUID | None = None) -> dict[str, Any]:
     """Async variant of validate_oauth_state enforcing durable, atomic Redis anti-replay tracking."""
+    # 1. Format, 2. HMAC, 3. Payload structure, 4. Expiration
     state_payload = parse_oauth_state_payload(state)
 
+    # 5. Tenant validation
     state_tenant_id = state_payload.get("tenant_id")
     if not state_tenant_id:
         raise PermanentIntegrationError("Missing tenant_id in OAuth state payload", error_code="MISSING_STATE_TENANT")
@@ -117,6 +119,17 @@ async def validate_oauth_state_async(state: str, expected_tenant_id: uuid.UUID |
     if expected_tenant_id is not None and state_tenant_id != str(expected_tenant_id):
         raise PermanentIntegrationError("Cross-tenant OAuth state mismatch", error_code="CROSS_TENANT_STATE")
 
+    # 6. User_id presence and structure validation BEFORE Redis claim
+    state_user_id = state_payload.get("user_id")
+    if not state_user_id or state_user_id == "system":
+        raise PermanentIntegrationError("Missing or invalid user_id in OAuth state payload", error_code="MISSING_STATE_USER")
+
+    try:
+        uuid.UUID(state_user_id)
+    except (ValueError, TypeError, AttributeError):
+        raise PermanentIntegrationError("Malformed user_id UUID in OAuth state payload", error_code="MALFORMED_STATE_USER")
+
+    # 7. Atomic Redis JTI claim/consume
     nonce = state_payload.get("nonce")
     expires_at = state_payload.get("expires_at", 0)
     if not nonce:

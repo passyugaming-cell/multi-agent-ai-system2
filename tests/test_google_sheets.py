@@ -1064,9 +1064,10 @@ async def test_44_sheets_callback_without_permissions_returns_403(async_client: 
 
 @pytest.mark.asyncio
 async def test_45_sheets_callback_with_only_manage_integrations_returns_403(async_client: AsyncClient, tenant_a):
-    state = generate_oauth_state(tenant_id=tenant_a.id)
+    user_id = uuid.uuid4()
+    state = generate_oauth_state(tenant_id=tenant_a.id, user_id=str(user_id))
     actor = AuthenticatedActor(
-        user_id=uuid.uuid4(),
+        user_id=user_id,
         tenant_id=tenant_a.id,
         role="member",
         permissions={MANAGE_INTEGRATIONS},
