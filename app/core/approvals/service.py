@@ -88,6 +88,57 @@ class ApprovalService:
         await self.session.refresh(approval)
         return approval
 
+    async def cancel(
+        self,
+        tenant_id: uuid.UUID,
+        approval_id: uuid.UUID,
+        reason: str | None = None,
+    ) -> Approval:
+        approval = await self.get_approval(tenant_id, approval_id)
+
+        if approval.status != "PENDING":
+            raise AppError(f"Cannot cancel approval in {approval.status} status (must be PENDING).", status_code=400)
+
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+
+        if not active_actor:
+            raise AppError("Authentication required: no active actor context found.", status_code=403)
+
+        if active_actor.tenant_id and str(active_actor.tenant_id) != str(tenant_id):
+            raise AppError("FORBIDDEN_CROSS_TENANT_ACCESS: Actor tenant does not match approval tenant.", status_code=403)
+
+        # Check cancellation authorization: must be original requester OR possess business.write / platform owner
+        actor_user_str = str(active_actor.user_id) if active_actor.user_id else ""
+        requested_by_str = str(approval.requested_by or "")
+        is_requester = bool(actor_user_str and actor_user_str == requested_by_str) or (
+            active_actor.role and active_actor.role == requested_by_str
+        )
+        has_permission = active_actor.is_platform_owner or "business.write" in (active_actor.permissions or set())
+
+        if not (is_requester or has_permission):
+            raise AppError(
+                "PERMISSION_DENIED: Only the original requester or an actor with 'business.write' permission can cancel this approval.",
+                status_code=403,
+            )
+
+        approval.status = "CANCELLED"
+        approval.decided_at = datetime.now(timezone.utc)
+        approval.decided_by = str(active_actor.user_id or active_actor.role or "system")
+        approval.decision_reason = reason or "Cancelled by user"
+
+        # Cancel workflow execution if associated
+        if approval.workflow_execution_id:
+            exec_stmt = select(WorkflowExecution).where(WorkflowExecution.id == approval.workflow_execution_id)
+            execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
+            if execution:
+                execution.status = "CANCELLED"
+                execution.error = f"Protected action {approval.action_type} approval cancelled by user."
+
+        await self.session.commit()
+        await self.session.refresh(approval)
+        return approval
+
     async def reject(
         self,
         tenant_id: uuid.UUID,
