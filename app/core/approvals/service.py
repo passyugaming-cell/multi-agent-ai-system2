@@ -116,6 +116,15 @@ class ApprovalService:
         approval.meta_data = approval.meta_data or {}
         approval.meta_data["modified_params"] = modified_params
 
+        # Update action_hash in meta_data for modified parameters
+        from app.core.authority.schemas import ActionBinding
+        approval.meta_data["action_hash"] = ActionBinding.compute_hash(
+            action_type=approval.action_type,
+            target=approval.target,
+            tenant_id=approval.tenant_id,
+            params=modified_params,
+        )
+
         # Resume workflow execution with modified parameters
         if approval.workflow_execution_id:
             await self._resume_workflow_execution(approval, modified_params=modified_params)
@@ -147,8 +156,8 @@ class ApprovalService:
         if execution.current_step < len(actions):
             action_def = actions[execution.current_step]
             action_type = approval.action_type
-            params = modified_params or action_def.get("params") or action_def
-            params["_already_approved"] = True
+            params = dict(modified_params or action_def.get("params") or action_def)
+            params["_approval_id"] = str(approval.id)
 
             res = await ActionExecutor.execute(
                 action_type=action_type,

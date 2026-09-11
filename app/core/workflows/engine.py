@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.events.schemas import EventSchema
 from app.core.workflows.conditions import ConditionEvaluator
 from app.core.workflows.actions import ActionExecutor, ActionResult, get_action_risk_level, RiskLevel
+from app.core.authority.schemas import ActionBinding
 from app.database.models.workflow import (
     WorkflowConfiguration,
     WorkflowExecution,
@@ -191,6 +192,12 @@ class WorkflowEngine:
             # Check if action requires human approval
             if res.requires_approval:
                 approval_data = res.approval_data
+                action_hash = approval_data.get("action_hash") or ActionBinding.compute_hash(
+                    action_type=approval_data["action_type"],
+                    target=approval_data["target"],
+                    tenant_id=execution.tenant_id,
+                    params=action_params,
+                )
                 approval = Approval(
                     tenant_id=execution.tenant_id,
                     workflow_execution_id=execution.id,
@@ -201,6 +208,10 @@ class WorkflowEngine:
                     risk_level=approval_data["risk_level"],
                     status="PENDING",
                     evidence={"context": execution.context, "params": action_params},
+                    meta_data={
+                        "params": action_params,
+                        "action_hash": action_hash,
+                    },
                 )
                 self.session.add(approval)
                 execution.status = "WAITING_APPROVAL"
