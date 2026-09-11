@@ -361,7 +361,15 @@ async def test_workflow_engine_can_invoke_agent_and_pause_for_approval(db_sessio
 
     # Approve approval and verify workflow resumes
     approval_service = ApprovalService(db_session)
-    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_a.id, role="admin", permissions={"business.read", "product.read", "knowledge.read"}))
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant_a.id,
+            role="admin",
+            permissions={"business.read", "product.read", "knowledge.read"},
+            is_platform_owner=True,
+        )
+    )
     try:
         updated_appr = await approval_service.approve(tenant_a.id, appr.id, decided_by="admin_user", reason="Approved 20% discount")
     finally:

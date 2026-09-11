@@ -141,9 +141,13 @@ class ActionAuthorizationService:
             appr_meta = appr.meta_data or {}
             decided_by_str = str(appr.decided_by or "").lower()
             requested_by_str = str(appr.requested_by or "").lower()
+            request_agent_str = str(request.agent_id or "").lower()
 
-            if decided_by_str in ("owner_ai", "agent:owner_ai", "agent_owner_ai") or (
-                decided_by_str and decided_by_str == requested_by_str and "agent" in decided_by_str
+            if (
+                not appr.decided_by
+                or decided_by_str in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+                or decided_by_str == requested_by_str
+                or (request_agent_str and decided_by_str == request_agent_str)
             ):
                 await self._record_audit_event(
                     db, request, risk_level, ExecutionDecision.DENY, "SELF_APPROVAL_FORBIDDEN", action_hash
@@ -156,10 +160,7 @@ class ActionAuthorizationService:
                     action_hash=action_hash,
                 )
 
-            is_platform_owner_approver = (
-                appr_meta.get("decided_by_is_platform_owner") is True
-                or decided_by_str in ("platform_owner", "human_platform_owner", "owner@company.com", "admin_user")
-            )
+            is_platform_owner_approver = (appr_meta.get("decided_by_is_platform_owner") is True)
             if not is_platform_owner_approver:
                 await self._record_audit_event(
                     db, request, risk_level, ExecutionDecision.DENY, "UNAUTHORIZED_APPROVER_IDENTITY", action_hash

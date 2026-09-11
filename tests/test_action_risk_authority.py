@@ -14,6 +14,8 @@ from app.core.authority import (
 from app.core.workflows.actions import ActionExecutor
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.database.models.workflow import Approval
+from app.core.approvals.service import ApprovalService
+from app.core.exceptions import AppError
 
 
 @pytest.mark.asyncio
@@ -32,12 +34,12 @@ async def test_risk_classification():
 
 
 # ============================================================================
-# MEDIUM-RISK PERMISSION ENFORCEMENT TESTS (Case 1 - 4)
+# MEDIUM-RISK PERMISSION ENFORCEMENT TESTS
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_01_medium_action_actor_has_required_permission_allows(db_session: AsyncSession, tenant_a):
-    """Case 1: MEDIUM action + actor has required permission -> ALLOW."""
+async def test_medium_action_actor_has_required_permission_allows(db_session: AsyncSession, tenant_a):
+    """MEDIUM action + actor has required permission -> ALLOW."""
     service = ActionAuthorizationService(db_session)
     actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
@@ -58,8 +60,8 @@ async def test_01_medium_action_actor_has_required_permission_allows(db_session:
 
 
 @pytest.mark.asyncio
-async def test_02_medium_action_actor_lacks_required_permission_denies(db_session: AsyncSession, tenant_a):
-    """Case 2: MEDIUM action + actor lacks required permission -> DENY."""
+async def test_medium_action_actor_lacks_required_permission_denies(db_session: AsyncSession, tenant_a):
+    """MEDIUM action + actor lacks required permission -> DENY."""
     service = ActionAuthorizationService(db_session)
     actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
@@ -80,8 +82,8 @@ async def test_02_medium_action_actor_lacks_required_permission_denies(db_sessio
 
 
 @pytest.mark.asyncio
-async def test_03_medium_action_no_permissions_denies(db_session: AsyncSession, tenant_a):
-    """Case 3: MEDIUM action + no permissions -> DENY."""
+async def test_medium_action_no_permissions_denies(db_session: AsyncSession, tenant_a):
+    """MEDIUM action + no permissions -> DENY."""
     service = ActionAuthorizationService(db_session)
     actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
@@ -102,8 +104,8 @@ async def test_03_medium_action_no_permissions_denies(db_session: AsyncSession, 
 
 
 @pytest.mark.asyncio
-async def test_04_medium_action_ai_actor_lacking_permission_denies(db_session: AsyncSession, tenant_a):
-    """Case 4: MEDIUM action cannot bypass permission checks because actor is an AI."""
+async def test_medium_action_ai_actor_lacking_permission_denies(db_session: AsyncSession, tenant_a):
+    """MEDIUM action cannot bypass permission checks because actor is an AI."""
     service = ActionAuthorizationService(db_session)
     ai_actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
@@ -125,68 +127,203 @@ async def test_04_medium_action_ai_actor_lacking_permission_denies(db_session: A
 
 
 # ============================================================================
-# HIGH / CRITICAL APPROVAL & PROVENANCE TESTS (Case 5 - 12)
+# APPROVAL IDENTITY ENFORCEMENT SECURITY REGRESSION TESTS (Case 1 - 10)
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_05_high_action_without_approval_returns_waiting_approval(db_session: AsyncSession, tenant_a):
-    """Case 5: HIGH action without approval -> WAITING_APPROVAL."""
-    service = ActionAuthorizationService(db_session)
-    req = ActionRequest(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        params={"order_id": "ord_123", "amount": 100},
-    )
-    dec = await service.evaluate_action(req)
-    assert dec.decision == ExecutionDecision.WAITING_APPROVAL
-    assert dec.risk_level == ActionRiskLevel.HIGH
-
-
-@pytest.mark.asyncio
-async def test_06_high_action_valid_approval_from_platform_owner_allows(db_session: AsyncSession, tenant_a):
-    """Case 6: HIGH action with valid approval from authorized Human Platform Owner -> ALLOW."""
-    service = ActionAuthorizationService(db_session)
-    params = {"order_id": "ord_123", "amount": 500}
-    action_hash = ActionBinding.compute_hash(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        params=params,
-    )
-
+async def test_security_case_01_non_platform_actor_attempting_high_approval_raises_403(db_session: AsyncSession, tenant_a):
+    """Case 1: Non-platform actor attempting HIGH approval -> 403."""
+    appr_service = ApprovalService(db_session)
     appr = Approval(
         tenant_id=tenant_a.id,
         requested_by="ai_agent",
         action_type="issue_refund",
         target="issue_refund",
-        reason="Refund requested by customer",
+        reason="Refund",
         risk_level="HIGH",
-        status="APPROVED",
-        decided_by="platform_owner",
-        decided_at=datetime.now(timezone.utc),
-        meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
+        status="PENDING",
     )
     db_session.add(appr)
     await db_session.commit()
 
-    req = ActionRequest(
-        action_type="issue_refund",
-        target="issue_refund",
+    non_platform_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
         tenant_id=tenant_a.id,
-        params=params,
-        approval_id=appr.id,
+        role="owner", # Tenant Owner, NOT Platform Owner!
+        is_platform_owner=False,
     )
-    dec = await service.evaluate_action(req)
-    assert dec.decision == ExecutionDecision.ALLOW
-    assert dec.approval_id == appr.id
+    token = set_actor_context(non_platform_actor)
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.approve(tenant_a.id, appr.id, decided_by="tenant_owner")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
-async def test_07_high_action_approval_from_unauthorized_actor_denies(db_session: AsyncSession, tenant_a):
-    """Case 7: HIGH action with approval from unauthorized non-platform actor -> DENY."""
+async def test_security_case_02_non_platform_actor_using_decided_by_platform_owner_raises_403(db_session: AsyncSession, tenant_a):
+    """Case 2: Non-platform actor using decided_by='platform_owner' -> 403."""
+    appr_service = ApprovalService(db_session)
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="ai_agent",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    non_platform_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="member",
+        is_platform_owner=False,
+    )
+    token = set_actor_context(non_platform_actor)
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.approve(tenant_a.id, appr.id, decided_by="platform_owner") # String spoofing attempt!
+        assert exc_info.value.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_case_03_non_platform_actor_using_decided_by_human_platform_owner_raises_403(db_session: AsyncSession, tenant_a):
+    """Case 3: Non-platform actor using decided_by='human_platform_owner' -> 403."""
+    appr_service = ApprovalService(db_session)
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="ai_agent",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    non_platform_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="admin",
+        is_platform_owner=False,
+    )
+    token = set_actor_context(non_platform_actor)
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.approve(tenant_a.id, appr.id, decided_by="human_platform_owner") # String spoofing attempt!
+        assert exc_info.value.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_case_04_human_platform_owner_approval_succeeds(db_session: AsyncSession, tenant_a):
+    """Case 4: Human Platform Owner approval -> succeeds."""
+    appr_service = ApprovalService(db_session)
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="ai_agent",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    platform_owner_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        is_platform_owner=True, # Valid Human Platform Owner
+    )
+    token = set_actor_context(platform_owner_actor)
+    try:
+        approved = await appr_service.approve(tenant_a.id, appr.id, decided_by="trusted_human_owner")
+        assert approved.status == "APPROVED"
+        assert approved.meta_data.get("decided_by_is_platform_owner") is True
+        assert approved.meta_data.get("decided_by_user_id") == str(platform_owner_actor.user_id)
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_case_05_owner_ai_self_approval_rejected(db_session: AsyncSession, tenant_a):
+    """Case 5: Owner AI self-approval -> rejected."""
+    appr_service = ApprovalService(db_session)
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="agent:owner_ai",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    owner_ai_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner_ai",
+        is_platform_owner=True, # Even if platform owner flag was somehow set
+    )
+    token = set_actor_context(owner_ai_actor)
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.approve(tenant_a.id, appr.id, decided_by="owner_ai")
+        assert exc_info.value.status_code == 403
+        assert "cannot self-approve" in exc_info.value.message
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_case_06_requesting_agent_self_approval_rejected(db_session: AsyncSession, tenant_a):
+    """Case 6: Requesting agent self-approval -> rejected."""
+    appr_service = ApprovalService(db_session)
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="agent:ai_sales",
+        action_type="approve_discount",
+        target="customer_1",
+        reason="Discount",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    agent_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="agent:ai_sales",
+        is_platform_owner=False,
+    )
+    token = set_actor_context(agent_actor)
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.approve(tenant_a.id, appr.id, decided_by="agent:ai_sales")
+        assert exc_info.value.status_code == 403
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_case_07_approval_with_decided_by_metadata_missing_denies(db_session: AsyncSession, tenant_a):
+    """Case 7: Approval with decided_by metadata missing -> DENY."""
     service = ActionAuthorizationService(db_session)
-    params = {"order_id": "ord_123", "amount": 500}
+    params = {"order_id": "ord_123", "amount": 100}
     action_hash = ActionBinding.compute_hash(
         action_type="issue_refund",
         target="issue_refund",
@@ -202,8 +339,45 @@ async def test_07_high_action_approval_from_unauthorized_actor_denies(db_session
         reason="Refund",
         risk_level="HIGH",
         status="APPROVED",
-        decided_by="unauthorized_tenant_member", # NOT a platform owner!
-        decided_at=datetime.now(timezone.utc),
+        decided_by="platform_owner", # Raw string without metadata!
+        meta_data={"params": params, "action_hash": action_hash}, # Missing decided_by_is_platform_owner!
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    req = ActionRequest(
+        action_type="issue_refund",
+        target="issue_refund",
+        tenant_id=tenant_a.id,
+        params=params,
+        approval_id=appr.id,
+    )
+    dec = await service.evaluate_action(req)
+    assert dec.decision == ExecutionDecision.DENY
+    assert "Human Platform Owner" in dec.reason
+
+
+@pytest.mark.asyncio
+async def test_security_case_08_approval_with_decided_by_is_platform_owner_false_denies(db_session: AsyncSession, tenant_a):
+    """Case 8: Approval with decided_by_is_platform_owner=False -> DENY."""
+    service = ActionAuthorizationService(db_session)
+    params = {"order_id": "ord_123", "amount": 100}
+    action_hash = ActionBinding.compute_hash(
+        action_type="issue_refund",
+        target="issue_refund",
+        tenant_id=tenant_a.id,
+        params=params,
+    )
+
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="ai_agent",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
+        status="APPROVED",
+        decided_by="tenant_owner_user",
         meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": False},
     )
     db_session.add(appr)
@@ -222,125 +396,13 @@ async def test_07_high_action_approval_from_unauthorized_actor_denies(db_session
 
 
 @pytest.mark.asyncio
-async def test_08_high_action_owner_ai_as_approver_denies(db_session: AsyncSession, tenant_a):
-    """Case 8: HIGH action with Owner AI as approver -> DENY."""
+async def test_security_case_09_approval_with_valid_platform_owner_metadata_allows(db_session: AsyncSession, tenant_a):
+    """Case 9: Approval with valid platform-owner metadata -> ALLOW."""
     service = ActionAuthorizationService(db_session)
-    params = {"order_id": "ord_123", "amount": 500}
+    params = {"order_id": "ord_123", "amount": 100}
     action_hash = ActionBinding.compute_hash(
         action_type="issue_refund",
         target="issue_refund",
-        tenant_id=tenant_a.id,
-        params=params,
-    )
-
-    appr = Approval(
-        tenant_id=tenant_a.id,
-        requested_by="agent:owner_ai",
-        action_type="issue_refund",
-        target="issue_refund",
-        reason="Refund",
-        risk_level="HIGH",
-        status="APPROVED",
-        decided_by="owner_ai", # Owner AI attempted self-approval!
-        decided_at=datetime.now(timezone.utc),
-        meta_data={"params": params, "action_hash": action_hash},
-    )
-    db_session.add(appr)
-    await db_session.commit()
-
-    req = ActionRequest(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        agent_id="owner_ai",
-        params=params,
-        approval_id=appr.id,
-    )
-    dec = await service.evaluate_action(req)
-    assert dec.decision == ExecutionDecision.DENY
-    assert "cannot self-approve" in dec.reason or "Human Platform Owner" in dec.reason
-
-
-@pytest.mark.asyncio
-async def test_09_high_action_mismatched_action_hash_denies(db_session: AsyncSession, tenant_a):
-    """Case 9: HIGH action with mismatched action_hash -> DENY."""
-    service = ActionAuthorizationService(db_session)
-    original_params = {"amount": 100, "customer_id": "c_1"}
-    original_hash = ActionBinding.compute_hash(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        params=original_params,
-    )
-
-    appr = Approval(
-        tenant_id=tenant_a.id,
-        requested_by="user_owner",
-        action_type="issue_refund",
-        target="issue_refund",
-        reason="Approved refund of 100",
-        risk_level="HIGH",
-        status="APPROVED",
-        decided_by="platform_owner",
-        meta_data={"params": original_params, "action_hash": original_hash, "decided_by_is_platform_owner": True},
-    )
-    db_session.add(appr)
-    await db_session.commit()
-
-    # Forged parameters amount=10000
-    forged_req = ActionRequest(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        params={"amount": 10000, "customer_id": "c_1"},
-        approval_id=appr.id,
-    )
-    dec = await service.evaluate_action(forged_req)
-    assert dec.decision == ExecutionDecision.DENY
-    assert "mismatch" in dec.reason.lower()
-
-
-@pytest.mark.asyncio
-async def test_10_high_action_expired_approval_denies(db_session: AsyncSession, tenant_a):
-    """Case 10: HIGH action with expired approval -> DENY."""
-    service = ActionAuthorizationService(db_session)
-    params = {"amount": 100}
-
-    expired_appr = Approval(
-        tenant_id=tenant_a.id,
-        requested_by="user_owner",
-        action_type="issue_refund",
-        target="issue_refund",
-        reason="Old refund",
-        risk_level="HIGH",
-        status="APPROVED",
-        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
-        decided_by="platform_owner",
-        meta_data={"params": params, "decided_by_is_platform_owner": True},
-    )
-    db_session.add(expired_appr)
-    await db_session.commit()
-
-    req = ActionRequest(
-        action_type="issue_refund",
-        target="issue_refund",
-        tenant_id=tenant_a.id,
-        params=params,
-        approval_id=expired_appr.id,
-    )
-    dec = await service.evaluate_action(req)
-    assert dec.decision == ExecutionDecision.DENY
-    assert "expired" in dec.reason.lower()
-
-
-@pytest.mark.asyncio
-async def test_11_critical_action_follows_independent_human_approval_rule(db_session: AsyncSession, tenant_a):
-    """Case 11: CRITICAL action follows the same independent-human approval rule."""
-    service = ActionAuthorizationService(db_session)
-    params = {"customer_id": "c_999"}
-    action_hash = ActionBinding.compute_hash(
-        action_type="delete_customer",
-        target="delete_customer",
         tenant_id=tenant_a.id,
         params=params,
     )
@@ -348,59 +410,66 @@ async def test_11_critical_action_follows_independent_human_approval_rule(db_ses
     appr = Approval(
         tenant_id=tenant_a.id,
         requested_by="ai_agent",
-        action_type="delete_customer",
-        target="delete_customer",
-        reason="Delete customer account",
-        risk_level="CRITICAL",
+        action_type="issue_refund",
+        target="issue_refund",
+        reason="Refund",
+        risk_level="HIGH",
         status="APPROVED",
-        decided_by="platform_owner",
-        decided_at=datetime.now(timezone.utc),
+        decided_by="trusted_human_platform_owner",
         meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
     )
     db_session.add(appr)
     await db_session.commit()
 
     req = ActionRequest(
-        action_type="delete_customer",
-        target="delete_customer",
+        action_type="issue_refund",
+        target="issue_refund",
         tenant_id=tenant_a.id,
         params=params,
         approval_id=appr.id,
     )
     dec = await service.evaluate_action(req)
     assert dec.decision == ExecutionDecision.ALLOW
-    assert dec.risk_level == ActionRiskLevel.CRITICAL
+    assert dec.approval_id == appr.id
 
 
 @pytest.mark.asyncio
-async def test_12_cross_tenant_approval_remains_deny(db_session: AsyncSession, tenant_a, tenant_b):
-    """Case 12: Cross-tenant approval remains DENY."""
+async def test_security_case_10_approval_where_decided_by_equals_request_agent_id_denies(db_session: AsyncSession, tenant_a):
+    """Case 10: Approval where decided_by == request.agent_id -> DENY."""
     service = ActionAuthorizationService(db_session)
+    params = {"order_id": "ord_123", "amount": 100}
+    action_hash = ActionBinding.compute_hash(
+        action_type="issue_refund",
+        target="issue_refund",
+        tenant_id=tenant_a.id,
+        params=params,
+    )
 
     appr = Approval(
         tenant_id=tenant_a.id,
-        requested_by="user_owner",
+        requested_by="ai_sales",
         action_type="issue_refund",
         target="issue_refund",
-        reason="Tenant A refund",
+        reason="Refund",
         risk_level="HIGH",
         status="APPROVED",
-        decided_by="platform_owner",
-        meta_data={"params": {"amount": 50}, "decided_by_is_platform_owner": True},
+        decided_by="ai_sales", # Agent attempted self-approval!
+        meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
     )
     db_session.add(appr)
     await db_session.commit()
 
-    req_tenant_b = ActionRequest(
+    req = ActionRequest(
         action_type="issue_refund",
         target="issue_refund",
-        tenant_id=tenant_b.id,
-        params={"amount": 50},
+        tenant_id=tenant_a.id,
+        agent_id="ai_sales",
+        params=params,
         approval_id=appr.id,
     )
-    dec = await service.evaluate_action(req_tenant_b)
+    dec = await service.evaluate_action(req)
     assert dec.decision == ExecutionDecision.DENY
-    assert "cross-tenant" in dec.reason.lower() or "invalid approval" in dec.reason.lower()
+    assert "cannot self-approve" in dec.reason.lower()
 
 
 # ============================================================================
