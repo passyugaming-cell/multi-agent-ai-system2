@@ -75,10 +75,10 @@ async def run_agent(
         )
 
     actor = get_actor_context()
-    if agent_name == "owner_ai" and (not actor or actor.role != "owner"):
+    if agent_name == "owner_ai" and (not actor or not getattr(actor, "is_platform_owner", False)):
         raise AppException(
             code="PERMISSION_DENIED",
-            message="Execution of Owner AI is restricted strictly to platform owners.",
+            message="Execution of Owner AI is restricted strictly to Human Platform Owners.",
             status_code=403,
         )
 

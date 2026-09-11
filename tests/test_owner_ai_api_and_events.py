@@ -65,14 +65,15 @@ async def test_owner_ai_api_endpoints(async_client: AsyncClient, db_session: Asy
     sub.status = "ACTIVE"
     await db_session.commit()
 
-    # Create real user in database
-    user_email = f"owner-{uuid.uuid4().hex[:6]}@example.com"
+    # Create real user in database as Human Platform Owner
+    user_email = f"platform-owner-{uuid.uuid4().hex[:6]}@example.com"
     user = User(
         tenant_id=tenant_a.id,
         email=user_email,
         password_hash=hash_password("Password123!"),
         role="owner",
         is_active=True,
+        is_platform_owner=True,
     )
     db_session.add(user)
     await db_session.commit()

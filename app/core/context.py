@@ -10,6 +10,7 @@ class AuthenticatedActor:
     tenant_id: UUID
     role: str
     permissions: set[str] = field(default_factory=set)
+    is_platform_owner: bool = False
 
 
 _tenant_context: ContextVar[Optional[UUID]] = ContextVar("tenant_context", default=None)

@@ -35,22 +35,12 @@ async def enforce_owner_actor(
     db: AsyncSession = Depends(get_db_session),
     actor_perms: set[str] = Depends(resolve_actor_permissions),
 ) -> None:
-    """Enforce that only authenticated actors with the 'owner' role AND tenant subscription entitlement can access Owner AI endpoints."""
+    """Enforce that only trusted Human Platform Owners can access Owner AI endpoints."""
     actor = get_actor_context()
-    if not actor or actor.role != "owner":
+    if not actor or not getattr(actor, "is_platform_owner", False):
         raise AppException(
             code="PERMISSION_DENIED",
-            message="Owner AI access is restricted strictly to platform owners.",
-            status_code=403,
-        )
-
-    # Entitlement check: Tenant must also possess 'owner_ai' feature entitlement in subscription plan
-    ent_resolver = EntitlementResolver(db)
-    has_owner_ai_feature = await ent_resolver.has_feature(actor.tenant_id, "owner_ai")
-    if not has_owner_ai_feature:
-        raise AppException(
-            code="FEATURE_NOT_INCLUDED",
-            message="Owner AI feature is not enabled for the tenant subscription plan.",
+            message="Owner AI access is restricted strictly to Human Platform Owners. Tenant owners do not possess platform authority.",
             status_code=403,
         )
 
