@@ -151,6 +151,24 @@ async def test_security_boundary_workflow_execution_denied(db_session: AsyncSess
 
 
 @pytest.mark.asyncio
+async def test_owner_ai_registry_denies_missing_actor(db_session: AsyncSession, tenant_a):
+    """REGRESSION TEST: Verify AgentRegistry fail-closed rejection when actor is None for target_agent='owner_ai'."""
+    # Ensure no active actor context set (actor = None)
+    req = AgentRequest(
+        tenant_id=tenant_a.id,
+        source="api",
+        source_agent=None,
+        target_agent="owner_ai",
+        task_type="bypass_attempt",
+        objective="Attempt owner_ai execution with missing actor context",
+    )
+
+    res = await agent_registry.delegate_task(req, db_session)
+    assert res.status == AgentRequestStatus.BLOCKED
+    assert "human platform owner context" in res.error.lower()
+
+
+@pytest.mark.asyncio
 async def test_security_boundary_cross_tenant_access_denied(async_client: AsyncClient, db_session: AsyncSession, tenant_a, tenant_b):
     """Tenant attempting to access cross-tenant data via Owner capability -> DENIED (403 FORBIDDEN_CROSS_TENANT_ACCESS)."""
     actor_a = AuthenticatedActor(

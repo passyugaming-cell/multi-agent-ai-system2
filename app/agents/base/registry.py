@@ -72,25 +72,27 @@ class AgentRegistry:
                 correlation_id=request.correlation_id,
             )
 
-        # Security Boundary Enforcement: Non-platform-owner callers, specialist agents, and workflows CANNOT call Owner AI
+        # Security Boundary Enforcement: FAIL-CLOSED verification for Owner AI execution
         if request.target_agent == "owner_ai":
             actor = get_actor_context()
             if (
-                request.source in ("workflow", "agent_delegation")
+                actor is None
+                or not getattr(actor, "is_platform_owner", False)
+                or request.source in ("workflow", "agent_delegation")
                 or (request.source_agent and request.source_agent != "owner_ai")
-                or (actor is not None and not getattr(actor, "is_platform_owner", False))
             ):
                 logger.warning(
-                    "Blocked attempt to delegate or execute Owner AI from source='%s', source_agent='%s', is_platform_owner='%s'",
+                    "Blocked attempt to delegate or execute Owner AI: actor=%s, is_platform_owner=%s, source='%s', source_agent='%s'",
+                    actor.user_id if actor else None,
+                    getattr(actor, "is_platform_owner", False) if actor else False,
                     request.source,
                     request.source_agent,
-                    getattr(actor, "is_platform_owner", False) if actor else None,
                 )
                 return AgentResult(
                     request_id=request.request_id,
                     agent=request.target_agent,
                     status=AgentRequestStatus.BLOCKED,
-                    error="Delegation or execution of Owner AI from tenant AI, workflows, or non-platform-owner callers is strictly forbidden.",
+                    error="Execution of Owner AI requires an authenticated Human Platform Owner context. Requests from missing actors, tenant AIs, workflows, or non-platform-owner actors are strictly forbidden.",
                     correlation_id=request.correlation_id,
                 )
 
