@@ -145,12 +145,10 @@ async def cancel_approval(
     tenant_id = get_tenant_id()
     service = ApprovalService(db)
     try:
-        a = await service.get_approval(tenant_id, uuid.UUID(approval_id))
-        if a.status != "PENDING":
-            raise HTTPException(status_code=400, detail="Cannot cancel non-pending approval")
-        a.status = "CANCELLED"
-        await db.commit()
-        await db.refresh(a)
+        a = await service.cancel(
+            tenant_id=tenant_id,
+            approval_id=uuid.UUID(approval_id),
+        )
     except AppException as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
 
