@@ -101,8 +101,7 @@ class SupportAgent(BaseAgent):
                 actions_taken.append({"type": "create_task", "result": task_res.data})
 
         # 5. Handle high-risk vs low-risk remediation / Approval
-        already_approved = bool(request.context.get("_already_approved"))
-        needs_approval = (diag_output.requires_high_risk_remediation or diag_output.incident_severity == IncidentSeverity.CRITICAL) and not already_approved
+        needs_approval = diag_output.requires_high_risk_remediation or diag_output.incident_severity == IncidentSeverity.CRITICAL
         approval_id = None
         status = AgentRequestStatus.COMPLETED
 

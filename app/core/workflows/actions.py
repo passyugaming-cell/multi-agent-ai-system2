@@ -76,9 +76,16 @@ class ActionExecutor:
             except (ValueError, TypeError):
                 approval_uuid = None
 
+        target_str = str(
+            params.get("target")
+            or (params.get("agent_name") if action_type == "call_agent" else None)
+            or (params.get("agent") if action_type == "call_agent" else None)
+            or action_type
+        )
+
         action_req = ActionRequest(
             action_type=action_type,
-            target=str(params.get("target", action_type)),
+            target=target_str,
             tenant_id=tenant_uuid,
             actor=active_actor,
             agent_id=params.get("agent_id") or context.get("agent_id"),
@@ -93,13 +100,13 @@ class ActionExecutor:
         if auth_decision.decision == ExecutionDecision.DENY:
             return ActionResult(success=False, error=auth_decision.reason)
 
-        if auth_decision.decision == ExecutionDecision.WAITING_APPROVAL and not params.get("_already_approved", False):
+        if auth_decision.decision == ExecutionDecision.WAITING_APPROVAL:
             return ActionResult(
                 success=True,
                 requires_approval=True,
                 approval_data={
                     "action_type": action_type,
-                    "target": str(params.get("target", action_type)),
+                    "target": target_str,
                     "reason": params.get("reason", f"Execution of {auth_decision.risk_level.value}-risk action {action_type}"),
                     "risk_level": auth_decision.risk_level.value,
                     "params": params,
@@ -181,8 +188,6 @@ class ActionExecutor:
             objective = params.get("objective") or params.get("prompt", "Analyze workflow context")
 
             agent_context = dict(context)
-            if params.get("_already_approved"):
-                agent_context["_already_approved"] = True
 
             agent_req = AgentRequest(
                 tenant_id=tenant_uuid,
@@ -198,7 +203,7 @@ class ActionExecutor:
 
             agent_res = await agent_registry.delegate_task(agent_req, session)
 
-            if not params.get("_already_approved") and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
+            if not action_req.approval_id and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
                 return ActionResult(
                     success=True,
                     requires_approval=True,

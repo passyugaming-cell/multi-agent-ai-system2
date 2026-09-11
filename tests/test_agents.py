@@ -375,45 +375,66 @@ async def test_workflow_engine_can_invoke_agent_and_pause_for_approval(db_sessio
 @pytest.mark.asyncio
 async def test_agent_api_endpoints_and_tenant_isolation(async_client: AsyncClient, tenant_a, tenant_b):
     """Test API endpoints for agents and strict tenant isolation checks."""
-    # 1. Test GET /api/v1/agents
-    res = await async_client.get("/api/v1/agents", headers={"X-Tenant-ID": str(tenant_a.id)})
-    assert res.status_code == 200
-    data = res.json()
-    assert "agents" in data
-    assert len(data["agents"]) >= 5
-
-    # 2. Test GET /api/v1/agents/ai_sales
-    res = await async_client.get("/api/v1/agents/ai_sales", headers={"X-Tenant-ID": str(tenant_a.id)})
-    assert res.status_code == 200
-    assert res.json()["name"] == "ai_sales"
-
-    # 3. Test POST /api/v1/agents/ai_sales/run with tenant match
-    run_payload = {
-        "tenant_id": str(tenant_a.id),
-        "target_agent": "ai_sales",
-        "task_type": "inquire_product",
-        "objective": "Check available products",
-    }
-    res = await async_client.post(
-        "/api/v1/agents/ai_sales/run",
-        json=run_payload,
-        headers={"X-Tenant-ID": str(tenant_a.id)},
+    actor_a = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "product.read", "knowledge.read"},
     )
-    assert res.status_code == 200
-    res_data = res.json()
-    assert res_data["agent"] == "ai_sales"
+    token = set_actor_context(actor_a)
+
+    try:
+        # 1. Test GET /api/v1/agents
+        res = await async_client.get("/api/v1/agents", headers={"X-Tenant-ID": str(tenant_a.id)})
+        assert res.status_code == 200
+        data = res.json()
+        assert "agents" in data
+        assert len(data["agents"]) >= 5
+
+        # 2. Test GET /api/v1/agents/ai_sales
+        res = await async_client.get("/api/v1/agents/ai_sales", headers={"X-Tenant-ID": str(tenant_a.id)})
+        assert res.status_code == 200
+        assert res.json()["name"] == "ai_sales"
+
+        # 3. Test POST /api/v1/agents/ai_sales/run with tenant match
+        run_payload = {
+            "tenant_id": str(tenant_a.id),
+            "target_agent": "ai_sales",
+            "task_type": "inquire_product",
+            "objective": "Check available products",
+        }
+        res = await async_client.post(
+            "/api/v1/agents/ai_sales/run",
+            json=run_payload,
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert res.status_code == 200
+        res_data = res.json()
+        assert res_data["agent"] == "ai_sales"
+    finally:
+        reset_actor_context(token)
 
     # 4. Test Tenant Mismatch Security Rejection (Tenant A header attempting Tenant B request)
-    mismatch_payload = {
-        "tenant_id": str(tenant_b.id),
-        "target_agent": "ai_sales",
-        "task_type": "inquire_product",
-        "objective": "Cross tenant leak attempt",
-    }
-    res = await async_client.post(
-        "/api/v1/agents/ai_sales/run",
-        json=mismatch_payload,
-        headers={"X-Tenant-ID": str(tenant_a.id)},
+    actor_a_b = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "product.read", "knowledge.read"},
     )
-    assert res.status_code == 403
-    assert "tenant_id does not match" in res.json()["error"]["message"]
+    token_b = set_actor_context(actor_a_b)
+    try:
+        mismatch_payload = {
+            "tenant_id": str(tenant_b.id),
+            "target_agent": "ai_sales",
+            "task_type": "inquire_product",
+            "objective": "Cross tenant leak attempt",
+        }
+        res = await async_client.post(
+            "/api/v1/agents/ai_sales/run",
+            json=mismatch_payload,
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert res.status_code == 403
+        assert "tenant_id does not match" in res.json()["error"]["message"]
+    finally:
+        reset_actor_context(token_b)

@@ -42,9 +42,10 @@ class ActionBinding(BaseModel):
     ) -> str:
         """Computes a deterministic SHA256 hex digest binding an action request."""
         clean_params = params or {}
-        # Filter internal ephemeral metadata keys starting with '_' before hashing
+        # Filter internal ephemeral metadata keys starting with '_' or 'approval_id' before hashing
         serializable_params = {
-            k: v for k, v in clean_params.items() if not k.startswith("_")
+            k: v for k, v in clean_params.items()
+            if not k.startswith("_") and k != "approval_id"
         }
         raw_payload = {
             "action_type": str(action_type).strip().lower(),

@@ -99,8 +99,7 @@ class ClientManagerAgent(BaseAgent):
                 actions_taken.append({"type": "create_task", "result": task_res.data})
 
         # 6. Configuration change request handling
-        already_approved = bool(request.context.get("_already_approved"))
-        needs_approval = cm_output.request_config_change and not already_approved
+        needs_approval = bool(cm_output.request_config_change)
         approval_id = None
         status = AgentRequestStatus.COMPLETED
 

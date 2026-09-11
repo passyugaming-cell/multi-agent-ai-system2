@@ -36,6 +36,8 @@ from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_
 from app.agents.owner_ai.tools import tool_get_midtrans_payment_status, tool_execute_integration_operation
 from app.agents.base.schemas import ToolRequest
 from app.core.approvals import ApprovalService
+from app.database.models.workflow import Approval
+from app.core.authority.schemas import ActionBinding
 
 
 @pytest.fixture(autouse=True)
@@ -848,11 +850,34 @@ async def test_41_workflow_action_midtrans_cancel_payment(db_session, tenant_a):
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
+    params = {"order_id": "inv_cancel_1"}
+    action_hash = ActionBinding.compute_hash(
+        action_type="midtrans_cancel_payment",
+        target="midtrans_cancel_payment",
+        tenant_id=tenant_a.id,
+        params=params,
+    )
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="owner",
+        action_type="midtrans_cancel_payment",
+        target="midtrans_cancel_payment",
+        reason="Test cancel",
+        risk_level="HIGH",
+        status="APPROVED",
+        meta_data={"params": params, "action_hash": action_hash},
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    exec_params = dict(params)
+    exec_params["approval_id"] = str(appr.id)
+
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = AsyncMock(status_code=200, json=lambda: {"transaction_status": "cancel"})
         res = await ActionExecutor.execute(
             action_type="midtrans_cancel_payment",
-            params={"order_id": "inv_cancel_1", "_already_approved": True},
+            params=exec_params,
             context={},
             session=db_session,
             tenant_id=str(tenant_a.id),
@@ -875,11 +900,34 @@ async def test_42_workflow_action_midtrans_request_refund(db_session, tenant_a):
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
+    params = {"order_id": "inv_ref_1", "amount": "50000.00"}
+    action_hash = ActionBinding.compute_hash(
+        action_type="midtrans_request_refund",
+        target="midtrans_request_refund",
+        tenant_id=tenant_a.id,
+        params=params,
+    )
+    appr = Approval(
+        tenant_id=tenant_a.id,
+        requested_by="owner",
+        action_type="midtrans_request_refund",
+        target="midtrans_request_refund",
+        reason="Test refund",
+        risk_level="HIGH",
+        status="APPROVED",
+        meta_data={"params": params, "action_hash": action_hash},
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    exec_params = dict(params)
+    exec_params["approval_id"] = str(appr.id)
+
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = AsyncMock(status_code=200, json=lambda: {"transaction_status": "refund"})
         res = await ActionExecutor.execute(
             action_type="midtrans_request_refund",
-            params={"order_id": "inv_ref_1", "amount": "50000.00", "_already_approved": True},
+            params=exec_params,
             context={},
             session=db_session,
             tenant_id=str(tenant_a.id),

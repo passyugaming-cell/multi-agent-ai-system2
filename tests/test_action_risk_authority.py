@@ -11,6 +11,7 @@ from app.core.authority import (
     RiskClassifier,
     ActionAuthorizationService,
 )
+from app.core.workflows.actions import ActionExecutor
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 from app.database.models.workflow import Approval
 
@@ -325,3 +326,40 @@ async def test_human_platform_owner_can_execute_owner_ai(db_session: AsyncSessio
 
     dec = await service.evaluate_action(req)
     assert dec.decision == ExecutionDecision.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_already_approved_param_cannot_bypass_action_executor(db_session: AsyncSession, tenant_a):
+    """REGRESSION TEST: Verify _already_approved: True parameter CANNOT bypass authorization gate."""
+    res = await ActionExecutor.execute(
+        action_type="issue_refund",
+        params={"order_id": "ord_fake", "amount": 1000, "_already_approved": True},
+        context={},
+        session=db_session,
+        tenant_id=str(tenant_a.id),
+    )
+    assert res.requires_approval is True
+    assert res.success is True
+    assert res.output == {}
+
+
+@pytest.mark.asyncio
+async def test_fake_approval_booleans_cannot_bypass(db_session: AsyncSession, tenant_a):
+    """REGRESSION TEST: Verify fake approval booleans (approved: True, is_approved: True) cannot bypass authorization."""
+    res1 = await ActionExecutor.execute(
+        action_type="midtrans_cancel_payment",
+        params={"order_id": "ord_fake", "approved": True},
+        context={},
+        session=db_session,
+        tenant_id=str(tenant_a.id),
+    )
+    assert res1.requires_approval is True
+
+    res2 = await ActionExecutor.execute(
+        action_type="delete_customer",
+        params={"customer_id": "cust_fake", "is_approved": True},
+        context={},
+        session=db_session,
+        tenant_id=str(tenant_a.id),
+    )
+    assert res2.requires_approval is True
