@@ -626,7 +626,7 @@ async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, s
             tenant_id=str(t1_id),
         )
         assert wf_res.success is False
-        assert "Authentication required" in wf_res.error
+        assert "PERMISSION_DENIED" in wf_res.error
 
 
 @pytest.mark.asyncio
@@ -682,4 +682,4 @@ async def test_14_approval_service_fail_closed_without_actor(test_engine, setup_
                 decided_by="admin_user",
             )
         assert exc_info.value.status_code == 403
-        assert "Authentication required" in exc_info.value.message
+        assert "PERMISSION_DENIED" in exc_info.value.message

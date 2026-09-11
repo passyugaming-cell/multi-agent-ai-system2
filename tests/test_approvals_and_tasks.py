@@ -4,7 +4,7 @@ from app.core.tasks.service import TaskService
 from app.core.approvals.service import ApprovalService
 from app.core.events.schemas import EventSchema
 from app.core.workflows.engine import WorkflowEngine
-from app.database.models.workflow import WorkflowConfiguration
+from app.database.models.workflow import WorkflowConfiguration, Approval
 from app.core.exceptions import AppError
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
@@ -149,3 +149,190 @@ async def test_approval_rejection_cancels_workflow(db_session, tenant_a):
     # Refresh execution, should be CANCELLED
     await db_session.refresh(exec_inst)
     assert exec_inst.status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_approval_cancellation_authorization_and_lifecycle(db_session, tenant_a, tenant_b):
+    appr_service = ApprovalService(db_session)
+    user_req_id = uuid.uuid4()
+    user_other_id = uuid.uuid4()
+
+    # 1. Original requester can cancel pending approval
+    appr1 = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_req_id),
+        action_type="change_product_price",
+        target="product_1",
+        reason="Price adjustment",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr1)
+    await db_session.commit()
+
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_req_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+        )
+    )
+    try:
+        cancelled1 = await appr_service.cancel(tenant_a.id, appr1.id)
+        assert cancelled1.status == "CANCELLED"
+    finally:
+        reset_actor_context(token)
+
+    # 2. Actor with business.write can cancel pending approval created by another user
+    appr2 = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_req_id),
+        action_type="change_product_price",
+        target="product_2",
+        reason="Price adjustment 2",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr2)
+    await db_session.commit()
+
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_other_id,
+            tenant_id=tenant_a.id,
+            role="admin",
+            permissions={"business.write"},
+        )
+    )
+    try:
+        cancelled2 = await appr_service.cancel(tenant_a.id, appr2.id)
+        assert cancelled2.status == "CANCELLED"
+    finally:
+        reset_actor_context(token)
+
+    # 3. Ordinary tenant member without business.write cannot cancel another user's approval
+    appr3 = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_req_id),
+        action_type="change_product_price",
+        target="product_3",
+        reason="Price adjustment 3",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr3)
+    await db_session.commit()
+
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_other_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},  # No business.write
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.cancel(tenant_a.id, appr3.id)
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token)
+
+    # 4. Cross-tenant actor cannot cancel approval
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_other_id,
+            tenant_id=tenant_b.id,  # Cross-tenant actor context
+            role="admin",
+            permissions={"business.write"},
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.cancel(tenant_a.id, appr3.id)
+        assert exc_info.value.status_code == 404
+    finally:
+        reset_actor_context(token)
+
+    # 5. Unauthenticated actor fails closed
+    with pytest.raises(AppError) as exc_info:
+        await appr_service.cancel(tenant_a.id, appr3.id)
+    assert exc_info.value.status_code == 403
+    assert "Authentication required" in exc_info.value.message
+
+    # 6. Already approved approval cannot be cancelled
+    appr_approved = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_req_id),
+        action_type="change_product_price",
+        target="product_4",
+        reason="Price adjustment 4",
+        risk_level="MEDIUM",
+        status="APPROVED",
+    )
+    db_session.add(appr_approved)
+    await db_session.commit()
+
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_req_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.cancel(tenant_a.id, appr_approved.id)
+        assert exc_info.value.status_code == 400
+        assert "Cannot cancel non-pending approval" in exc_info.value.message
+    finally:
+        reset_actor_context(token)
+
+    # 7. Already rejected approval cannot be cancelled
+    appr_rejected = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_req_id),
+        action_type="change_product_price",
+        target="product_5",
+        reason="Price adjustment 5",
+        risk_level="MEDIUM",
+        status="REJECTED",
+    )
+    db_session.add(appr_rejected)
+    await db_session.commit()
+
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_req_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.cancel(tenant_a.id, appr_rejected.id)
+        assert exc_info.value.status_code == 400
+        assert "Cannot cancel non-pending approval" in exc_info.value.message
+    finally:
+        reset_actor_context(token)
+
+    # 8. Already cancelled approval cannot be cancelled
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_req_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.cancel(tenant_a.id, appr1.id)  # appr1 was cancelled in step 1
+        assert exc_info.value.status_code == 400
+        assert "Cannot cancel non-pending approval" in exc_info.value.message
+    finally:
+        reset_actor_context(token)

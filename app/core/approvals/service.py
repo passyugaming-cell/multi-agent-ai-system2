@@ -17,6 +17,11 @@ class ApprovalService:
         self.session = db_session
 
     async def get_approval(self, tenant_id: uuid.UUID, approval_id: uuid.UUID) -> Approval:
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+        if active_actor and str(active_actor.tenant_id) != str(tenant_id):
+            raise AppError("Approval request not found or access denied.", status_code=404)
+
         stmt = select(Approval).where(and_(Approval.id == approval_id, Approval.tenant_id == tenant_id))
         appr = (await self.session.execute(stmt)).scalar_one_or_none()
         if not appr:
@@ -83,6 +88,57 @@ class ApprovalService:
         # Resume workflow execution if associated
         if approval.workflow_execution_id:
             await self._resume_workflow_execution(approval, modified_params=None)
+
+        await self.session.commit()
+        await self.session.refresh(approval)
+        return approval
+
+    async def cancel(
+        self,
+        tenant_id: uuid.UUID,
+        approval_id: uuid.UUID,
+    ) -> Approval:
+        approval = await self.get_approval(tenant_id, approval_id)
+
+        if approval.status != "PENDING":
+            raise AppError(f"Cannot cancel non-pending approval (current status: {approval.status}).", status_code=400)
+
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+
+        if not active_actor:
+            raise AppError(
+                "Authentication required: no active trusted actor context to cancel approval.",
+                status_code=403,
+            )
+
+        req_by_str = str(approval.requested_by or "").strip()
+        is_requester = False
+        if active_actor.user_id and str(active_actor.user_id).strip() == req_by_str:
+            is_requester = True
+        elif active_actor.role and str(active_actor.role).strip().lower() == req_by_str.lower():
+            is_requester = True
+
+        has_business_write = "business.write" in active_actor.permissions
+
+        if not (is_requester or has_business_write):
+            raise AppError(
+                "PERMISSION_DENIED: Insufficient permissions to cancel approval.",
+                status_code=403,
+            )
+
+        approval.status = "CANCELLED"
+        approval.decided_at = datetime.now(timezone.utc)
+        approval.decided_by = str(active_actor.user_id) if active_actor.user_id else active_actor.role
+        approval.decision_reason = "Cancelled by user"
+
+        # Cancel workflow execution if associated
+        if approval.workflow_execution_id:
+            exec_stmt = select(WorkflowExecution).where(WorkflowExecution.id == approval.workflow_execution_id)
+            execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
+            if execution:
+                execution.status = "CANCELLED"
+                execution.error = f"Protected action {approval.action_type} approval cancelled."
 
         await self.session.commit()
         await self.session.refresh(approval)
