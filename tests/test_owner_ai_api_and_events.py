@@ -8,6 +8,8 @@ from app.agents.owner_ai.events import OwnerAIEventConsumer
 from app.tenants.repository import TenantRepository
 from app.tenants.schemas import TenantCreate
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+from app.billing.subscription import SubscriptionService
+from app.billing.plans import PlanService
 
 
 @pytest.mark.asyncio
@@ -42,7 +44,20 @@ async def test_owner_ai_event_consumer_filtering(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_owner_ai_api_endpoints(async_client: AsyncClient, tenant_a):
+async def test_owner_ai_api_endpoints(async_client: AsyncClient, db_session: AsyncSession, tenant_a):
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    biz_plan = await plan_srv.get_plan_by_code("business")
+
+    sub_srv = SubscriptionService(db_session)
+    sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+    if not sub:
+        await sub_srv.create_trial_subscription(tenant_a.id)
+        sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+
+    sub.plan_id = biz_plan.id
+    await db_session.commit()
+
     owner_actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
         tenant_id=tenant_a.id,

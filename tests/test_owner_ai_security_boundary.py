@@ -4,10 +4,14 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
+from app.core.auth import resolve_actor_permissions
+from app.core.exceptions import AppException
 from app.agents.base.registry import agent_registry
 from app.agents.base.schemas import AgentRequest, AgentRequestStatus, ToolRequest
 from app.core.workflows.actions import ActionExecutor
 from app.analytics.services import AnalyticsService
+from app.billing.subscription import SubscriptionService
+from app.billing.plans import PlanService
 
 
 @pytest.mark.asyncio
@@ -101,32 +105,109 @@ async def test_security_boundary_3_tenant_user_owner_agent_and_workflow_denied(a
 @pytest.mark.asyncio
 async def test_security_boundary_4_cross_tenant_access_denied(async_client: AsyncClient, db_session: AsyncSession, tenant_a, tenant_b):
     """TEST 4: Tenant attempting to access cross-tenant data via Owner capability -> DENIED."""
-    # Context actor is bound to Tenant A, but request specifies Tenant B
+    # Actor Context is bound to Tenant A
     actor_a = AuthenticatedActor(
         user_id=uuid.uuid4(),
         tenant_id=tenant_a.id,
         role="owner",
-        permissions={"business.read"},
+        permissions={"business.read", "business.write"},
     )
     token = set_actor_context(actor_a)
 
     try:
-        analytics = AnalyticsService(db_session)
-        # Attempting to fetch Tenant B financial data under Tenant A actor
-        # Tenant isolation in repositories/services ensures tenant_id parameters enforce DB boundaries
-        res_a = await analytics.financial.get_financial_analytics(tenant_a.id)
-        res_b = await analytics.financial.get_financial_analytics(tenant_b.id)
+        # 4a. Cross-tenant permission check when requesting Tenant B header under Tenant A actor context raises FORBIDDEN_CROSS_TENANT_ACCESS
+        with pytest.raises(AppException) as exc_info:
+            # resolve_actor_permissions checks get_tenant_context() against actor.tenant_id
+            from app.core.context import set_tenant_context, reset_tenant_context
+            tenant_b_tok = set_tenant_context(tenant_b.id)
+            try:
+                resolve_actor_permissions()
+            finally:
+                reset_tenant_context(tenant_b_tok)
 
-        # Confirm data returned for tenant_a does not match or leak tenant_b
-        assert res_a is not None
-        assert res_b is not None
+        assert exc_info.value.code == "FORBIDDEN_CROSS_TENANT_ACCESS"
+        assert exc_info.value.status_code == 403
+
+        # 4b. Agent request targeting Tenant B with Tenant A actor context is blocked or fails cross-tenant validation
+        agent_req_b = AgentRequest(
+            tenant_id=tenant_b.id,
+            source="owner_api",
+            source_agent="owner_ai",
+            target_agent="owner_ai",
+            task_type="cross_tenant_attempt",
+            objective="Access Tenant B facts",
+        )
+        # Agent delegation / context assembly validates actor tenant binding
+        from app.core.context_assembly import ContextAssemblyService, ContextAssemblyRequest
+        assembly_srv = ContextAssemblyService(db_session)
+        with pytest.raises(AppException) as assembly_exc:
+            await assembly_srv.assemble_context(
+                ContextAssemblyRequest(
+                    tenant_id=tenant_b.id,
+                    agent_name="owner_ai",
+                    task_type="cross_tenant_attempt",
+                )
+            )
+        assert assembly_exc.value.code == "FORBIDDEN_CROSS_TENANT_ACCESS"
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_security_boundary_6_tenant_owner_without_entitlement_denied(async_client: AsyncClient, db_session: AsyncSession, tenant_a):
+    """Proves that a Tenant Owner on a plan without 'owner_ai' entitlement (e.g., Starter/Pro) is DENIED (403 FEATURE_NOT_INCLUDED)."""
+    # 1. Ensure tenant_a is on Starter plan (no owner_ai feature)
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    starter_plan = await plan_srv.get_plan_by_code("starter")
+
+    sub_srv = SubscriptionService(db_session)
+    sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+    if not sub:
+        await sub_srv.create_trial_subscription(tenant_a.id)
+        sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+
+    sub.plan_id = starter_plan.id
+    await db_session.commit()
+
+    # 2. Set Tenant Owner actor context for Tenant A
+    owner_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "business.write"},
+    )
+    token = set_actor_context(owner_actor)
+
+    try:
+        res = await async_client.post(
+            "/api/v1/owner-ai/run",
+            json={"objective": "Try running owner_ai on Starter plan"},
+            headers={"X-Tenant-ID": str(tenant_a.id)},
+        )
+        assert res.status_code == 403
+        assert res.json()["error"]["code"] == "FEATURE_NOT_INCLUDED"
     finally:
         reset_actor_context(token)
 
 
 @pytest.mark.asyncio
 async def test_security_boundary_5_owner_internal_flow_allowed(async_client: AsyncClient, db_session: AsyncSession, tenant_a):
-    """TEST 5: Internal Owner flow / Human Owner actor accessing Owner AI -> ALLOWED."""
+    """TEST 5: Internal Owner flow / Human Owner actor on a Business plan accessing Owner AI -> ALLOWED."""
+    # 1. Set tenant_a to Business plan which contains the 'owner_ai' feature entitlement
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+    biz_plan = await plan_srv.get_plan_by_code("business")
+
+    sub_srv = SubscriptionService(db_session)
+    sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+    if not sub:
+        await sub_srv.create_trial_subscription(tenant_a.id)
+        sub = await sub_srv.get_subscription_or_none(tenant_a.id)
+
+    sub.plan_id = biz_plan.id
+    await db_session.commit()
+
     # Set legitimate Owner actor context
     owner_actor = AuthenticatedActor(
         user_id=uuid.uuid4(),
