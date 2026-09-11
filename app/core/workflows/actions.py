@@ -1,13 +1,14 @@
 from enum import Enum
-from typing import Any, Callable, Awaitable
+from typing import Any
 import logging
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ai_gateway import AIGateway, GeminiProvider, AIRequest
-from app.database.models.customer import Customer
-from app.database.models.order import Order
-from sqlalchemy import select
+from app.core.authority.schemas import ActionRequest, ExecutionDecision, ActionBinding
+from app.core.authority.risk import RiskClassifier
+from app.core.authority.service import ActionAuthorizationService
+from app.core.context import get_actor_context
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,16 @@ class RiskLevel(str, Enum):
 
 
 class ActionResult:
-    def __init__(self, success: bool, output: dict[str, Any] | None = None, error: str | None = None, is_delayed: bool = False, delay_seconds: int = 0, requires_approval: bool = False, approval_data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        success: bool,
+        output: dict[str, Any] | None = None,
+        error: str | None = None,
+        is_delayed: bool = False,
+        delay_seconds: int = 0,
+        requires_approval: bool = False,
+        approval_data: dict[str, Any] | None = None,
+    ) -> None:
         self.success = success
         self.output = output or {}
         self.error = error
@@ -30,38 +40,10 @@ class ActionResult:
         self.approval_data = approval_data or {}
 
 
-# Action classification policy map
-ACTION_RISK_MAP = {
-    "send_message": RiskLevel.LOW,
-    "create_task": RiskLevel.LOW,
-    "add_tag": RiskLevel.LOW,
-    "remove_tag": RiskLevel.LOW,
-    "log_result": RiskLevel.LOW,
-    "delay": RiskLevel.LOW,
-    "emit_event": RiskLevel.LOW,
-    "update_customer": RiskLevel.MEDIUM,
-    "update_order": RiskLevel.MEDIUM,
-    "call_ai": RiskLevel.MEDIUM,
-    "call_agent": RiskLevel.MEDIUM,
-    "google_calendar_create_event": RiskLevel.MEDIUM,
-    "google_sheets_append": RiskLevel.MEDIUM,
-    "google_sheets_update": RiskLevel.MEDIUM,
-    "whatsapp_send_message": RiskLevel.MEDIUM,
-    "midtrans_check_status": RiskLevel.LOW,
-    "midtrans_create_payment": RiskLevel.MEDIUM,
-    "midtrans_cancel_payment": RiskLevel.HIGH,
-    "midtrans_request_refund": RiskLevel.HIGH,
-    "change_product_price": RiskLevel.HIGH,
-    "issue_refund": RiskLevel.HIGH,
-    "request_approval": RiskLevel.HIGH,
-    "delete_customer": RiskLevel.CRITICAL,
-    "delete_data": RiskLevel.CRITICAL,
-}
-
-
 def get_action_risk_level(action_type: str, action_params: dict[str, Any]) -> RiskLevel:
-    """Classify action risk level based on action type and parameters."""
-    return ACTION_RISK_MAP.get(action_type, RiskLevel.HIGH)
+    """Classify action risk level using centralized RiskClassifier."""
+    c_risk = RiskClassifier.classify(action_type, action_params)
+    return RiskLevel(c_risk.value)
 
 
 class ActionExecutor:
@@ -69,32 +51,66 @@ class ActionExecutor:
 
     @classmethod
     async def execute(
-        self,
+        cls,
         action_type: str,
         params: dict[str, Any],
         context: dict[str, Any],
         session: AsyncSession,
         tenant_id: str,
     ) -> ActionResult:
-        # Prevent executing dangerous arbitrary actions
+        # Prevent executing dangerous arbitrary operations
         forbidden_keywords = ["eval", "exec", "system", "subprocess", "os.", "shutil", "importlib", "raw_sql"]
         params_str = str(params).lower()
         if any(kw in params_str for kw in forbidden_keywords):
-            return ActionResult(success=False, error=f"Action parameters contain forbidden operations/keywords.")
+            return ActionResult(success=False, error="Action parameters contain forbidden operations/keywords.")
 
-        risk_level = get_action_risk_level(action_type, params)
+        tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
+        active_actor = get_actor_context()
 
-        # HIGH/CRITICAL actions require approval if not already approved
-        if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL) and not params.get("_already_approved", False):
+        # Parse approval_id if passed in params or context
+        approval_id_val = params.get("approval_id") or params.get("_approval_id") or context.get("approval_id")
+        approval_uuid = None
+        if approval_id_val:
+            try:
+                approval_uuid = approval_id_val if isinstance(approval_id_val, uuid.UUID) else uuid.UUID(str(approval_id_val))
+            except (ValueError, TypeError):
+                approval_uuid = None
+
+        target_str = str(
+            params.get("target")
+            or (params.get("agent_name") if action_type == "call_agent" else None)
+            or (params.get("agent") if action_type == "call_agent" else None)
+            or action_type
+        )
+
+        action_req = ActionRequest(
+            action_type=action_type,
+            target=target_str,
+            tenant_id=tenant_uuid,
+            actor=active_actor,
+            agent_id=params.get("agent_id") or context.get("agent_id"),
+            params=params,
+            approval_id=approval_uuid,
+            correlation_id=params.get("correlation_id") or context.get("correlation_id"),
+        )
+
+        auth_service = ActionAuthorizationService(session)
+        auth_decision = await auth_service.evaluate_action(action_req)
+
+        if auth_decision.decision == ExecutionDecision.DENY:
+            return ActionResult(success=False, error=auth_decision.reason)
+
+        if auth_decision.decision == ExecutionDecision.WAITING_APPROVAL:
             return ActionResult(
                 success=True,
                 requires_approval=True,
                 approval_data={
                     "action_type": action_type,
-                    "target": str(params.get("target", action_type)),
-                    "reason": params.get("reason", f"Execution of high-risk action {action_type}"),
-                    "risk_level": risk_level.value,
+                    "target": target_str,
+                    "reason": params.get("reason", f"Execution of {auth_decision.risk_level.value}-risk action {action_type}"),
+                    "risk_level": auth_decision.risk_level.value,
                     "params": params,
+                    "action_hash": auth_decision.action_hash,
                 },
             )
 
@@ -136,7 +152,7 @@ class ActionExecutor:
 
             event = EventSchema(
                 event_id=f"evt_{uuid.uuid4().hex[:12]}",
-                tenant_id=tenant_id,
+                tenant_id=str(tenant_uuid),
                 event_type=params.get("event_type", "workflow.custom_event"),
                 payload=params.get("payload", {}),
                 source="workflow_engine",
@@ -151,7 +167,7 @@ class ActionExecutor:
             system_inst = params.get("system_instruction", "Analyze the input context.")
 
             req = AIRequest(
-                tenant_id=uuid.UUID(tenant_id),
+                tenant_id=tenant_uuid,
                 task_type=task_type,
                 system_instruction=system_inst,
                 user_message=str(context),
@@ -172,10 +188,6 @@ class ActionExecutor:
             objective = params.get("objective") or params.get("prompt", "Analyze workflow context")
 
             agent_context = dict(context)
-            if params.get("_already_approved"):
-                agent_context["_already_approved"] = True
-
-            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
 
             agent_req = AgentRequest(
                 tenant_id=tenant_uuid,
@@ -191,7 +203,7 @@ class ActionExecutor:
 
             agent_res = await agent_registry.delegate_task(agent_req, session)
 
-            if not params.get("_already_approved") and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
+            if not action_req.approval_id and (agent_res.needs_approval or agent_res.status == AgentRequestStatus.WAITING_APPROVAL):
                 return ActionResult(
                     success=True,
                     requires_approval=True,
@@ -201,6 +213,12 @@ class ActionExecutor:
                         "reason": agent_res.recommendation or f"Specialist agent {target_agent} requested approval.",
                         "risk_level": "HIGH",
                         "params": params,
+                        "action_hash": ActionBinding.compute_hash(
+                            action_type="call_agent",
+                            target=target_agent,
+                            tenant_id=tenant_uuid,
+                            params=params,
+                        ),
                     },
                 )
 
@@ -220,7 +238,6 @@ class ActionExecutor:
         elif action_type == "whatsapp_send_message":
             from app.integrations import IntegrationService
             service = IntegrationService(session)
-            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
             conn = await service.get_connection_by_provider(tenant_uuid, "whatsapp_cloud_api", allow_internal=True) or await service.get_connection_by_provider(tenant_uuid, "whatsapp", allow_internal=True)
             if not conn:
                 return ActionResult(success=False, error="WhatsApp integration connection not active")
@@ -239,7 +256,6 @@ class ActionExecutor:
             from app.integrations import IntegrationService
             from app.billing.payments import PaymentService
             service = IntegrationService(session)
-            tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
 
             conn = await service.get_connection_by_provider(tenant_uuid, "midtrans", allow_internal=True)
             if not conn:
@@ -305,7 +321,6 @@ class ActionExecutor:
 
             try:
                 conn_id = conn_id_str if isinstance(conn_id_str, uuid.UUID) else uuid.UUID(str(conn_id_str))
-                tenant_uuid = tenant_id if isinstance(tenant_id, uuid.UUID) else uuid.UUID(str(tenant_id))
                 if action_type == "google_calendar_create_event":
                     op = "create_event"
                 elif action_type == "google_sheets_append":

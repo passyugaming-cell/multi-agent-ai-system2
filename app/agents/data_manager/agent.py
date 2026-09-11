@@ -107,8 +107,7 @@ class DataManagerAgent(BaseAgent):
         conflicts = conf_data.get("conflicts_detected", [])
 
         # 6. High-safety rule: If conflicts exist or critical change requested -> Approval
-        already_approved = bool(request.context.get("_already_approved"))
-        needs_approval = (dm_output.requires_change_request or len(conflicts) > 0 or request.requested_action == "apply_import") and not already_approved
+        needs_approval = dm_output.requires_change_request or len(conflicts) > 0 or request.requested_action == "apply_import"
         approval_id = None
         status = AgentRequestStatus.COMPLETED
 

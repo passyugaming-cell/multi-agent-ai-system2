@@ -49,10 +49,36 @@ class ApprovalService:
             await self.session.commit()
             raise AppError("Approval request has expired.", status_code=400)
 
+        # Check approver identity & platform owner authority for HIGH/CRITICAL risk actions
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+
+        if approval.risk_level in ("HIGH", "CRITICAL"):
+            if not active_actor or not active_actor.is_platform_owner:
+                raise AppError(
+                    "PERMISSION_DENIED: Only an authorized Human Platform Owner can approve high or critical risk actions.",
+                    status_code=403,
+                )
+
+        decided_by_lower = str(decided_by).lower()
+        requested_by_lower = str(approval.requested_by).lower()
+
+        if (
+            decided_by_lower in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+            or (active_actor and active_actor.role in ("owner_ai", "agent:owner_ai"))
+            or (decided_by_lower == requested_by_lower and ("agent" in decided_by_lower or "owner_ai" in decided_by_lower))
+        ):
+            raise AppError("PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.", status_code=403)
+
         approval.status = "APPROVED"
         approval.decided_at = datetime.now(timezone.utc)
         approval.decided_by = decided_by
         approval.decision_reason = reason
+        approval.meta_data = approval.meta_data or {}
+
+        if active_actor and active_actor.is_platform_owner:
+            approval.meta_data["decided_by_is_platform_owner"] = True
+            approval.meta_data["decided_by_user_id"] = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
 
         # Resume workflow execution if associated
         if approval.workflow_execution_id:
@@ -109,12 +135,45 @@ class ApprovalService:
         if new_risk == RiskLevel.CRITICAL and approval.risk_level != "CRITICAL":
             raise AppError("Modification increased risk level to CRITICAL. A new approval request is required.", status_code=400)
 
+        from app.core.context import get_actor_context
+        active_actor = get_actor_context()
+
+        if approval.risk_level in ("HIGH", "CRITICAL") or new_risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            if not active_actor or not active_actor.is_platform_owner:
+                raise AppError(
+                    "PERMISSION_DENIED: Only an authorized Human Platform Owner can approve high or critical risk actions.",
+                    status_code=403,
+                )
+
+        decided_by_lower = str(decided_by).lower()
+        requested_by_lower = str(approval.requested_by).lower()
+
+        if (
+            decided_by_lower in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+            or (active_actor and active_actor.role in ("owner_ai", "agent:owner_ai"))
+            or (decided_by_lower == requested_by_lower and ("agent" in decided_by_lower or "owner_ai" in decided_by_lower))
+        ):
+            raise AppError("PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.", status_code=403)
+
         approval.status = "MODIFIED"
         approval.decided_at = datetime.now(timezone.utc)
         approval.decided_by = decided_by
         approval.decision_reason = reason
         approval.meta_data = approval.meta_data or {}
         approval.meta_data["modified_params"] = modified_params
+
+        if active_actor and active_actor.is_platform_owner:
+            approval.meta_data["decided_by_is_platform_owner"] = True
+            approval.meta_data["decided_by_user_id"] = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
+
+        # Update action_hash in meta_data for modified parameters
+        from app.core.authority.schemas import ActionBinding
+        approval.meta_data["action_hash"] = ActionBinding.compute_hash(
+            action_type=approval.action_type,
+            target=approval.target,
+            tenant_id=approval.tenant_id,
+            params=modified_params,
+        )
 
         # Resume workflow execution with modified parameters
         if approval.workflow_execution_id:
@@ -147,8 +206,8 @@ class ApprovalService:
         if execution.current_step < len(actions):
             action_def = actions[execution.current_step]
             action_type = approval.action_type
-            params = modified_params or action_def.get("params") or action_def
-            params["_already_approved"] = True
+            params = dict(modified_params or action_def.get("params") or action_def)
+            params["_approval_id"] = str(approval.id)
 
             res = await ActionExecutor.execute(
                 action_type=action_type,

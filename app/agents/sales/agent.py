@@ -97,8 +97,7 @@ class SalesAgent(BaseAgent):
                 actions_taken.append({"type": "create_task", "result": task_res.data})
 
         # 6. Handle discount & risk classification / Approval
-        already_approved = bool(request.context.get("_already_approved"))
-        needs_approval = sales_output.requires_approval and not already_approved
+        needs_approval = bool(sales_output.requires_approval)
         approval_id = None
         status = AgentRequestStatus.COMPLETED
 
@@ -114,7 +113,7 @@ class SalesAgent(BaseAgent):
             )
             if disc_res.success:
                 actions_taken.append({"type": "recommend_discount", "result": disc_res.data})
-                if disc_res.data.get("requires_approval") and not already_approved:
+                if disc_res.data.get("requires_approval"):
                     needs_approval = True
 
         if needs_approval:

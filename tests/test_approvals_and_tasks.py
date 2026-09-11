@@ -82,8 +82,16 @@ async def test_approval_workflow_pause_and_resume(db_session, tenant_a):
     appr = approvals[0]
     assert appr.risk_level == "HIGH"
 
-    # Approve request
-    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant_uuid, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    # Approve request with Human Platform Owner actor context
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant_uuid,
+            role="owner",
+            permissions={"business.read", "product.read", "knowledge.read"},
+            is_platform_owner=True,
+        )
+    )
     try:
         approved = await appr_service.approve(tenant_uuid, appr.id, decided_by="owner@company.com")
     finally:
