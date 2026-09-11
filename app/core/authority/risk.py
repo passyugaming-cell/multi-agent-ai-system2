@@ -51,6 +51,29 @@ ACTION_RISK_POLICY_MAP: dict[str, ActionRiskLevel] = {
     "deactivate_tenant": ActionRiskLevel.CRITICAL,
 }
 
+# Deterministic required permission mapping for MEDIUM-risk actions
+ACTION_PERMISSION_MAP: dict[str, str] = {
+    "update_customer": "business.write",
+    "update_order": "business.write",
+    "call_ai": "business.read",
+    "call_agent": "business.read",
+    "owner_ai": "business.read",
+    "run_owner_ai": "business.read",
+    "call_owner_ai": "business.read",
+    "google_calendar_create_event": "EXECUTE_INTEGRATION",
+    "google_sheets_append": "EXECUTE_INTEGRATION",
+    "google_sheets_update": "EXECUTE_INTEGRATION",
+    "whatsapp_send_message": "SEND_WHATSAPP_MESSAGE",
+    "midtrans_create_payment": "MANAGE_PAYMENTS",
+    "execute_integration": "EXECUTE_INTEGRATION",
+}
+
+
+def get_required_action_permission(action_type: str) -> str:
+    """Returns the required permission string for a given action."""
+    clean_action = str(action_type).strip().lower()
+    return ACTION_PERMISSION_MAP.get(clean_action, "business.read")
+
 
 class RiskClassifier:
     """Deterministic Risk Classifier for AI Business OS actions."""

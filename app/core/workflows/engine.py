@@ -41,7 +41,15 @@ class WorkflowEngine:
             user_id=None,
             tenant_id=tenant_uuid,
             role="system_workflow",
-            permissions={"business.read", "product.read", "knowledge.read"},
+            permissions={
+                "business.read",
+                "product.read",
+                "knowledge.read",
+                "business.write",
+                "SEND_WHATSAPP_MESSAGE",
+                "EXECUTE_INTEGRATION",
+                "MANAGE_PAYMENTS",
+            },
         )
         token = set_actor_context(wf_actor)
 

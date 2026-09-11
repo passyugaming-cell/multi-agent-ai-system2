@@ -5,7 +5,7 @@ from app.core.authority.schemas import (
     ActionRequest,
     AuthorizationDecision,
 )
-from app.core.authority.risk import RiskClassifier
+from app.core.authority.risk import RiskClassifier, get_required_action_permission
 from app.core.authority.service import ActionAuthorizationService
 
 __all__ = [
@@ -15,5 +15,6 @@ __all__ = [
     "ActionRequest",
     "AuthorizationDecision",
     "RiskClassifier",
+    "get_required_action_permission",
     "ActionAuthorizationService",
 ]

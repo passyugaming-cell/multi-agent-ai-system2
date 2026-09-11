@@ -12,7 +12,7 @@ from app.core.authority.schemas import (
     AuthorizationDecision,
     ActionBinding,
 )
-from app.core.authority.risk import RiskClassifier
+from app.core.authority.risk import RiskClassifier, get_required_action_permission
 from app.database.models.workflow import Approval
 from app.database.models.audit import ProvisioningAudit
 
@@ -137,8 +137,42 @@ class ActionAuthorizationService:
                     action_hash=action_hash,
                 )
 
-            # Check action binding (Action Type + Target + Tenant + Parameters Hash)
+            # Check approver identity binding & self-approval prohibition for HIGH/CRITICAL actions
             appr_meta = appr.meta_data or {}
+            decided_by_str = str(appr.decided_by or "").lower()
+            requested_by_str = str(appr.requested_by or "").lower()
+
+            if decided_by_str in ("owner_ai", "agent:owner_ai", "agent_owner_ai") or (
+                decided_by_str and decided_by_str == requested_by_str and "agent" in decided_by_str
+            ):
+                await self._record_audit_event(
+                    db, request, risk_level, ExecutionDecision.DENY, "SELF_APPROVAL_FORBIDDEN", action_hash
+                )
+                return AuthorizationDecision(
+                    decision=ExecutionDecision.DENY,
+                    risk_level=risk_level,
+                    reason="PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.",
+                    approval_id=appr.id,
+                    action_hash=action_hash,
+                )
+
+            is_platform_owner_approver = (
+                appr_meta.get("decided_by_is_platform_owner") is True
+                or decided_by_str in ("platform_owner", "human_platform_owner", "owner@company.com", "admin_user")
+            )
+            if not is_platform_owner_approver:
+                await self._record_audit_event(
+                    db, request, risk_level, ExecutionDecision.DENY, "UNAUTHORIZED_APPROVER_IDENTITY", action_hash
+                )
+                return AuthorizationDecision(
+                    decision=ExecutionDecision.DENY,
+                    risk_level=risk_level,
+                    reason="PERMISSION_DENIED: High and critical risk actions require approval from an authorized Human Platform Owner.",
+                    approval_id=appr.id,
+                    action_hash=action_hash,
+                )
+
+            # Check action binding (Action Type + Target + Tenant + Parameters Hash)
             stored_hash = appr_meta.get("action_hash")
             if not stored_hash:
                 # Recompute stored hash from approval attributes if missing
@@ -186,15 +220,28 @@ class ActionAuthorizationService:
             )
 
         elif risk_level == ActionRiskLevel.MEDIUM:
-            # Medium risk: Allowed if explicit permission is possessed or internal system execution
+            required_perm = get_required_action_permission(request.action_type)
+            if not request.actor or required_perm not in request.actor.permissions:
+                await self._record_audit_event(
+                    db, request, risk_level, ExecutionDecision.DENY, "PERMISSION_DENIED_MEDIUM_RISK", action_hash
+                )
+                return AuthorizationDecision(
+                    decision=ExecutionDecision.DENY,
+                    risk_level=risk_level,
+                    reason=f"PERMISSION_DENIED: Actor lacks required permission '{required_perm}' for action '{request.action_type}'.",
+                    action_hash=action_hash,
+                    required_permissions={required_perm},
+                )
+
             await self._record_audit_event(
                 db, request, risk_level, ExecutionDecision.ALLOW, "MEDIUM_RISK_AUTHORIZED", action_hash
             )
             return AuthorizationDecision(
                 decision=ExecutionDecision.ALLOW,
                 risk_level=risk_level,
-                reason="Medium-risk action authorized within standard operational limits.",
+                reason=f"Medium-risk action '{request.action_type}' authorized with required permission '{required_perm}'.",
                 action_hash=action_hash,
+                required_permissions={required_perm},
             )
 
         else: # HIGH or CRITICAL

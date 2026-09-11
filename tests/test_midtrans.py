@@ -652,20 +652,31 @@ async def test_32_workflow_action_midtrans_check_status(db_session, tenant_a):
         actor_permissions={MANAGE_INTEGRATIONS, MANAGE_CREDENTIALS},
     )
 
-    with patch("httpx.AsyncClient.get") as mock_get:
-        mock_get.return_value = AsyncMock(
-            status_code=200,
-            json=lambda: {"order_id": "inv_wf_1", "transaction_status": "settlement"},
-        )
-        res = await ActionExecutor.execute(
-            action_type="midtrans_check_status",
-            params={"order_id": "inv_wf_1"},
-            context={},
-            session=db_session,
-            tenant_id=str(tenant_a.id),
-        )
-        assert res.success is True
-        assert res.output["normalized_status"] == "SUCCEEDED"
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "MANAGE_PAYMENTS"},
+    )
+    token = set_actor_context(actor)
+
+    try:
+        with patch("httpx.AsyncClient.get") as mock_get:
+            mock_get.return_value = AsyncMock(
+                status_code=200,
+                json=lambda: {"order_id": "inv_wf_1", "transaction_status": "settlement"},
+            )
+            res = await ActionExecutor.execute(
+                action_type="midtrans_check_status",
+                params={"order_id": "inv_wf_1"},
+                context={},
+                session=db_session,
+                tenant_id=str(tenant_a.id),
+            )
+            assert res.success is True
+            assert res.output["normalized_status"] == "SUCCEEDED"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -824,15 +835,26 @@ async def test_40_workflow_action_midtrans_create_payment(db_session, tenant_a):
         items_data=[{"description": "WF Item", "unit_price": Decimal("25000.00"), "quantity": 1}],
     )
 
-    res = await ActionExecutor.execute(
-        action_type="midtrans_create_payment",
-        params={"invoice_id": str(invoice.id)},
-        context={},
-        session=db_session,
-        tenant_id=str(tenant_a.id),
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={MANAGE_PAYMENTS},
     )
-    assert res.success is True
-    assert "payment_id" in res.output
+    token = set_actor_context(actor)
+
+    try:
+        res = await ActionExecutor.execute(
+            action_type="midtrans_create_payment",
+            params={"invoice_id": str(invoice.id)},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res.success is True
+        assert "payment_id" in res.output
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -865,13 +887,14 @@ async def test_41_workflow_action_midtrans_cancel_payment(db_session, tenant_a):
         reason="Test cancel",
         risk_level="HIGH",
         status="APPROVED",
-        meta_data={"params": params, "action_hash": action_hash},
+        decided_by="platform_owner",
+        meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
     )
     db_session.add(appr)
     await db_session.commit()
 
     exec_params = dict(params)
-    exec_params["approval_id"] = str(appr.id)
+    exec_params["_approval_id"] = str(appr.id)
 
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = AsyncMock(status_code=200, json=lambda: {"transaction_status": "cancel"})
@@ -915,13 +938,14 @@ async def test_42_workflow_action_midtrans_request_refund(db_session, tenant_a):
         reason="Test refund",
         risk_level="HIGH",
         status="APPROVED",
-        meta_data={"params": params, "action_hash": action_hash},
+        decided_by="platform_owner",
+        meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
     )
     db_session.add(appr)
     await db_session.commit()
 
     exec_params = dict(params)
-    exec_params["approval_id"] = str(appr.id)
+    exec_params["_approval_id"] = str(appr.id)
 
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.return_value = AsyncMock(status_code=200, json=lambda: {"transaction_status": "refund"})
