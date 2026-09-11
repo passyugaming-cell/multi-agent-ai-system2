@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
 from app.database.session import get_db
-from app.core.context import get_tenant_context
+from app.core.context import get_tenant_context, get_actor_context
+from app.core.auth import resolve_actor_permissions
+from app.core.exceptions import AppException
 from app.agents import agent_registry, AgentRequest, AgentResult, AgentRequestStatus
 
 router = APIRouter(prefix="/agents", tags=["Specialist AI Agents"])
@@ -44,6 +46,7 @@ async def run_agent(
     agent_name: str,
     request_body: AgentRequest,
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     """Execute a controlled agent request safely under current tenant context."""
     tenant_id = get_tenant_context()
@@ -69,6 +72,14 @@ async def run_agent(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Agent '{agent_name}' is disabled or not registered.",
+        )
+
+    actor = get_actor_context()
+    if agent_name == "owner_ai" and (not actor or actor.role != "owner"):
+        raise AppException(
+            code="PERMISSION_DENIED",
+            message="Execution of Owner AI is restricted strictly to platform owners.",
+            status_code=403,
         )
 
     result = await agent_registry.delegate_task(request_body, db)

@@ -6,6 +6,7 @@ from app.agents.base.agent import BaseAgent
 from app.agents.base.schemas import AgentRequest, AgentResult, AgentRequestStatus
 from app.agents.base.exceptions import AgentExecutionError, AgentRecursionError, AgentPermissionError
 from app.agents.base.permissions import AGENT_PERMISSIONS
+from app.core.context import get_actor_context
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,28 @@ class AgentRegistry:
                 error=f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH}).",
                 correlation_id=request.correlation_id,
             )
+
+        # Security Boundary Enforcement: Non-owner callers, specialist agents, and workflows CANNOT call Owner AI
+        if request.target_agent == "owner_ai":
+            actor = get_actor_context()
+            if (
+                request.source in ("workflow", "agent_delegation")
+                or (request.source_agent and request.source_agent != "owner_ai")
+                or (actor is not None and actor.role != "owner")
+            ):
+                logger.warning(
+                    "Blocked attempt to delegate or execute Owner AI from source='%s', source_agent='%s', actor_role='%s'",
+                    request.source,
+                    request.source_agent,
+                    actor.role if actor else None,
+                )
+                return AgentResult(
+                    request_id=request.request_id,
+                    agent=request.target_agent,
+                    status=AgentRequestStatus.BLOCKED,
+                    error="Delegation or execution of Owner AI from tenant AI, workflows, or non-owner callers is strictly forbidden.",
+                    correlation_id=request.correlation_id,
+                )
 
         agent = self.get_agent(request.target_agent)
 

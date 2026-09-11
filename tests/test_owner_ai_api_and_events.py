@@ -7,6 +7,7 @@ from app.core.events.schemas import EventSchema
 from app.agents.owner_ai.events import OwnerAIEventConsumer
 from app.tenants.repository import TenantRepository
 from app.tenants.schemas import TenantCreate
+from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
 @pytest.mark.asyncio
@@ -42,43 +43,56 @@ async def test_owner_ai_event_consumer_filtering(db_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_owner_ai_api_endpoints(async_client: AsyncClient, tenant_a):
-    # 1. POST /api/v1/owner-ai/run
-    res_run = await async_client.post(
-        "/api/v1/owner-ai/run",
-        json={"objective": "Investigate monthly performance drop"},
-        headers={"X-Tenant-ID": str(tenant_a.id)},
+    owner_actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.read", "business.write"},
     )
-    assert res_run.status_code == 200
-    assert "status" in res_run.json()
+    token = set_actor_context(owner_actor)
 
-    # 2. GET /api/v1/owner-ai/brief/daily
-    res_brief = await async_client.get(
-        "/api/v1/owner-ai/brief/daily",
-        headers={"X-Tenant-ID": str(tenant_a.id)},
-    )
-    assert res_brief.status_code == 200
-    assert "key_facts" in res_brief.json()
+    try:
+        headers = {"X-Tenant-ID": str(tenant_a.id)}
 
-    # 3. GET /api/v1/owner-ai/review/weekly
-    res_review = await async_client.get(
-        "/api/v1/owner-ai/review/weekly",
-        headers={"X-Tenant-ID": str(tenant_a.id)},
-    )
-    assert res_review.status_code == 200
-    assert "weekly_performance" in res_review.json()
+        # 1. POST /api/v1/owner-ai/run
+        res_run = await async_client.post(
+            "/api/v1/owner-ai/run",
+            json={"objective": "Investigate monthly performance drop"},
+            headers=headers,
+        )
+        assert res_run.status_code == 200
+        assert "status" in res_run.json()
 
-    # 4. GET /api/v1/owner-ai/recommendations
-    res_recs = await async_client.get(
-        "/api/v1/owner-ai/recommendations",
-        headers={"X-Tenant-ID": str(tenant_a.id)},
-    )
-    assert res_recs.status_code == 200
-    assert isinstance(res_recs.json(), list)
+        # 2. GET /api/v1/owner-ai/brief/daily
+        res_brief = await async_client.get(
+            "/api/v1/owner-ai/brief/daily",
+            headers=headers,
+        )
+        assert res_brief.status_code == 200
+        assert "key_facts" in res_brief.json()
 
-    # 5. GET /api/v1/owner-ai/memory
-    res_mem = await async_client.get(
-        "/api/v1/owner-ai/memory?objective=sales",
-        headers={"X-Tenant-ID": str(tenant_a.id)},
-    )
-    assert res_mem.status_code == 200
-    assert "business_memories" in res_mem.json()
+        # 3. GET /api/v1/owner-ai/review/weekly
+        res_review = await async_client.get(
+            "/api/v1/owner-ai/review/weekly",
+            headers=headers,
+        )
+        assert res_review.status_code == 200
+        assert "weekly_performance" in res_review.json()
+
+        # 4. GET /api/v1/owner-ai/recommendations
+        res_recs = await async_client.get(
+            "/api/v1/owner-ai/recommendations",
+            headers=headers,
+        )
+        assert res_recs.status_code == 200
+        assert isinstance(res_recs.json(), list)
+
+        # 5. GET /api/v1/owner-ai/memory
+        res_mem = await async_client.get(
+            "/api/v1/owner-ai/memory?objective=sales",
+            headers=headers,
+        )
+        assert res_mem.status_code == 200
+        assert "business_memories" in res_mem.json()
+    finally:
+        reset_actor_context(token)
