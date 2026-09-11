@@ -23,9 +23,26 @@ from app.agents.owner_ai.schemas import (
     WeeklyReviewSchema,
     RecommendationSchema,
 )
+from app.core.auth import resolve_actor_permissions
+from app.core.context import get_actor_context
 from app.core.exceptions import AppException
+from app.billing.entitlement import EntitlementResolver
 
 router = APIRouter(prefix="/owner-ai", tags=["Owner AI"])
+
+
+async def enforce_owner_actor(
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+) -> None:
+    """Enforce that only trusted Human Platform Owners can access Owner AI endpoints."""
+    actor = get_actor_context()
+    if not actor or not getattr(actor, "is_platform_owner", False):
+        raise AppException(
+            code="PERMISSION_DENIED",
+            message="Owner AI access is restricted strictly to Human Platform Owners. Tenant owners do not possess platform authority.",
+            status_code=403,
+        )
 
 
 class OwnerAIRunRequest(BaseModel):
@@ -46,6 +63,7 @@ class ProposalRequest(BaseModel):
 async def run_owner_ai(
     payload: OwnerAIRunRequest,
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id()
     orchestrator = OwnerAIOrchestrator(db)
@@ -62,6 +80,7 @@ async def run_owner_ai(
 async def get_owner_ai_status(
     execution_id: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> list[dict[str, Any]]:
     tenant_id = get_tenant_id()
     filters = [OwnerAIExecution.tenant_id == tenant_id]
@@ -92,6 +111,7 @@ async def get_owner_ai_status(
 async def list_recommendations(
     status: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> list[RecommendationSchema]:
     tenant_id = get_tenant_id()
     service = RecommendationService(db)
@@ -101,6 +121,7 @@ async def list_recommendations(
 @router.get("/brief/daily", response_model=BusinessBriefSchema)
 async def get_daily_brief(
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> BusinessBriefSchema:
     tenant_id = get_tenant_id()
     generator = ReportGenerator(db)
@@ -110,6 +131,7 @@ async def get_daily_brief(
 @router.get("/review/weekly", response_model=WeeklyReviewSchema)
 async def get_weekly_review(
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> WeeklyReviewSchema:
     tenant_id = get_tenant_id()
     generator = ReportGenerator(db)
@@ -120,6 +142,7 @@ async def get_weekly_review(
 async def get_memory(
     objective: str = Query(default=""),
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id()
     mem_service = MemoryService(db)
@@ -131,6 +154,7 @@ async def get_memory(
 async def create_memory_proposal(
     payload: ProposalRequest,
     db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(enforce_owner_actor),
 ) -> dict[str, Any]:
     tenant_id = get_tenant_id()
     mem_service = MemoryService(db)

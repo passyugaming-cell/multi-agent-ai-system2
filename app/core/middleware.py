@@ -157,6 +157,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
                                 tenant_id=tenant_id,
                                 role=role,
                                 permissions=set(permissions),
+                                is_platform_owner=getattr(user, "is_platform_owner", False),
                             )
                             actor_token = set_actor_context(actor)
 

@@ -39,7 +39,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=True if connection.dialect.name == "sqlite" else False,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

@@ -17,7 +17,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.add_column('users', sa.Column('role', sa.String(length=50), server_default='owner', nullable=False))
-    op.create_check_constraint('ck_users_role_valid', 'users', sa.text("role IN ('owner', 'admin', 'member')"))
+    bind = op.get_bind()
+    if bind.dialect.name != 'sqlite':
+        op.create_check_constraint('ck_users_role_valid', 'users', sa.text("role IN ('owner', 'admin', 'member')"))
 
 
 def downgrade() -> None:

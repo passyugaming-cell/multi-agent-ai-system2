@@ -6,6 +6,7 @@ from app.agents.base.agent import BaseAgent
 from app.agents.base.schemas import AgentRequest, AgentResult, AgentRequestStatus
 from app.agents.base.exceptions import AgentExecutionError, AgentRecursionError, AgentPermissionError
 from app.agents.base.permissions import AGENT_PERMISSIONS
+from app.core.context import get_actor_context
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,30 @@ class AgentRegistry:
                 error=f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH}).",
                 correlation_id=request.correlation_id,
             )
+
+        # Security Boundary Enforcement: FAIL-CLOSED verification for Owner AI execution
+        if request.target_agent == "owner_ai":
+            actor = get_actor_context()
+            if (
+                actor is None
+                or not getattr(actor, "is_platform_owner", False)
+                or request.source in ("workflow", "agent_delegation")
+                or (request.source_agent and request.source_agent != "owner_ai")
+            ):
+                logger.warning(
+                    "Blocked attempt to delegate or execute Owner AI: actor=%s, is_platform_owner=%s, source='%s', source_agent='%s'",
+                    actor.user_id if actor else None,
+                    getattr(actor, "is_platform_owner", False) if actor else False,
+                    request.source,
+                    request.source_agent,
+                )
+                return AgentResult(
+                    request_id=request.request_id,
+                    agent=request.target_agent,
+                    status=AgentRequestStatus.BLOCKED,
+                    error="Execution of Owner AI requires an authenticated Human Platform Owner context. Requests from missing actors, tenant AIs, workflows, or non-platform-owner actors are strictly forbidden.",
+                    correlation_id=request.correlation_id,
+                )
 
         agent = self.get_agent(request.target_agent)
 

@@ -163,6 +163,11 @@ class ActionExecutor:
             from app.agents import agent_registry, AgentRequest, AgentRequestStatus
 
             target_agent = params.get("agent_name") or params.get("agent", "ai_sales")
+            if target_agent == "owner_ai":
+                return ActionResult(
+                    success=False,
+                    error="Workflows are strictly forbidden from targeting or executing Owner AI.",
+                )
             task_type = params.get("task_type", "workflow_execution")
             objective = params.get("objective") or params.get("prompt", "Analyze workflow context")
 

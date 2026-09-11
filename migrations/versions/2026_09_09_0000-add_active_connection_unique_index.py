@@ -18,6 +18,8 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
+    if not inspector.has_table('integration_connections'):
+        return
     existing_cols = [c['name'] for c in inspector.get_columns('integration_connections')]
 
     # STEP 1: Preflight check for orphaned integration_connections referencing non-existent integrations
