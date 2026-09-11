@@ -145,6 +145,16 @@ class ApprovalService:
                     status_code=403,
                 )
 
+        decided_by_lower = str(decided_by).lower()
+        requested_by_lower = str(approval.requested_by).lower()
+
+        if (
+            decided_by_lower in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+            or (active_actor and active_actor.role in ("owner_ai", "agent:owner_ai"))
+            or (decided_by_lower == requested_by_lower and ("agent" in decided_by_lower or "owner_ai" in decided_by_lower))
+        ):
+            raise AppError("PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.", status_code=403)
+
         approval.status = "MODIFIED"
         approval.decided_at = datetime.now(timezone.utc)
         approval.decided_by = decided_by

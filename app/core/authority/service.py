@@ -110,14 +110,14 @@ class ActionAuthorizationService:
                 )
 
             # Check status
-            if appr.status != "APPROVED":
+            if appr.status not in ("APPROVED", "MODIFIED"):
                 await self._record_audit_event(
                     db, request, risk_level, ExecutionDecision.DENY, f"APPROVAL_STATUS_{appr.status}", action_hash
                 )
                 return AuthorizationDecision(
                     decision=ExecutionDecision.DENY,
                     risk_level=risk_level,
-                    reason=f"Approval request status is {appr.status}, expected APPROVED.",
+                    reason=f"Approval request status is {appr.status}, expected APPROVED or MODIFIED.",
                     approval_id=appr.id,
                     action_hash=action_hash,
                 )
@@ -137,41 +137,44 @@ class ActionAuthorizationService:
                     action_hash=action_hash,
                 )
 
-            # Check approver identity binding & self-approval prohibition for HIGH/CRITICAL actions
             appr_meta = appr.meta_data or {}
             decided_by_str = str(appr.decided_by or "").lower()
             requested_by_str = str(appr.requested_by or "").lower()
             request_agent_str = str(request.agent_id or "").lower()
 
-            if (
-                not appr.decided_by
-                or decided_by_str in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
-                or decided_by_str == requested_by_str
-                or (request_agent_str and decided_by_str == request_agent_str)
-            ):
-                await self._record_audit_event(
-                    db, request, risk_level, ExecutionDecision.DENY, "SELF_APPROVAL_FORBIDDEN", action_hash
-                )
-                return AuthorizationDecision(
-                    decision=ExecutionDecision.DENY,
-                    risk_level=risk_level,
-                    reason="PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.",
-                    approval_id=appr.id,
-                    action_hash=action_hash,
-                )
+            # RISK-AWARE APPROVER IDENTITY VALIDATION FOR HIGH/CRITICAL ACTIONS
+            if risk_level in (ActionRiskLevel.HIGH, ActionRiskLevel.CRITICAL):
+                # 1. Self-approval prohibition
+                if (
+                    not appr.decided_by
+                    or decided_by_str in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+                    or decided_by_str == requested_by_str
+                    or (request_agent_str and decided_by_str == request_agent_str)
+                ):
+                    await self._record_audit_event(
+                        db, request, risk_level, ExecutionDecision.DENY, "SELF_APPROVAL_FORBIDDEN", action_hash
+                    )
+                    return AuthorizationDecision(
+                        decision=ExecutionDecision.DENY,
+                        risk_level=risk_level,
+                        reason="PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve actions.",
+                        approval_id=appr.id,
+                        action_hash=action_hash,
+                    )
 
-            is_platform_owner_approver = (appr_meta.get("decided_by_is_platform_owner") is True)
-            if not is_platform_owner_approver:
-                await self._record_audit_event(
-                    db, request, risk_level, ExecutionDecision.DENY, "UNAUTHORIZED_APPROVER_IDENTITY", action_hash
-                )
-                return AuthorizationDecision(
-                    decision=ExecutionDecision.DENY,
-                    risk_level=risk_level,
-                    reason="PERMISSION_DENIED: High and critical risk actions require approval from an authorized Human Platform Owner.",
-                    approval_id=appr.id,
-                    action_hash=action_hash,
-                )
+                # 2. Strict Human Platform Owner metadata check for HIGH/CRITICAL actions
+                is_platform_owner_approver = (appr_meta.get("decided_by_is_platform_owner") is True)
+                if not is_platform_owner_approver:
+                    await self._record_audit_event(
+                        db, request, risk_level, ExecutionDecision.DENY, "UNAUTHORIZED_APPROVER_IDENTITY", action_hash
+                    )
+                    return AuthorizationDecision(
+                        decision=ExecutionDecision.DENY,
+                        risk_level=risk_level,
+                        reason="PERMISSION_DENIED: High and critical risk actions require approval from an authorized Human Platform Owner.",
+                        approval_id=appr.id,
+                        action_hash=action_hash,
+                    )
 
             # Check action binding (Action Type + Target + Tenant + Parameters Hash)
             stored_hash = appr_meta.get("action_hash")
@@ -195,6 +198,21 @@ class ActionAuthorizationService:
                     approval_id=appr.id,
                     action_hash=action_hash,
                 )
+
+            # If MEDIUM risk, still verify actor permissions for the medium action
+            if risk_level == ActionRiskLevel.MEDIUM:
+                required_perm = get_required_action_permission(request.action_type)
+                if not request.actor or required_perm not in request.actor.permissions:
+                    await self._record_audit_event(
+                        db, request, risk_level, ExecutionDecision.DENY, "PERMISSION_DENIED_MEDIUM_RISK", action_hash
+                    )
+                    return AuthorizationDecision(
+                        decision=ExecutionDecision.DENY,
+                        risk_level=risk_level,
+                        reason=f"PERMISSION_DENIED: Actor lacks required permission '{required_perm}' for action '{request.action_type}'.",
+                        action_hash=action_hash,
+                        required_permissions={required_perm},
+                    )
 
             # Approval is valid, bound, active, and matching!
             await self._record_audit_event(
