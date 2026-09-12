@@ -2,6 +2,9 @@ name: Phase B Preflight - PostgreSQL Validation
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
 
 jobs:
   phase-b-preflight:
@@ -26,7 +29,7 @@ jobs:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -60,6 +63,8 @@ jobs:
           DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_business_os_test")
 
           async def main():
+              overall_pass = True
+
               # Step 4: Database Connection
               engine = create_async_engine(DATABASE_URL)
               try:
@@ -69,17 +74,25 @@ jobs:
                       db_conn_status = "PASS"
               except Exception as e:
                   print(f"Database connection error: {e}")
+                  db_conn_status = f"FAIL ({e})"
+                  overall_pass = False
                   sys.exit(1)
 
               # Step 5: Alembic
               try:
-                  upgrade_res = subprocess.run(["poetry", "run", "alembic", "upgrade", "head"], capture_output=True, text=True, check=True)
+                  subprocess.run(["poetry", "run", "alembic", "upgrade", "head"], capture_output=True, text=True, check=True)
                   alembic_upgrade_status = "PASS"
               except Exception as e:
                   alembic_upgrade_status = f"FAIL ({e})"
+                  overall_pass = False
 
-              alembic_current = subprocess.check_output(["poetry", "run", "alembic", "current"], text=True).strip()
-              alembic_heads = subprocess.check_output(["poetry", "run", "alembic", "heads"], text=True).strip()
+              try:
+                  alembic_current = subprocess.check_output(["poetry", "run", "alembic", "current"], text=True).strip()
+                  alembic_heads = subprocess.check_output(["poetry", "run", "alembic", "heads"], text=True).strip()
+              except Exception as e:
+                  alembic_current = f"ERROR ({e})"
+                  alembic_heads = f"ERROR ({e})"
+                  overall_pass = False
 
               # Step 6: Verify Phase A Constraints (9 constraints)
               phase_a_targets = [
@@ -117,6 +130,9 @@ jobs:
                       else:
                           phase_a_pass = False
 
+              if not phase_a_pass or phase_a_verified != 9:
+                  overall_pass = False
+
               # Step 7: Verify Phase B Baseline
               async with engine.connect() as conn:
                   q = text("""
@@ -136,6 +152,9 @@ jobs:
                   actual_comp_fk_count = len(comp_fks)
                   phase_b_baseline_pass = (actual_comp_fk_count == 0)
 
+              if not phase_b_baseline_pass:
+                  overall_pass = False
+
               # Step 8: Verify 12 Relationships
               rel_targets = [
                   ("workflow_configurations", "workflow_executions", "id", "workflow_id"),
@@ -153,10 +172,14 @@ jobs:
               ]
 
               rel_results = []
+              rel_all_valid = True
+
               async with engine.connect() as conn:
                   for parent, child, p_pk, c_fk in rel_targets:
                       p_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = :t)"), {"t": parent})).scalar())
                       c_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = :t)"), {"t": child})).scalar())
+                      p_pk_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = :col)"), {"t": parent, "col": p_pk})).scalar())
+                      c_fk_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = :col)"), {"t": child, "col": c_fk})).scalar())
                       p_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = '\''tenant_id'\'')"), {"t": parent})).scalar())
                       c_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = '\''tenant_id'\'')"), {"t": child})).scalar())
 
@@ -192,7 +215,11 @@ jobs:
                       """)
                       comp_fk_exists = bool((await conn.execute(comp_fk_q, {"child": child, "c_fk": c_fk})).scalar())
 
-                      schema_status = "VALID (Standard FK active, Phase B Composite FK not present)" if (p_ex and c_ex and std_fk_exists and not comp_fk_exists) else "INVALID"
+                      is_valid = (p_ex and c_ex and p_pk_ex and c_fk_ex and p_tenant and c_tenant and std_fk_exists and not comp_fk_exists)
+                      if not is_valid:
+                          rel_all_valid = False
+
+                      schema_status = "VALID (Standard FK active, Phase B Composite FK not present)" if is_valid else "INVALID"
 
                       rel_results.append({
                           "parent": parent,
@@ -206,18 +233,44 @@ jobs:
                           "schema_status": schema_status,
                       })
 
-              # Step 9: Data Baseline Check
-              async with engine.connect() as conn:
-                  p_rows = 0
-                  c_rows = 0
-                  orphans = 0
-                  mismatches = 0
-                  null_tenants = 0
-                  for r in rel_targets:
-                      p_count = (await conn.execute(text(f"SELECT COUNT(*) FROM {r[0]}"))).scalar()
-                      c_count = (await conn.execute(text(f"SELECT COUNT(*) FROM {r[1]}"))).scalar()
-                      p_rows += p_count
-                      c_rows += c_count
+              if not rel_all_valid:
+                  overall_pass = False
+
+              # Step 9: Data Baseline Check via Actual SQL Queries
+              p_rows_total = 0
+              c_rows_total = 0
+              orphans_total = 0
+              mismatches_total = 0
+              null_tenants_total = 0
+              data_baseline_status = "PASS"
+
+              try:
+                  async with engine.connect() as conn:
+                      checked_tables = set()
+                      for parent, child, p_pk, c_fk in rel_targets:
+                          p_cnt = (await conn.execute(text(f"SELECT COUNT(*) FROM {parent}"))).scalar()
+                          c_cnt = (await conn.execute(text(f"SELECT COUNT(*) FROM {child}"))).scalar()
+                          p_rows_total += p_cnt
+                          c_rows_total += c_cnt
+
+                          # Orphans
+                          orphan_q = text(f"SELECT COUNT(*) FROM {child} c WHERE c.{c_fk} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent} p WHERE p.{p_pk} = c.{c_fk})")
+                          orphans_total += (await conn.execute(orphan_q)).scalar()
+
+                          # Mismatches (cross-tenant)
+                          mismatch_q = text(f"SELECT COUNT(*) FROM {child} c JOIN {parent} p ON c.{c_fk} = p.{p_pk} WHERE c.tenant_id != p.tenant_id")
+                          mismatches_total += (await conn.execute(mismatch_q)).scalar()
+
+                          # Null tenant anomalies
+                          if parent not in checked_tables:
+                              null_tenants_total += (await conn.execute(text(f"SELECT COUNT(*) FROM {parent} WHERE tenant_id IS NULL"))).scalar()
+                              checked_tables.add(parent)
+                          if child not in checked_tables:
+                              null_tenants_total += (await conn.execute(text(f"SELECT COUNT(*) FROM {child} WHERE tenant_id IS NULL"))).scalar()
+                              checked_tables.add(child)
+              except Exception as e:
+                  data_baseline_status = f"FAIL ({e})"
+                  overall_pass = False
 
               await engine.dispose()
 
@@ -231,7 +284,7 @@ jobs:
                   "tests/test_tenant_isolation.py",
                   "tests/test_tenant_isolation_phase1.py",
                   "tests/test_auth_api.py",
-                  "-q"
+                  "-v"
               ]
               test_env = os.environ.copy()
               test_env["TEST_DATABASE_URL"] = "sqlite+aiosqlite:///./test.db"
@@ -240,27 +293,44 @@ jobs:
               dur = f"{t1 - t0:.2f}s"
 
               out_str = py_res.stdout + py_res.stderr
+
               passed_m = re.search(r"(\d+) passed", out_str)
               failed_m = re.search(r"(\d+) failed", out_str)
               skipped_m = re.search(r"(\d+) skipped", out_str)
               errors_m = re.search(r"(\d+) error", out_str)
               warnings_m = re.search(r"(\d+) warning", out_str)
 
-              passed_cnt = int(passed_m.group(1)) if passed_m else (50 if py_res.returncode == 0 else 0)
-              failed_cnt = int(failed_m.group(1)) if failed_m else 0
-              skipped_cnt = int(skipped_m.group(1)) if skipped_m else 0
-              errors_cnt = int(errors_m.group(1)) if errors_m else 0
-              warnings_cnt = int(warnings_m.group(1)) if warnings_m else 0
-              collected_cnt = passed_cnt + failed_cnt + skipped_cnt
+              if py_res.returncode == 0 and passed_m:
+                  passed_cnt = int(passed_m.group(1))
+                  failed_cnt = int(failed_m.group(1)) if failed_m else 0
+                  skipped_cnt = int(skipped_m.group(1)) if skipped_m else 0
+                  errors_cnt = int(errors_m.group(1)) if errors_m else 0
+                  warnings_cnt = int(warnings_m.group(1)) if warnings_m else 0
+                  collected_cnt = passed_cnt + failed_cnt + skipped_cnt
+                  pytest_parsed = True
+              else:
+                  pytest_parsed = False
+                  passed_cnt = 0
+                  failed_cnt = int(failed_m.group(1)) if failed_m else 1
+                  skipped_cnt = 0
+                  errors_cnt = int(errors_m.group(1)) if errors_m else 0
+                  warnings_cnt = 0
+                  collected_cnt = 0
+                  overall_pass = False
 
               # Git info
               sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
               git_status = subprocess.check_output(["git", "status", "--short"], text=True).strip()
               repo_working_tree = "DIRTY" if git_status else "CLEAN"
 
+              if git_status:
+                  diff_files = [line.strip().split()[-1] for line in git_status.splitlines() if line.strip()]
+                  if any(f != ".github/workflows/phase_b_preflight.yml" for f in diff_files):
+                      overall_pass = False
+
               # Print Final Report
               print("=" * 70)
-              print("PHASE B — GITHUB ACTIONS POSTGRESQL PREFLIGHT")
+              print("PHASE B — GITHUB ACTIONS POSTGRESQL PREFLIGHT HARDENING REPORT")
               print("=" * 70)
               print()
               print("Repository:")
@@ -273,8 +343,8 @@ jobs:
               print(repo_working_tree)
               print()
               print("GitHub Actions:")
-              print("workflow: Phase B Preflight - PostgreSQL Validation")
-              print("trigger: workflow_dispatch")
+              print("workflow: Phase B Preflight - PostgreSQL Validation (.github/workflows/phase_b_preflight.yml)")
+              print("trigger: pull_request / workflow_dispatch")
               print("runner: ubuntu-latest")
               print()
               print("PostgreSQL:")
@@ -288,7 +358,8 @@ jobs:
               print("port: 5432")
               print("database: ai_business_os_test")
               print("environment:")
-              print("DISPOSABLE GITHUB ACTIONS DATABASE")
+              print("DISPOSABLE GITHUB ACTIONS DATABASE (CI Environment)")
+              print("Note: Production/application data integrity is NOT verified by this disposable CI test.")
               print()
               print("Alembic:")
               print(f"current: {alembic_current}")
@@ -317,12 +388,17 @@ jobs:
                   print()
 
               print("DATA BASELINE:")
-              print("EMPTY DISPOSABLE DATABASE — NO EXISTING APPLICATION DATA")
-              print(f"parent rows: {p_rows}")
-              print(f"child rows: {c_rows}")
-              print(f"orphan rows: {orphans}")
-              print(f"cross-tenant mismatch rows: {mismatches}")
-              print(f"NULL tenant anomalies: {null_tenants}")
+              if p_rows_total == 0 and c_rows_total == 0:
+                  print("EMPTY DISPOSABLE DATABASE — NO EXISTING APPLICATION DATA")
+                  print("Production/application database data integrity was NOT verified (disposable CI environment only).")
+              else:
+                  print("DISPOSABLE DATABASE DATA VERIFIED")
+              print(f"parent rows (queries): {p_rows_total}")
+              print(f"child rows (queries): {c_rows_total}")
+              print(f"orphan rows (queries): {orphans_total}")
+              print(f"cross-tenant mismatch rows (queries): {mismatches_total}")
+              print(f"NULL tenant anomalies (queries): {null_tenants_total}")
+              print(f"data baseline query execution: {data_baseline_status}")
               print()
               print("REGRESSION:")
               print(f"collected: {collected_cnt}")
@@ -334,15 +410,16 @@ jobs:
               print(f"duration: {dur}")
               print(f"Python: {sys.version.split()[0]}")
               print(f"pytest: {pytest.__version__}")
+              print(f"pytest output parsed: {'YES' if pytest_parsed else 'NO'}")
               print()
               print("Repository:")
               print(f"{repo_working_tree}")
               print()
               print("FINAL VERDICT:")
-              if phase_a_pass and phase_b_baseline_pass and py_res.returncode == 0:
+              if overall_pass and pytest_parsed:
                   print("PASS — PostgreSQL disposable GitHub Actions environment and Phase B baseline validation succeeded. Existing application data remains unverified.")
               else:
-                  print("FAIL — Schema/migration/test validation failed.")
+                  print("FAIL — Preflight validation checks failed.")
               print("=" * 70)
 
           asyncio.run(main())
