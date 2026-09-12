@@ -49,7 +49,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ai_business_os_test
           TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ai_business_os_test
         run: |
-          poetry run python -c '
+          poetry run python << 'EOF'
           import asyncio
           import os
           import sys
@@ -120,7 +120,7 @@ jobs:
                               AND tc.table_schema = kcu.table_schema
                           WHERE tc.constraint_name = :cname
                               AND tc.table_name = :tname
-                              AND tc.constraint_type = '\''UNIQUE'\''
+                              AND tc.constraint_type = 'UNIQUE'
                           GROUP BY tc.constraint_name;
                       """)
                       res = await conn.execute(q, {"cname": cname, "tname": tname})
@@ -141,10 +141,10 @@ jobs:
                       JOIN information_schema.key_column_usage kcu
                           ON tc.constraint_name = kcu.constraint_name
                           AND tc.table_schema = kcu.table_schema
-                      WHERE tc.constraint_type = '\''FOREIGN KEY'\''
-                          AND tc.table_schema = '\''public'\''
+                      WHERE tc.constraint_type = 'FOREIGN KEY'
+                          AND tc.table_schema = 'public'
                       GROUP BY tc.constraint_name
-                      HAVING '\''tenant_id'\'' = ANY(array_agg(kcu.column_name::text))
+                      HAVING 'tenant_id' = ANY(array_agg(kcu.column_name::text))
                          AND array_length(array_agg(kcu.column_name::text), 1) > 1;
                   """)
                   res = await conn.execute(q)
@@ -180,8 +180,8 @@ jobs:
                       c_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = :t)"), {"t": child})).scalar())
                       p_pk_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = :col)"), {"t": parent, "col": p_pk})).scalar())
                       c_fk_ex = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = :col)"), {"t": child, "col": c_fk})).scalar())
-                      p_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = '\''tenant_id'\'')"), {"t": parent})).scalar())
-                      c_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = '\''tenant_id'\'')"), {"t": child})).scalar())
+                      p_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = 'tenant_id')"), {"t": parent})).scalar())
+                      c_tenant = bool((await conn.execute(text("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = :t AND column_name = 'tenant_id')"), {"t": child})).scalar())
 
                       fk_q = text("""
                           SELECT EXISTS (
@@ -191,7 +191,7 @@ jobs:
                                   ON tc.constraint_name = kcu.constraint_name
                               JOIN information_schema.constraint_column_usage ccu
                                   ON ccu.constraint_name = tc.constraint_name
-                              WHERE tc.constraint_type = '\''FOREIGN KEY'\''
+                              WHERE tc.constraint_type = 'FOREIGN KEY'
                                 AND tc.table_name = :child
                                 AND kcu.column_name = :c_fk
                                 AND ccu.table_name = :parent
@@ -206,10 +206,10 @@ jobs:
                               FROM information_schema.table_constraints tc
                               JOIN information_schema.key_column_usage kcu
                                   ON tc.constraint_name = kcu.constraint_name
-                              WHERE tc.constraint_type = '\''FOREIGN KEY'\''
+                              WHERE tc.constraint_type = 'FOREIGN KEY'
                                 AND tc.table_name = :child
                               GROUP BY tc.constraint_name
-                              HAVING array_agg(kcu.column_name::text) @> ARRAY['\''tenant_id'\'', :c_fk]::text[]
+                              HAVING array_agg(kcu.column_name::text) @> ARRAY['tenant_id', :c_fk]::text[]
                                 AND array_length(array_agg(kcu.column_name::text), 1) > 1
                           );
                       """)
@@ -420,7 +420,8 @@ jobs:
                   print("PASS — PostgreSQL disposable GitHub Actions environment and Phase B baseline validation succeeded. Existing application data remains unverified.")
               else:
                   print("FAIL — Preflight validation checks failed.")
+                  sys.exit(1)
               print("=" * 70)
 
           asyncio.run(main())
-          '
+          EOF
