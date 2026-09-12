@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, Text, Boolean, ForeignKey, Index
+from sqlalchemy import String, Text, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,6 +36,7 @@ class Conversation(BaseModel):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id"),
         Index("idx_conversations_tenant_customer", "tenant_id", "customer_id"),
         Index("idx_conversations_tenant_status", "tenant_id", "status"),
         Index("idx_conversations_tenant_created", "tenant_id", "created_at"),

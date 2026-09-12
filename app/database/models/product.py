@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 from typing import Any
-from sqlalchemy import String, Text, Boolean, Numeric, Integer, ForeignKey, Index, CheckConstraint
+from sqlalchemy import String, Text, Boolean, Numeric, Integer, ForeignKey, Index, CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -35,6 +35,7 @@ class Product(BaseModel):
     variants = relationship("ProductVariant", back_populates="product", cascade="all, delete-orphan")
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_products_tenant_id"),
         CheckConstraint("price >= 0", name="check_product_price_non_negative"),
         CheckConstraint("stock >= 0", name="check_product_stock_non_negative"),
         Index("idx_products_tenant_sku", "tenant_id", "sku"),
