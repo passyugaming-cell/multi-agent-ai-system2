@@ -563,7 +563,9 @@ class IntegrationService:
         if is_postgres:
             diag = getattr(orig, "diag", None)
             cname = getattr(diag, "constraint_name", None) if diag is not None else None
-            if cname == "uq_active_provider_external_account":
+            iname = getattr(diag, "index_name", None) if diag is not None else None
+            msg = getattr(diag, "message_primary", None) or str(orig)
+            if cname == "uq_active_provider_external_account" or iname == "uq_active_provider_external_account" or "uq_active_provider_external_account" in msg:
                 raise PermanentIntegrationError(
                     f"External account '{external_account_id}' is already connected to another tenant.",
                     error_code="ACCOUNT_ALREADY_CONNECTED",

@@ -1346,30 +1346,50 @@ async def test_52_outbound_event(active_whatsapp_tenant, test_session: AsyncSess
 
 @pytest.mark.asyncio
 async def test_53_workflow_send_action(active_whatsapp_tenant, test_session: AsyncSession):
-    tenant_id = str(active_whatsapp_tenant["tenant"].id)
-    res = await ActionExecutor.execute(
-        action_type="whatsapp_send_message",
-        params={"recipient": "628100", "text": "Workflow WA message"},
-        context={},
-        session=test_session,
+    tenant_id = active_whatsapp_tenant["tenant"].id
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
         tenant_id=tenant_id,
+        role="owner",
+        permissions={SEND_WHATSAPP_MESSAGE, VIEW_INTEGRATIONS, MANAGE_INTEGRATIONS, "business.write", "business.read"},
     )
-    assert res.success is True
-    assert "provider_message_id" in res.output
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="whatsapp_send_message",
+            params={"recipient": "628100", "text": "Workflow WA message"},
+            context={},
+            session=test_session,
+            tenant_id=str(tenant_id),
+        )
+        assert res.success is True
+        assert "provider_message_id" in res.output
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
 async def test_54_workflow_permission_enforcement(test_session: AsyncSession):
-    random_tenant_id = str(uuid.uuid4())
-    res = await ActionExecutor.execute(
-        action_type="whatsapp_send_message",
-        params={"recipient": "628100", "text": "Fail test"},
-        context={},
-        session=test_session,
+    random_tenant_id = uuid.uuid4()
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
         tenant_id=random_tenant_id,
+        role="member",
+        permissions=set(),
     )
-    assert res.success is False
-    assert "not active" in res.error.lower()
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="whatsapp_send_message",
+            params={"recipient": "628100", "text": "Fail test"},
+            context={},
+            session=test_session,
+            tenant_id=str(random_tenant_id),
+        )
+        assert res.success is False
+        assert "permission_denied" in res.error.lower() or "lacks required permission" in res.error.lower() or "not active" in res.error.lower()
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio

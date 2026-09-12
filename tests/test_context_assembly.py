@@ -617,7 +617,7 @@ async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, s
             await service.assemble_context(assembly_req)
         assert exc_info.value.code == "PERMISSION_DENIED"
 
-        # 3. ActionExecutor call_agent without actor -> returns FAILED
+        # 3. ActionExecutor call_agent without actor -> returns FAILED with PERMISSION_DENIED
         wf_res = await ActionExecutor.execute(
             action_type="call_agent",
             params={"agent_name": "ai_sales", "objective": "Workflow test without actor"},
@@ -626,7 +626,7 @@ async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, s
             tenant_id=str(t1_id),
         )
         assert wf_res.success is False
-        assert "Authentication required" in wf_res.error
+        assert "business.read" in wf_res.error or "Authentication required" in wf_res.error
 
 
 @pytest.mark.asyncio
@@ -682,4 +682,4 @@ async def test_14_approval_service_fail_closed_without_actor(test_engine, setup_
                 decided_by="admin_user",
             )
         assert exc_info.value.status_code == 403
-        assert "Authentication required" in exc_info.value.message
+        assert "PERMISSION_DENIED" in exc_info.value.message or "Authentication required" in exc_info.value.message

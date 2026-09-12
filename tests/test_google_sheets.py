@@ -790,16 +790,26 @@ async def test_33_workflow_action_google_sheets_append(mock_sheets_http, db_sess
         "values": [["WorkflowData1", "WorkflowData2"]],
     }
 
-    res = await ActionExecutor.execute(
-        action_type="google_sheets_append",
-        params=action_params,
-        context={},
-        session=db_session,
-        tenant_id=str(tenant_a.id),
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS, MANAGE_INTEGRATIONS, "business.write", "business.read"},
     )
-    assert res.success is True, f"ActionExecutor error: {res.error}"
-    print("DEBUG test_33 res.output:", res.output)
-    assert res.output.get("updated_rows") == 1 or res.output.get("status") == "success"
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="google_sheets_append",
+            params=action_params,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res.success is True, f"ActionExecutor error: {res.error}"
+        print("DEBUG test_33 res.output:", res.output)
+        assert res.output.get("updated_rows") == 1 or res.output.get("status") == "success"
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
@@ -823,15 +833,25 @@ async def test_34_workflow_action_google_sheets_update(mock_sheets_http, db_sess
         "values": [["UpdateData1", "UpdateData2"]],
     }
 
-    res = await ActionExecutor.execute(
-        action_type="google_sheets_update",
-        params=action_params,
-        context={},
-        session=db_session,
-        tenant_id=str(tenant_a.id),
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS, MANAGE_INTEGRATIONS, "business.write", "business.read"},
     )
-    assert res.success is True
-    assert res.output["updated_cells"] == 2
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="google_sheets_update",
+            params=action_params,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res.success is True
+        assert res.output["updated_cells"] == 2
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
