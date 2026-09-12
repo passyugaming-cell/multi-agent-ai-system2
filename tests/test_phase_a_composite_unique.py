@@ -70,7 +70,7 @@ def test_phase_a_migration_metadata_and_operations():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert module.revision == "add_phase_a_parent_composite_unique"
+    assert module.revision == "phase_a_parent_composite_unique"
     assert module.down_revision == "add_platform_owner_col"
 
     # Inspect source code of upgrade and downgrade to verify exact 9 constraints
