@@ -614,3 +614,148 @@ async def test_approval_rejection_authorization_scenarios(db_session, tenant_a, 
         assert f"rejected by {po_user_id}: Platform owner rejected high risk action" in execution.error
     finally:
         reset_actor_context(token_po)
+
+
+@pytest.mark.asyncio
+async def test_high_and_critical_requester_rejection_scenarios(db_session, tenant_a):
+    appr_service = ApprovalService(db_session)
+    user_a_id = uuid.uuid4()
+    ai_user_id = uuid.uuid4()
+
+    # TEST 1 — HUMAN REQUESTER CAN REJECT HIGH
+    appr_high_human = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_a_id),
+        action_type="change_product_price",
+        target="prod_high_human",
+        reason="Test human requester HIGH rejection",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr_high_human)
+    await db_session.commit()
+
+    token_human_high = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_a_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},  # No business.write, normal human, not platform owner
+            is_platform_owner=False,
+        )
+    )
+    try:
+        rejected_high = await appr_service.reject(
+            tenant_a.id,
+            appr_high_human.id,
+            decided_by="platform_owner",  # Spoofed parameter passed
+            reason="Human requester rejecting HIGH risk action",
+        )
+        assert rejected_high.status == "REJECTED"
+        assert rejected_high.decided_by == str(user_a_id)
+        assert rejected_high.decided_by != "platform_owner"
+    finally:
+        reset_actor_context(token_human_high)
+
+    # TEST 2 — HUMAN REQUESTER CAN REJECT CRITICAL
+    appr_critical_human = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_a_id),
+        action_type="delete_database_records",
+        target="db_critical_human",
+        reason="Test human requester CRITICAL rejection",
+        risk_level="CRITICAL",
+        status="PENDING",
+    )
+    db_session.add(appr_critical_human)
+    await db_session.commit()
+
+    token_human_critical = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_a_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        rejected_critical = await appr_service.reject(
+            tenant_a.id,
+            appr_critical_human.id,
+            decided_by="platform_owner",  # Spoofed parameter passed
+            reason="Human requester rejecting CRITICAL risk action",
+        )
+        assert rejected_critical.status == "REJECTED"
+        assert rejected_critical.decided_by == str(user_a_id)
+        assert rejected_critical.decided_by != "platform_owner"
+    finally:
+        reset_actor_context(token_human_critical)
+
+    # TEST 3 — AI REQUESTER CANNOT REJECT HIGH
+    appr_high_ai = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(ai_user_id),
+        action_type="change_product_price",
+        target="prod_high_ai",
+        reason="Test AI requester HIGH rejection",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr_high_ai)
+    await db_session.commit()
+
+    token_ai_high = set_actor_context(
+        AuthenticatedActor(
+            user_id=ai_user_id,
+            tenant_id=tenant_a.id,
+            role="owner_ai",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(
+                tenant_a.id,
+                appr_high_ai.id,
+                reason="AI requester attempting HIGH risk rejection",
+            )
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token_ai_high)
+
+    # TEST 4 — AI REQUESTER CANNOT REJECT CRITICAL
+    appr_critical_ai = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(ai_user_id),
+        action_type="delete_database_records",
+        target="db_critical_ai",
+        reason="Test AI requester CRITICAL rejection",
+        risk_level="CRITICAL",
+        status="PENDING",
+    )
+    db_session.add(appr_critical_ai)
+    await db_session.commit()
+
+    token_ai_critical = set_actor_context(
+        AuthenticatedActor(
+            user_id=ai_user_id,
+            tenant_id=tenant_a.id,
+            role="owner_ai",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(
+                tenant_a.id,
+                appr_critical_ai.id,
+                reason="AI requester attempting CRITICAL risk rejection",
+            )
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token_ai_critical)
