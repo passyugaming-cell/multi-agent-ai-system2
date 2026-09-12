@@ -13,6 +13,7 @@ class WorkflowConfiguration(BaseModel):
 
     __tablename__ = "workflow_configurations"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_workflow_configurations_tenant_id"),
         UniqueConstraint("tenant_id", "key", name="uq_workflow_configurations_tenant_key"),
         Index("ix_workflow_configurations_tenant_active", "tenant_id", "is_active"),
     )
@@ -48,6 +49,7 @@ class WorkflowExecution(BaseModel):
 
     __tablename__ = "workflow_executions"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_workflow_executions_tenant_id"),
         UniqueConstraint("tenant_id", "workflow_id", "event_id", name="uq_workflow_executions_idempotency"),
         Index("ix_workflow_executions_tenant_status", "tenant_id", "status"),
         Index("ix_workflow_executions_next_retry", "next_retry_at"),
