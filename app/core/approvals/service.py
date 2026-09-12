@@ -88,6 +88,56 @@ class ApprovalService:
         await self.session.refresh(approval)
         return approval
 
+    async def cancel(self, tenant_id: uuid.UUID, approval_id: uuid.UUID) -> Approval:
+        from app.core.context import get_actor_context
+
+        active_actor = get_actor_context()
+        if not active_actor:
+            raise AppError(
+                "Authentication required: no active trusted actor context.",
+                status_code=403,
+            )
+
+        if str(active_actor.tenant_id) != str(tenant_id) and not active_actor.is_platform_owner:
+            raise AppError("PERMISSION_DENIED: Access denied across tenant boundaries.", status_code=403)
+
+        approval = await self.get_approval(tenant_id, approval_id)
+
+        if approval.status != "PENDING":
+            raise AppError(
+                f"Cannot cancel non-pending approval (current status: {approval.status}).",
+                status_code=400,
+            )
+
+        is_requester = bool(
+            active_actor.user_id and str(active_actor.user_id) == str(approval.requested_by)
+        )
+        is_authorized_operator = bool(
+            "business.write" in (active_actor.permissions or set())
+            or active_actor.is_platform_owner
+        )
+
+        if not (is_requester or is_authorized_operator):
+            raise AppError(
+                "PERMISSION_DENIED: Only the original requester or an actor with business.write permission can cancel this approval.",
+                status_code=403,
+            )
+
+        approval.status = "CANCELLED"
+        approval.decided_at = datetime.now(timezone.utc)
+        approval.decided_by = str(active_actor.user_id) if active_actor.user_id else active_actor.role
+
+        if approval.workflow_execution_id:
+            exec_stmt = select(WorkflowExecution).where(WorkflowExecution.id == approval.workflow_execution_id)
+            execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
+            if execution:
+                execution.status = "CANCELLED"
+                execution.error = f"Protected action {approval.action_type} approval cancelled by {approval.decided_by}"
+
+        await self.session.commit()
+        await self.session.refresh(approval)
+        return approval
+
     async def reject(
         self,
         tenant_id: uuid.UUID,
