@@ -142,18 +142,83 @@ class ApprovalService:
         self,
         tenant_id: uuid.UUID,
         approval_id: uuid.UUID,
-        decided_by: str,
-        reason: str,
+        decided_by: str | None = None,
+        reason: str | None = None,
     ) -> Approval:
+        from app.core.context import get_actor_context
+
+        active_actor = get_actor_context()
+        if not active_actor:
+            raise AppError(
+                "PERMISSION_DENIED: Authentication required: no active trusted actor context.",
+                status_code=403,
+            )
+
+        if str(active_actor.tenant_id) != str(tenant_id) and not active_actor.is_platform_owner:
+            raise AppError("PERMISSION_DENIED: Access denied across tenant boundaries.", status_code=403)
+
         approval = await self.get_approval(tenant_id, approval_id)
 
         if approval.status != "PENDING":
             raise AppError(f"Approval request is not PENDING (current status: {approval.status}).", status_code=400)
 
+        # Derive trusted decided_by identity from active_actor
+        if active_actor.is_platform_owner:
+            trusted_decided_by = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
+        elif active_actor.user_id:
+            trusted_decided_by = str(active_actor.user_id)
+        else:
+            trusted_decided_by = str(active_actor.role)
+
+        # Check AI agent role / identity
+        actor_role_lower = str(active_actor.role).lower()
+        actor_id_lower = str(active_actor.user_id).lower() if active_actor.user_id else ""
+
+        is_ai_agent = bool(
+            actor_role_lower in ("owner_ai", "agent:owner_ai", "agent_owner_ai")
+            or actor_role_lower.startswith("agent")
+            or "owner_ai" in actor_role_lower
+            or "agent" in actor_id_lower
+            or "owner_ai" in actor_id_lower
+        )
+
+        if is_ai_agent:
+            raise AppError(
+                "PERMISSION_DENIED: Owner AI or requesting agent cannot self-approve or self-reject actions.",
+                status_code=403,
+            )
+
+        is_requester = bool(
+            active_actor.user_id and str(active_actor.user_id) == str(approval.requested_by)
+        )
+        is_authorized_operator = bool(
+            "business.write" in (active_actor.permissions or set())
+            or active_actor.is_platform_owner
+        )
+
+        # Policy checks based on risk level
+        if approval.risk_level in ("HIGH", "CRITICAL"):
+            if not (active_actor.is_platform_owner or is_requester):
+                raise AppError(
+                    "PERMISSION_DENIED: Only an authorized Human Platform Owner can reject high or critical risk actions.",
+                    status_code=403,
+                )
+        else:
+            if not (is_requester or is_authorized_operator or active_actor.is_platform_owner):
+                raise AppError(
+                    "PERMISSION_DENIED: Only the original requester, an operator with business.write permission, or a Human Platform Owner can reject this approval.",
+                    status_code=403,
+                )
+
         approval.status = "REJECTED"
         approval.decided_at = datetime.now(timezone.utc)
-        approval.decided_by = decided_by
-        approval.decision_reason = reason
+        approval.decided_by = trusted_decided_by
+        approval.decision_reason = reason or "Rejected by reviewer"
+        approval.meta_data = approval.meta_data or {}
+
+        if active_actor.is_platform_owner:
+            approval.meta_data["decided_by_is_platform_owner"] = True
+            approval.meta_data["decided_by_user_id"] = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
 
         # Cancel workflow execution if associated
         if approval.workflow_execution_id:
@@ -161,7 +226,7 @@ class ApprovalService:
             execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
             if execution:
                 execution.status = "CANCELLED"
-                execution.error = f"Protected action {approval.action_type} rejected by {decided_by}: {reason}"
+                execution.error = f"Protected action {approval.action_type} rejected by {approval.decided_by}: {approval.decision_reason}"
 
         await self.session.commit()
         await self.session.refresh(approval)

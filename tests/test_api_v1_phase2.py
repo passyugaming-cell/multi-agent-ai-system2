@@ -113,6 +113,7 @@ async def test_approvals_api(client: AsyncClient, tenant_a):
         tenant_id=tenant_a.id,
         role="owner",
         permissions={"business.read", "product.read", "knowledge.read"},
+        is_platform_owner=True,
     )
     token = set_actor_context(actor)
     try:
