@@ -1,6 +1,6 @@
 import uuid
 from typing import Any
-from sqlalchemy import String, ForeignKey, Index
+from sqlalchemy import String, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,7 @@ class Customer(BaseModel):
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_customers_tenant_id"),
         Index("idx_customers_tenant_phone", "tenant_id", "phone"),
         Index("idx_customers_tenant_external_id", "tenant_id", "external_id"),
     )

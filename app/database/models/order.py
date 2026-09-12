@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 from typing import Any
-from sqlalchemy import String, Numeric, ForeignKey, Index, CheckConstraint
+from sqlalchemy import String, Numeric, ForeignKey, Index, CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +38,7 @@ class Order(BaseModel):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_orders_tenant_id"),
         CheckConstraint("subtotal >= 0", name="check_order_subtotal_non_negative"),
         CheckConstraint("total >= 0", name="check_order_total_non_negative"),
         Index("idx_orders_tenant_customer", "tenant_id", "customer_id"),

@@ -109,6 +109,7 @@ class Subscription(BaseModel):
     plan: Mapped["Plan"] = relationship("Plan")
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_subscriptions_tenant_id"),
         Index("idx_subscriptions_tenant_status", "tenant_id", "status"),
     )
 
@@ -204,6 +205,7 @@ class Invoice(BaseModel):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_invoices_tenant_id"),
         Index("idx_invoices_tenant_status", "tenant_id", "status"),
     )
 

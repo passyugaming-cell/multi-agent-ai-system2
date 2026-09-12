@@ -47,6 +47,7 @@ class IntegrationConnection(BaseModel):
 
     __tablename__ = "integration_connections"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_integration_connections_tenant_id"),
         UniqueConstraint("tenant_id", "integration_id", "external_account_id", name="uq_integration_connections_account"),
         Index("ix_integration_connections_tenant_status", "tenant_id", "status"),
         Index(
