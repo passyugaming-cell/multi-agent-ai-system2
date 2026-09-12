@@ -482,20 +482,30 @@ async def test_workflow_engine_google_calendar_action(mock_google_http, db_sessi
         allow_internal=True,
     )
 
-    res = await ActionExecutor.execute(
-        action_type="google_calendar_create_event",
-        params={
-            "connection_id": str(conn.id),
-            "summary": "Jakarta Meeting",
-            "start": {"dateTime": "2026-09-10T14:00:00+07:00"},
-            "end": {"dateTime": "2026-09-10T15:00:00+07:00"},
-        },
-        context={},
-        session=db_session,
-        tenant_id=str(tenant_a.id),
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={EXECUTE_INTEGRATION, VIEW_INTEGRATIONS, MANAGE_INTEGRATIONS, "business.write", "business.read"},
     )
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="google_calendar_create_event",
+            params={
+                "connection_id": str(conn.id),
+                "summary": "Jakarta Meeting",
+                "start": {"dateTime": "2026-09-10T14:00:00+07:00"},
+                "end": {"dateTime": "2026-09-10T15:00:00+07:00"},
+            },
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
 
-    assert res.success is True
+        assert res.success is True
+    finally:
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
