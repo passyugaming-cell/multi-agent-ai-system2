@@ -140,10 +140,22 @@ async def test_approval_rejection_cancels_workflow(db_session, tenant_a):
     approvals = await appr_service.list_approvals(tenant_uuid, status="PENDING")
     appr = approvals[0]
 
-    # Reject approval
-    rejected = await appr_service.reject(
-        tenant_uuid, appr.id, decided_by="owner@company.com", reason="Refund policy not met"
+    # Reject approval with active Human Platform Owner actor context
+    token = set_actor_context(
+        AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant_uuid,
+            role="owner",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=True,
+        )
     )
+    try:
+        rejected = await appr_service.reject(
+            tenant_uuid, appr.id, decided_by="owner@company.com", reason="Refund policy not met"
+        )
+    finally:
+        reset_actor_context(token)
     assert rejected.status == "REJECTED"
 
     # Refresh execution, should be CANCELLED
@@ -361,3 +373,244 @@ async def test_approval_cancel_cancels_associated_workflow_execution(db_session,
         assert f"approval cancelled by {user_a_id}" in execution.error
     finally:
         reset_actor_context(token_a)
+
+
+@pytest.mark.asyncio
+async def test_approval_rejection_authorization_scenarios(db_session, tenant_a, tenant_b):
+    appr_service = ApprovalService(db_session)
+    user_a_id = uuid.uuid4()
+    user_b_id = uuid.uuid4()
+    operator_user_id = uuid.uuid4()
+
+    # Create test approvals
+    appr_low = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_a_id),
+        action_type="export_data",
+        target="data_low",
+        reason="Test low risk rejection",
+        risk_level="LOW",
+        status="PENDING",
+    )
+    appr_high = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_a_id),
+        action_type="change_product_price",
+        target="prod_high",
+        reason="Test high risk rejection",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add_all([appr_low, appr_high])
+    await db_session.commit()
+
+    # Scenario A: Unauthenticated actor -> DENY
+    with pytest.raises(AppError) as exc_info:
+        await appr_service.reject(tenant_a.id, appr_low.id, reason="Unauthenticated rejection attempt")
+    assert exc_info.value.status_code == 403
+    assert "PERMISSION_DENIED" in exc_info.value.message or "Authentication required" in exc_info.value.message
+
+    # Scenario D: Unauthorized tenant actor (no business.write and not requester) -> DENY
+    token_unauth = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_b_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(tenant_a.id, appr_low.id, reason="Unauthorized rejection attempt")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token_unauth)
+
+    # Scenario E: Cross-tenant actor -> DENY
+    token_cross = set_actor_context(
+        AuthenticatedActor(
+            user_id=operator_user_id,
+            tenant_id=tenant_b.id,  # Tenant B actor trying to access Tenant A approval
+            role="admin",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(tenant_a.id, appr_low.id, reason="Cross-tenant rejection attempt")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token_cross)
+
+    # Scenario F: Spoofed decided_by such as "platform_owner" -> DENY unless trusted actor actually has authority
+    token_spoof = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_b_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},  # No business.write, not platform owner
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(tenant_a.id, appr_high.id, decided_by="platform_owner", reason="Spoofed platform owner")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+    finally:
+        reset_actor_context(token_spoof)
+
+    # Scenario G: Owner AI / requesting agent cannot bypass approval boundary
+    token_agent = set_actor_context(
+        AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant_a.id,
+            role="owner_ai",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(tenant_a.id, appr_low.id, reason="AI agent rejection attempt")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+        assert "Owner AI or requesting agent cannot" in exc_info.value.message
+    finally:
+        reset_actor_context(token_agent)
+
+    # Scenario H Part 1: Tenant operator with business.write attempting HIGH risk rejection -> DENY
+    token_operator_no_po = set_actor_context(
+        AuthenticatedActor(
+            user_id=operator_user_id,
+            tenant_id=tenant_a.id,
+            role="admin",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        with pytest.raises(AppError) as exc_info:
+            await appr_service.reject(tenant_a.id, appr_high.id, reason="Operator attempting high risk reject")
+        assert exc_info.value.status_code == 403
+        assert "PERMISSION_DENIED" in exc_info.value.message
+        assert "Human Platform Owner" in exc_info.value.message
+    finally:
+        reset_actor_context(token_operator_no_po)
+
+    # Scenario C: Authorized business.write operator -> ALLOW for LOW/MEDIUM risk
+    token_operator = set_actor_context(
+        AuthenticatedActor(
+            user_id=operator_user_id,
+            tenant_id=tenant_a.id,
+            role="admin",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=False,
+        )
+    )
+    try:
+        rejected_c = await appr_service.reject(tenant_a.id, appr_low.id, reason="Authorized operator rejection")
+        assert rejected_c.status == "REJECTED"
+        assert rejected_c.decided_by == str(operator_user_id)
+        assert rejected_c.decision_reason == "Authorized operator rejection"
+    finally:
+        reset_actor_context(token_operator)
+
+    # Scenario B: Requester -> ALLOW where policy permits
+    appr_requester = Approval(
+        tenant_id=tenant_a.id,
+        requested_by=str(user_a_id),
+        action_type="export_data",
+        target="data_req",
+        reason="Test requester rejection",
+        risk_level="LOW",
+        status="PENDING",
+    )
+    db_session.add(appr_requester)
+    await db_session.commit()
+
+    token_requester = set_actor_context(
+        AuthenticatedActor(
+            user_id=user_a_id,
+            tenant_id=tenant_a.id,
+            role="member",
+            permissions={"business.read"},  # No business.write, but IS the requester
+            is_platform_owner=False,
+        )
+    )
+    try:
+        # Also pass spoofed decided_by="platform_owner" to verify it gets overridden by derived active actor user_id
+        rejected_b = await appr_service.reject(
+            tenant_a.id,
+            appr_requester.id,
+            decided_by="platform_owner",
+            reason="Requester self-rejecting request",
+        )
+        assert rejected_b.status == "REJECTED"
+        assert rejected_b.decided_by == str(user_a_id)  # Overridden by trusted user_a_id
+        assert rejected_b.decided_by != "platform_owner"
+    finally:
+        reset_actor_context(token_requester)
+
+    # Scenario H Part 2 & Scenario I: Human Platform Owner rejection of HIGH risk + Workflow cancellation
+    wf = WorkflowConfiguration(
+        tenant_id=tenant_a.id,
+        key="REJECT_HIGH_WF",
+        name="Reject High Risk WF",
+        trigger_type="high_risk.event",
+        actions=[{"action": "change_product_price"}],
+        is_active=True,
+    )
+    db_session.add(wf)
+    await db_session.commit()
+
+    execution = WorkflowExecution(
+        tenant_id=tenant_a.id,
+        workflow_id=wf.id,
+        event_id="evt_reject_high",
+        status="WAITING_APPROVAL",
+        current_step=0,
+        context={},
+    )
+    db_session.add(execution)
+    await db_session.commit()
+
+    appr_high_wf = Approval(
+        tenant_id=tenant_a.id,
+        workflow_execution_id=execution.id,
+        requested_by=str(user_a_id),
+        action_type="change_product_price",
+        target="prod_high_wf",
+        reason="Test high risk rejection with wf",
+        risk_level="HIGH",
+        status="PENDING",
+    )
+    db_session.add(appr_high_wf)
+    await db_session.commit()
+
+    po_user_id = uuid.uuid4()
+    token_po = set_actor_context(
+        AuthenticatedActor(
+            user_id=po_user_id,
+            tenant_id=tenant_a.id,
+            role="owner",
+            permissions={"business.read", "business.write"},
+            is_platform_owner=True,
+        )
+    )
+    try:
+        rejected_h = await appr_service.reject(tenant_a.id, appr_high_wf.id, reason="Platform owner rejected high risk action")
+        assert rejected_h.status == "REJECTED"
+        assert rejected_h.decided_by == str(po_user_id)
+        assert rejected_h.meta_data.get("decided_by_is_platform_owner") is True
+
+        # Scenario I: Verify associated workflow execution is cancelled
+        await db_session.refresh(execution)
+        assert execution.status == "CANCELLED"
+        assert f"rejected by {po_user_id}: Platform owner rejected high risk action" in execution.error
+    finally:
+        reset_actor_context(token_po)
