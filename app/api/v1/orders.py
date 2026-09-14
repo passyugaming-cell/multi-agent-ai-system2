@@ -2,6 +2,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
 from app.repositories.domain import OrderRepository, ProductRepository, CustomerRepository
@@ -25,6 +26,7 @@ async def list_orders(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("orders:read")),
 ):
     tenant_id = _get_tenant_id_or_400()
     repo = OrderRepository(db)
@@ -35,6 +37,7 @@ async def list_orders(
 async def create_order(
     payload: OrderCreate,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("orders:write")),
 ):
     tenant_id = _get_tenant_id_or_400()
     customer_repo = CustomerRepository(db)

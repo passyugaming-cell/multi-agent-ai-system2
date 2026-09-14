@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
 from app.database.models.workflow import WorkflowConfiguration
@@ -12,7 +13,10 @@ router = APIRouter(prefix="/workflows", tags=["Workflows"])
 
 
 @router.get("", response_model=list[WorkflowResponse])
-async def list_workflows(db: AsyncSession = Depends(get_db_session)) -> list[WorkflowResponse]:
+async def list_workflows(
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("workflows:read")),
+) -> list[WorkflowResponse]:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(WorkflowConfiguration.tenant_id == tenant_id)
     wfs = (await db.execute(stmt)).scalars().all()
@@ -36,6 +40,7 @@ async def list_workflows(db: AsyncSession = Depends(get_db_session)) -> list[Wor
 async def create_workflow(
     body: WorkflowCreateRequest,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
 ) -> WorkflowResponse:
     tenant_id = get_tenant_id()
 
@@ -71,7 +76,11 @@ async def create_workflow(
 
 
 @router.get("/{workflow_id}", response_model=WorkflowResponse)
-async def get_workflow(workflow_id: str, db: AsyncSession = Depends(get_db_session)) -> WorkflowResponse:
+async def get_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("workflows:read")),
+) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
         and_(
@@ -97,7 +106,11 @@ async def get_workflow(workflow_id: str, db: AsyncSession = Depends(get_db_sessi
 
 
 @router.post("/{workflow_id}/enable", response_model=WorkflowResponse)
-async def enable_workflow(workflow_id: str, db: AsyncSession = Depends(get_db_session)) -> WorkflowResponse:
+async def enable_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
+) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
         and_(
@@ -127,7 +140,11 @@ async def enable_workflow(workflow_id: str, db: AsyncSession = Depends(get_db_se
 
 
 @router.post("/{workflow_id}/disable", response_model=WorkflowResponse)
-async def disable_workflow(workflow_id: str, db: AsyncSession = Depends(get_db_session)) -> WorkflowResponse:
+async def disable_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
+) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
         and_(

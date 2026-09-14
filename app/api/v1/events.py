@@ -2,6 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
 from app.core.events.schemas import EventSchema
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/events", tags=["Events"])
 async def publish_event(
     body: EventPublishRequest,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("events:write")),
 ) -> EventResponse:
     tenant_id = get_tenant_id()
     if not tenant_id:

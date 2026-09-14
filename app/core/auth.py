@@ -1,7 +1,7 @@
 import uuid
 import logging
-from typing import Optional, Set
-from fastapi import Header
+from typing import Optional, Set, Callable
+from fastapi import Header, Depends
 from app.core.context import get_tenant_context, get_actor_context, AuthenticatedActor
 from app.core.exceptions import AppException
 
@@ -12,6 +12,13 @@ ROLE_PERMISSIONS = {
         "business.read", "business.write",
         "product.read", "product.write",
         "knowledge.read", "knowledge.write", "knowledge.approve",
+        "customers:read", "customers:write",
+        "orders:read", "orders:write",
+        "conversations:read", "conversations:write",
+        "tasks:read", "tasks:write",
+        "workflows:read", "workflows:write",
+        "events:read", "events:write",
+        "billing:read", "billing:write",
         "VIEW_INTEGRATIONS", "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "EXECUTE_INTEGRATION",
         "TEST_INTEGRATION", "VIEW_INTEGRATION_LOGS",
         "MANAGE_PAYMENTS", "VIEW_PAYMENT_STATUS", "REQUEST_REFUND", "APPROVE_REFUND",
@@ -21,6 +28,13 @@ ROLE_PERMISSIONS = {
         "business.read", "business.write",
         "product.read", "product.write",
         "knowledge.read", "knowledge.write", "knowledge.approve",
+        "customers:read", "customers:write",
+        "orders:read", "orders:write",
+        "conversations:read", "conversations:write",
+        "tasks:read", "tasks:write",
+        "workflows:read", "workflows:write",
+        "events:read", "events:write",
+        "billing:read", "billing:write",
         "VIEW_INTEGRATIONS", "MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "EXECUTE_INTEGRATION",
         "TEST_INTEGRATION", "VIEW_INTEGRATION_LOGS",
         "MANAGE_PAYMENTS", "VIEW_PAYMENT_STATUS", "REQUEST_REFUND",
@@ -30,6 +44,13 @@ ROLE_PERMISSIONS = {
         "business.read",
         "product.read",
         "knowledge.read",
+        "customers:read",
+        "orders:read",
+        "conversations:read",
+        "tasks:read",
+        "workflows:read",
+        "events:read",
+        "billing:read",
         "VIEW_INTEGRATIONS",
         "VIEW_PAYMENT_STATUS",
         "VIEW_WHATSAPP_CONNECTION",
@@ -89,3 +110,17 @@ def resolve_actor_permissions(
         message="Authentication required: no trusted server-side actor context found",
         status_code=403,
     )
+
+
+def check_permission(required_perm: str) -> Callable:
+    """Dependency factory enforcing specific permission check on authenticated actor."""
+    def _dependency(permissions: Set[str] = Depends(resolve_actor_permissions)) -> Set[str]:
+        if required_perm not in permissions:
+            raise AppException(
+                code="PERMISSION_DENIED",
+                message=f"Permission denied: missing required permission '{required_perm}'",
+                status_code=403,
+            )
+        return permissions
+
+    return _dependency

@@ -2,6 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
 from app.core.tasks.service import TaskService
@@ -16,6 +17,7 @@ async def list_tasks(
     status: str | None = Query(default=None),
     assigned_to: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:read")),
 ) -> list[TaskResponse]:
     tenant_id = get_tenant_id()
     service = TaskService(db)
@@ -39,6 +41,7 @@ async def list_tasks(
 async def create_task(
     body: TaskCreateRequest,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:write")),
 ) -> TaskResponse:
     tenant_id = get_tenant_id()
     service = TaskService(db)
@@ -63,7 +66,11 @@ async def create_task(
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: str, db: AsyncSession = Depends(get_db_session)) -> TaskResponse:
+async def get_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:read")),
+) -> TaskResponse:
     tenant_id = get_tenant_id()
     service = TaskService(db)
     try:
@@ -88,6 +95,7 @@ async def assign_task(
     task_id: str,
     assigned_to: str = Query(...),
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:write")),
 ) -> TaskResponse:
     tenant_id = get_tenant_id()
     service = TaskService(db)
@@ -112,6 +120,7 @@ async def assign_task(
 async def complete_task(
     task_id: str,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:write")),
 ) -> TaskResponse:
     tenant_id = get_tenant_id()
     service = TaskService(db)
@@ -136,6 +145,7 @@ async def complete_task(
 async def cancel_task(
     task_id: str,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(check_permission("tasks:write")),
 ) -> TaskResponse:
     tenant_id = get_tenant_id()
     service = TaskService(db)
