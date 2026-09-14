@@ -86,6 +86,40 @@ jobs:
           asyncio.run(verify())
           EOF
 
+      - name: Test Migration Downgrade & Round-Trip
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          # 1. Downgrade past Phase 6 (5066dcbc0b43) to revision 72dbe1a9c9ce
+          poetry run alembic downgrade 72dbe1a9c9ce
+
+          # 2. Verify Phase 6 tables were dropped
+          poetry run python - << 'EOF'
+          import asyncio
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+          async def verify_dropped():
+              db_url = "postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test"
+              engine = create_async_engine(db_url)
+              async with engine.connect() as conn:
+                  def inspect_db(sync_conn):
+                      inspector = sa.inspect(sync_conn)
+                      tables = inspector.get_table_names()
+                      phase6 = ["integrations", "integration_connections", "integration_credentials", "integration_executions", "webhook_configs"]
+                      for t in phase6:
+                          assert t not in tables, f"Table {t} should have been dropped on downgrade"
+                      print("SUCCESS: Phase 6 tables dropped successfully on downgrade.")
+                  await conn.run_sync(inspect_db)
+              await engine.dispose()
+
+          asyncio.run(verify_dropped())
+          EOF
+
+          # 3. Re-upgrade back to head (round-trip verification)
+          poetry run alembic upgrade head
+
       - name: Run Dedicated R0-001 Tests
         env:
           DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
@@ -99,11 +133,3 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
         run: |
           poetry run pytest tests/test_phase6_integrations.py -v
-
-      - name: Test Migration Downgrade & Round-Trip
-        env:
-          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
-          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
-        run: |
-          poetry run alembic downgrade 72dbe1a9c9ce
-          poetry run alembic upgrade head

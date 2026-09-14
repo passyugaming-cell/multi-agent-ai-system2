@@ -50,12 +50,12 @@ In `migrations/versions/2026_09_12_0100-add_phase_a_parent_composite_unique_cons
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_r0_001_migration.py` (PASSED: 1 passed)
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_phase6_integrations.py` (PASSED: 11 passed)
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_phase_a_composite_unique.py` (PASSED: 3 passed)
-- GitHub Actions CI workflow (`.github/workflows/r0_001_postgres_verification.yml`) configured with PostgreSQL 16 service container passing `DATABASE_URL` and `TEST_DATABASE_URL` to execute:
+- GitHub Actions CI workflow (`.github/workflows/r0_001_postgres_verification.yml`) configured with PostgreSQL 16 service container passing `DATABASE_URL` and `TEST_DATABASE_URL` executing:
   - `poetry run alembic upgrade head`
   - PostgreSQL schema reflection & constraint validation
+  - `poetry run alembic downgrade 72dbe1a9c9ce` (verifying table drops), then `poetry run alembic upgrade head`
   - `poetry run pytest tests/test_r0_001_migration.py`
   - `poetry run pytest tests/test_phase6_integrations.py`
-  - `poetry run alembic downgrade 72dbe1a9c9ce` && `poetry run alembic upgrade head`
 
 ## 11. Migration validation
 - SQLAlchemy metadata creation and schema reflection verified table structure, column types, default values, nullability, unique constraints, and indexes for all 5 Phase 6 integration tables.
