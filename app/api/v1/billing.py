@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
-from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
+from app.core.context import get_tenant_id, get_actor_context
 from app.billing.plans import PlanService
 from app.billing.subscription import SubscriptionService
 from app.billing.entitlement import EntitlementResolver
@@ -14,7 +15,7 @@ from app.billing.usage import UsageService, UsageMetric
 from app.billing.invoices import InvoiceService
 from app.billing.payments import PaymentService
 from app.billing.refunds import RefundService
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, AppException
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
@@ -110,6 +111,17 @@ def require_tenant_id() -> uuid.UUID:
     return uuid.UUID(tid) if isinstance(tid, str) else tid
 
 
+def get_active_actor_identity() -> str:
+    actor = get_actor_context()
+    if actor and actor.user_id:
+        return str(actor.user_id)
+    raise AppException(
+        code="PERMISSION_DENIED",
+        message="Authentication required: active actor identity missing",
+        status_code=403,
+    )
+
+
 # Plan Endpoints
 @router.get("/plans", response_model=List[PlanResponse])
 async def list_plans(db: AsyncSession = Depends(get_db)):
@@ -150,7 +162,10 @@ async def get_plan(plan_id: str, db: AsyncSession = Depends(get_db)):
 
 # Subscription Endpoints
 @router.get("/subscription", response_model=SubscriptionResponse)
-async def get_subscription(db: AsyncSession = Depends(get_db)):
+async def get_subscription(
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
     sub = await sub_service.get_subscription(tenant_id)
@@ -170,14 +185,19 @@ async def get_subscription(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/subscription", response_model=SubscriptionResponse)
-async def activate_subscription(body: ActivateSubscriptionRequest, db: AsyncSession = Depends(get_db)):
+async def activate_subscription(
+    body: ActivateSubscriptionRequest,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
+    actor_id = get_active_actor_identity()
     sub = await sub_service.activate_subscription(
         tenant_id=tenant_id,
         plan_code=body.plan_code,
         billing_cycle=body.billing_cycle,
-        actor="API_USER",
+        actor=actor_id,
     )
     return SubscriptionResponse(
         id=str(sub.id),
@@ -195,14 +215,19 @@ async def activate_subscription(body: ActivateSubscriptionRequest, db: AsyncSess
 
 
 @router.post("/subscription/change-plan", response_model=SubscriptionResponse)
-async def change_plan(body: ChangePlanRequest, db: AsyncSession = Depends(get_db)):
+async def change_plan(
+    body: ChangePlanRequest,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
+    actor_id = get_active_actor_identity()
     sub = await sub_service.change_plan(
         tenant_id=tenant_id,
         new_plan_code=body.new_plan_code,
         billing_cycle=body.billing_cycle,
-        actor="API_USER",
+        actor=actor_id,
     )
     return SubscriptionResponse(
         id=str(sub.id),
@@ -220,13 +245,18 @@ async def change_plan(body: ChangePlanRequest, db: AsyncSession = Depends(get_db
 
 
 @router.post("/subscription/cancel", response_model=SubscriptionResponse)
-async def cancel_subscription(body: CancelSubscriptionRequest, db: AsyncSession = Depends(get_db)):
+async def cancel_subscription(
+    body: CancelSubscriptionRequest,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
+    actor_id = get_active_actor_identity()
     sub = await sub_service.cancel_subscription(
         tenant_id=tenant_id,
         reason=body.reason,
-        actor="API_USER",
+        actor=actor_id,
     )
     return SubscriptionResponse(
         id=str(sub.id),
@@ -245,7 +275,10 @@ async def cancel_subscription(body: CancelSubscriptionRequest, db: AsyncSession 
 
 # Usage Endpoints
 @router.get("/usage", response_model=List[UsageResponse])
-async def list_usage(db: AsyncSession = Depends(get_db)):
+async def list_usage(
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     usage_service = UsageService(db)
     metrics = [
@@ -266,7 +299,11 @@ async def list_usage(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/usage/{metric}", response_model=UsageResponse)
-async def get_usage_for_metric(metric: str, db: AsyncSession = Depends(get_db)):
+async def get_usage_for_metric(
+    metric: str,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     usage_service = UsageService(db)
     curr = await usage_service.get_current_usage(tenant_id, metric)
@@ -276,7 +313,10 @@ async def get_usage_for_metric(metric: str, db: AsyncSession = Depends(get_db)):
 
 # Invoices Endpoints
 @router.get("/invoices", response_model=List[InvoiceResponse])
-async def list_invoices(db: AsyncSession = Depends(get_db)):
+async def list_invoices(
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     service = InvoiceService(db)
     invs = await service.list_invoices(tenant_id)
@@ -299,7 +339,11 @@ async def list_invoices(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/invoices/{invoice_id}", response_model=InvoiceResponse)
-async def get_invoice(invoice_id: str, db: AsyncSession = Depends(get_db)):
+async def get_invoice(
+    invoice_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     service = InvoiceService(db)
     inv = await service.get_invoice(tenant_id, uuid.UUID(invoice_id))
@@ -320,7 +364,10 @@ async def get_invoice(invoice_id: str, db: AsyncSession = Depends(get_db)):
 
 # Payments Endpoints
 @router.get("/payments", response_model=List[PaymentResponse])
-async def list_payments(db: AsyncSession = Depends(get_db)):
+async def list_payments(
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     service = PaymentService(db)
     payments = await service.list_payments(tenant_id)
@@ -340,7 +387,11 @@ async def list_payments(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/payments/{payment_id}", response_model=PaymentResponse)
-async def get_payment(payment_id: str, db: AsyncSession = Depends(get_db)):
+async def get_payment(
+    payment_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     service = PaymentService(db)
     p = await service.get_payment(tenant_id, uuid.UUID(payment_id))
@@ -357,15 +408,21 @@ async def get_payment(payment_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/payments/{payment_id}/refund")
-async def request_refund(payment_id: str, body: RefundRequest, db: AsyncSession = Depends(get_db)):
+async def request_refund(
+    payment_id: str,
+    body: RefundRequest,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     refund_service = RefundService(db)
+    actor_id = get_active_actor_identity()
     approval = await refund_service.request_refund(
         tenant_id=tenant_id,
         payment_id=uuid.UUID(payment_id),
         amount=Decimal(str(body.amount)),
         reason=body.reason,
-        requested_by="TENANT_USER",
+        requested_by=actor_id,
     )
     return {
         "status": "APPROVAL_REQUIRED",
@@ -376,7 +433,10 @@ async def request_refund(payment_id: str, body: RefundRequest, db: AsyncSession 
 
 # Entitlements Endpoints
 @router.get("/entitlements", response_model=List[EntitlementResponse])
-async def list_entitlements(db: AsyncSession = Depends(get_db)):
+async def list_entitlements(
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     resolver = EntitlementResolver(db)
     sub = await resolver.get_tenant_subscription(tenant_id)
@@ -399,7 +459,11 @@ async def list_entitlements(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/features/{feature_key}", response_model=EntitlementResponse)
-async def check_feature(feature_key: str, db: AsyncSession = Depends(get_db)):
+async def check_feature(
+    feature_key: str,
+    db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
+):
     tenant_id = require_tenant_id()
     resolver = EntitlementResolver(db)
     access = await resolver.can_use(tenant_id, feature_key)
