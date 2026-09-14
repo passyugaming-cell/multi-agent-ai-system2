@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
-from app.core.auth import resolve_actor_permissions
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id, get_actor_context
 from app.billing.plans import PlanService
 from app.billing.subscription import SubscriptionService
@@ -164,7 +164,7 @@ async def get_plan(plan_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/subscription", response_model=SubscriptionResponse)
 async def get_subscription(
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
@@ -188,7 +188,7 @@ async def get_subscription(
 async def activate_subscription(
     body: ActivateSubscriptionRequest,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:write")),
 ):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
@@ -218,7 +218,7 @@ async def activate_subscription(
 async def change_plan(
     body: ChangePlanRequest,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:write")),
 ):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
@@ -248,7 +248,7 @@ async def change_plan(
 async def cancel_subscription(
     body: CancelSubscriptionRequest,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:write")),
 ):
     tenant_id = require_tenant_id()
     sub_service = SubscriptionService(db)
@@ -277,7 +277,7 @@ async def cancel_subscription(
 @router.get("/usage", response_model=List[UsageResponse])
 async def list_usage(
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     usage_service = UsageService(db)
@@ -302,7 +302,7 @@ async def list_usage(
 async def get_usage_for_metric(
     metric: str,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     usage_service = UsageService(db)
@@ -315,7 +315,7 @@ async def get_usage_for_metric(
 @router.get("/invoices", response_model=List[InvoiceResponse])
 async def list_invoices(
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     service = InvoiceService(db)
@@ -342,7 +342,7 @@ async def list_invoices(
 async def get_invoice(
     invoice_id: str,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     service = InvoiceService(db)
@@ -366,7 +366,7 @@ async def get_invoice(
 @router.get("/payments", response_model=List[PaymentResponse])
 async def list_payments(
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     service = PaymentService(db)
@@ -390,7 +390,7 @@ async def list_payments(
 async def get_payment(
     payment_id: str,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     service = PaymentService(db)
@@ -412,7 +412,7 @@ async def request_refund(
     payment_id: str,
     body: RefundRequest,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:write")),
 ):
     tenant_id = require_tenant_id()
     refund_service = RefundService(db)
@@ -435,7 +435,7 @@ async def request_refund(
 @router.get("/entitlements", response_model=List[EntitlementResponse])
 async def list_entitlements(
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     resolver = EntitlementResolver(db)
@@ -462,7 +462,7 @@ async def list_entitlements(
 async def check_feature(
     feature_key: str,
     db: AsyncSession = Depends(get_db),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("billing:read")),
 ):
     tenant_id = require_tenant_id()
     resolver = EntitlementResolver(db)

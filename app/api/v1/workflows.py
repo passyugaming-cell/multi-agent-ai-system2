@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import resolve_actor_permissions
+from app.core.auth import check_permission
 from app.core.context import get_tenant_id
 from app.database.session import get_db_session
 from app.database.models.workflow import WorkflowConfiguration
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/workflows", tags=["Workflows"])
 @router.get("", response_model=list[WorkflowResponse])
 async def list_workflows(
     db: AsyncSession = Depends(get_db_session),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("workflows:read")),
 ) -> list[WorkflowResponse]:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(WorkflowConfiguration.tenant_id == tenant_id)
@@ -40,7 +40,7 @@ async def list_workflows(
 async def create_workflow(
     body: WorkflowCreateRequest,
     db: AsyncSession = Depends(get_db_session),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
 ) -> WorkflowResponse:
     tenant_id = get_tenant_id()
 
@@ -79,7 +79,7 @@ async def create_workflow(
 async def get_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db_session),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("workflows:read")),
 ) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
@@ -109,7 +109,7 @@ async def get_workflow(
 async def enable_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db_session),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
 ) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
@@ -143,7 +143,7 @@ async def enable_workflow(
 async def disable_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db_session),
-    actor_perms: set[str] = Depends(resolve_actor_permissions),
+    actor_perms: set[str] = Depends(check_permission("workflows:write")),
 ) -> WorkflowResponse:
     tenant_id = get_tenant_id()
     stmt = select(WorkflowConfiguration).where(
