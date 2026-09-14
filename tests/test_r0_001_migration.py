@@ -1,9 +1,10 @@
 """Verification test suite for R0-001 Phase 6 Integration Migration Repair.
 
 Tests that all 5 Phase 6 integration tables exist with expected columns,
-foreign keys, unique constraints, and indexes when metadata tables are created,
-and validates migration upgrade and downgrade behaviors.
+foreign keys, unique constraints, and indexes when database tables are created,
+supporting dynamic engine setup via TEST_DATABASE_URL or SQLite fallback.
 """
+import os
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -13,9 +14,13 @@ from app.database.models import integrations  # Ensures models are imported in B
 
 @pytest.mark.asyncio
 async def test_phase6_integration_tables_schema_and_constraints(tmp_path):
-    """Verify that the 5 Phase 6 integration tables exist in SQLAlchemy metadata with expected structure."""
-    db_file = tmp_path / "test_r0_001.db"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
+    """Verify that the 5 Phase 6 integration tables exist with expected structure."""
+    db_url = os.getenv("TEST_DATABASE_URL")
+    if not db_url:
+        db_file = tmp_path / "test_r0_001.db"
+        db_url = f"sqlite+aiosqlite:///{db_file}"
+
+    engine = create_async_engine(db_url)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

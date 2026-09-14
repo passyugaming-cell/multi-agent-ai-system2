@@ -1,0 +1,109 @@
+name: R0-001 PostgreSQL Migration Verification
+
+on:
+  push:
+    branches: [ ai-bos-repair-hardening, main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  postgres-verification:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: ai_business_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U user -d ai_business_os_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-root
+
+      - name: Install extra test packages
+        run: |
+          poetry run pip install pytest pytest-asyncio httpx "pydantic[email]" google-genai redis PyJWT cryptography aiosqlite email-validator
+
+      - name: Execute Alembic Migration Chain (Fresh Upgrade to Head)
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run alembic upgrade head
+
+      - name: Validate PostgreSQL Database Schema & Constraints
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run python - << 'EOF'
+          import asyncio
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+          async def verify():
+              db_url = "postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test"
+              engine = create_async_engine(db_url)
+              async with engine.connect() as conn:
+                  def inspect_db(sync_conn):
+                      inspector = sa.inspect(sync_conn)
+                      tables = inspector.get_table_names()
+                      phase6 = ["integrations", "integration_connections", "integration_credentials", "integration_executions", "webhook_configs"]
+                      for t in phase6:
+                          assert t in tables, f"Missing table: {t}"
+
+                      conn_cols = {c["name"] for c in inspector.get_columns("integration_connections")}
+                      assert "provider_key" in conn_cols, "Missing provider_key on integration_connections"
+
+                      indexes = {idx["name"] for idx in inspector.get_indexes("integration_connections")}
+                      assert "ix_integration_connections_provider_key" in indexes, "Missing provider_key index on integration_connections"
+
+                      print("SUCCESS: All PostgreSQL schema assertions verified.")
+                  await conn.run_sync(inspect_db)
+              await engine.dispose()
+
+          asyncio.run(verify())
+          EOF
+
+      - name: Run Dedicated R0-001 Tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run pytest tests/test_r0_001_migration.py -v
+
+      - name: Run Phase 6 Integration Tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run pytest tests/test_phase6_integrations.py -v
+
+      - name: Test Migration Downgrade & Round-Trip
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run alembic downgrade 72dbe1a9c9ce
+          poetry run alembic upgrade head

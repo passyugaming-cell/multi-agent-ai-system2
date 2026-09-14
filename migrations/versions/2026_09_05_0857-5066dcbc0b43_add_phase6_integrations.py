@@ -39,8 +39,6 @@ def upgrade() -> None:
         sa.UniqueConstraint('integration_key', 'tenant_id', name='uq_integrations_key_tenant'),
     )
     op.create_index(op.f('ix_integrations_integration_key'), 'integrations', ['integration_key'], unique=False)
-    op.create_index(op.f('ix_integrations_provider_key'), 'integrations', ['provider_key'], unique=False)
-    op.create_index(op.f('ix_integrations_tenant_id'), 'integrations', ['tenant_id'], unique=False)
     op.create_index('ix_integrations_provider', 'integrations', ['provider_key'], unique=False)
     op.create_index('ix_integrations_tenant', 'integrations', ['tenant_id'], unique=False)
 

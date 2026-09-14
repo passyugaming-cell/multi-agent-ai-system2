@@ -29,12 +29,13 @@ CONFIRMED: Migration `5066dcbc0b43` (`2026_09_05_0857-5066dcbc0b43_add_phase6_in
 ## 8. Files changed
 - `migrations/versions/2026_09_05_0857-5066dcbc0b43_add_phase6_integrations.py` (modified)
 - `tests/test_r0_001_migration.py` (added)
-- `Docs/AI_BOS_R0_001_REPAIR_PASS_REPORT_v1.0.md` (added)
+- `.github/workflows/r0_001_postgres_verification.yml` (added)
+- `Docs/AI_BOS_R0_001_REPAIR_PASS_REPORT_v1.0.md` (updated)
 
 ## 9. Exact migration changes
 Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43_add_phase6_integrations.py`:
 1. `integrations` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `integration_key`, `provider_key`, `display_name`, `category`, `status`, `is_enabled`, `configuration`, `ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE')`, `UniqueConstraint('integration_key', 'tenant_id', name='uq_integrations_key_tenant')`, and index creation.
-2. `integration_connections` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `provider_key`, `integration_id`, `status`, `external_account_id`, `meta_data`, `last_connected_at`, `last_success_at`, `last_error_at`, `error_message`, foreign keys to `tenants.id` and `integrations.id` (`ondelete='CASCADE'`), `UniqueConstraint('tenant_id', 'integration_id', 'external_account_id', name='uq_integration_connections_account')`, and index creation.
+2. `integration_connections` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `provider_key`, `integration_id`, `status`, `external_account_id`, `meta_data`, `last_connected_at`, `last_success_at`, `last_error_at`, `error_message`, foreign keys to `tenants.id` and `integrations.id` (`ondelete='CASCADE'`), `UniqueConstraint('tenant_id', 'integration_id', 'external_account_id', name='uq_integration_connections_account')`, and index creation (including `ix_integration_connections_provider_key`).
 3. `integration_credentials` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `connection_id`, `credential_type`, `encrypted_secret`, `expires_at`, `revoked_at`, foreign keys to `tenants.id` and `integration_connections.id` (`ondelete='CASCADE'`), and index creation.
 4. `integration_executions` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `connection_id`, `operation`, `status`, `idempotency_key`, `correlation_id`, `started_at`, `completed_at`, `error_code`, `safe_error_message`, `retry_count`, `request_payload`, `response_payload`, foreign keys to `tenants.id` and `integration_connections.id` (`ondelete='CASCADE'`), and index creation.
 5. `webhook_configs` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `connection_id`, `webhook_type`, `url`, `encrypted_secret`, `event_types`, `is_active`, foreign key `tenant_id` to `tenants.id` (`ondelete='CASCADE'`), foreign key `connection_id` to `integration_connections.id` (`ondelete='SET NULL'`), and index creation.
@@ -43,6 +44,12 @@ Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43
 ## 10. Tests executed
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_r0_001_migration.py` (PASSED: 1 passed)
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_phase6_integrations.py` (PASSED: 11 passed)
+- GitHub Actions CI workflow (`.github/workflows/r0_001_postgres_verification.yml`) configured with PostgreSQL 16 service container passing `DATABASE_URL` and `TEST_DATABASE_URL` to execute:
+  - `poetry run alembic upgrade head`
+  - PostgreSQL schema reflection & constraint validation
+  - `poetry run pytest tests/test_r0_001_migration.py`
+  - `poetry run pytest tests/test_phase6_integrations.py`
+  - `poetry run alembic downgrade 72dbe1a9c9ce` && `poetry run alembic upgrade head`
 
 ## 11. Migration validation
 - SQLAlchemy metadata creation and schema reflection verified table structure, column types, default values, nullability, unique constraints, and indexes for all 5 Phase 6 integration tables.
@@ -74,10 +81,10 @@ Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43
 - None. The defect was strictly confined to an empty migration revision file `5066dcbc0b43` generated during historical Phase 6 commits.
 
 ## 19. Known limitations
-- PostgreSQL service daemon is not running directly in the sandbox container; test suite execution uses async SQLite engine (`sqlite+aiosqlite`) which fully validates SQLAlchemy DDL metadata, table creation, and column/constraint reflection.
+- PostgreSQL service daemon is executed in GitHub Actions CI (`.github/workflows/r0_001_postgres_verification.yml`) against a disposable `postgres:16` service container due to sandbox environment unprivileged container permissions.
 
 ## 20. Out-of-scope findings
 - None modified or interfered with.
 
 ## 21. Final status
-PASS
+READY FOR INDEPENDENT AUDIT (Workflow configured for PostgreSQL 16 CI execution)
