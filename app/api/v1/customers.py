@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
 from app.database.session import get_db_session
 from app.repositories.domain import CustomerRepository
 from app.schemas.domain import CustomerCreate, CustomerUpdate, CustomerResponse
@@ -25,6 +26,7 @@ async def list_customers(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     repo = CustomerRepository(db)
@@ -35,6 +37,7 @@ async def list_customers(
 async def create_customer(
     payload: CustomerCreate,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     repo = CustomerRepository(db)
@@ -50,6 +53,7 @@ async def create_customer(
 async def get_customer(
     customer_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = _get_tenant_id_or_400()
     repo = CustomerRepository(db)
