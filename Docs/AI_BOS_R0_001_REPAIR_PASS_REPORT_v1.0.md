@@ -28,7 +28,9 @@ CONFIRMED: Migration `5066dcbc0b43` (`2026_09_05_0857-5066dcbc0b43_add_phase6_in
 
 ## 8. Files changed
 - `migrations/versions/2026_09_05_0857-5066dcbc0b43_add_phase6_integrations.py` (modified)
+- `migrations/versions/2026_09_12_0100-add_phase_a_parent_composite_unique_constraints.py` (modified: shortened revision ID to `add_phase_a_parent_comp_uniq` for Alembic `version_num` VARCHAR(32) PostgreSQL compliance)
 - `tests/test_r0_001_migration.py` (added)
+- `tests/test_phase_a_composite_unique.py` (modified)
 - `.github/workflows/r0_001_postgres_verification.yml` (added)
 - `Docs/AI_BOS_R0_001_REPAIR_PASS_REPORT_v1.0.md` (updated)
 
@@ -41,9 +43,13 @@ Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43
 5. `webhook_configs` table DDL with columns `id`, `created_at`, `updated_at`, `tenant_id`, `connection_id`, `webhook_type`, `url`, `encrypted_secret`, `event_types`, `is_active`, foreign key `tenant_id` to `tenants.id` (`ondelete='CASCADE'`), foreign key `connection_id` to `integration_connections.id` (`ondelete='SET NULL'`), and index creation.
 6. `downgrade()` implementation to cleanly drop tables in reverse creation order (`webhook_configs`, `integration_executions`, `integration_credentials`, `integration_connections`, `integrations`).
 
+In `migrations/versions/2026_09_12_0100-add_phase_a_parent_composite_unique_constraints.py`:
+- Shortened revision string identifier from `add_phase_a_parent_composite_unique` (35 chars) to `add_phase_a_parent_comp_uniq` (27 chars) to comply with PostgreSQL Alembic `alembic_version.version_num` column size limit (VARCHAR 32).
+
 ## 10. Tests executed
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_r0_001_migration.py` (PASSED: 1 passed)
 - `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_phase6_integrations.py` (PASSED: 11 passed)
+- `TEST_DATABASE_URL="sqlite+aiosqlite:///./test.db" poetry run pytest tests/test_phase_a_composite_unique.py` (PASSED: 3 passed)
 - GitHub Actions CI workflow (`.github/workflows/r0_001_postgres_verification.yml`) configured with PostgreSQL 16 service container passing `DATABASE_URL` and `TEST_DATABASE_URL` to execute:
   - `poetry run alembic upgrade head`
   - PostgreSQL schema reflection & constraint validation
@@ -65,7 +71,7 @@ Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43
 - `downgrade()` safe table deletion logic verified to drop created tables without altering upstream or downstream unrelated tables.
 
 ## 14. Regression results
-- All 11 test cases in `tests/test_phase6_integrations.py` passed with 0 failures or errors.
+- All 15 test cases passed with 0 failures or errors.
 
 ## 15. Security review
 - Tenant boundaries strictly maintained via `tenant_id` foreign key columns with `ON DELETE CASCADE`.
@@ -78,7 +84,7 @@ Restored complete DDL logic in `migrations/versions/2026_09_05_0857-5066dcbc0b43
 - Migration uses explicit table creation and constraint indexing, supporting clean migration application and rollback without residual schema state artifacts.
 
 ## 18. Unexpected findings
-- None. The defect was strictly confined to an empty migration revision file `5066dcbc0b43` generated during historical Phase 6 commits.
+- Historical migration `2026_09_12_0100-add_phase_a_parent_composite_unique_constraints.py` defined revision ID `add_phase_a_parent_composite_unique` (35 characters), exceeding PostgreSQL `alembic_version.version_num` VARCHAR(32) column length limit. Resolved by shortening to `add_phase_a_parent_comp_uniq` (27 characters).
 
 ## 19. Known limitations
 - PostgreSQL service daemon is executed in GitHub Actions CI (`.github/workflows/r0_001_postgres_verification.yml`) against a disposable `postgres:16` service container due to sandbox environment unprivileged container permissions.
