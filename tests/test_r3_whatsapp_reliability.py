@@ -53,6 +53,8 @@ async def test_r3_conversation_get_or_create_concurrency(db_session: AsyncSessio
 
 @pytest.mark.asyncio
 async def test_r3_message_status_state_machine(db_session: AsyncSession):
+    from app.core.messaging_state import validate_message_status_transition, InvalidStateTransitionError
+
     tenant = Tenant(name="Msg Tenant", slug=f"mt-{uuid.uuid4().hex[:6]}", is_active=True)
     db_session.add(tenant)
     await db_session.commit()
@@ -70,3 +72,32 @@ async def test_r3_message_status_state_machine(db_session: AsyncSession):
         external_message_id=f"wamid.{uuid.uuid4().hex[:8]}",
     )
     assert msg.status == "CREATED"
+
+    # Valid transition sequence
+    validate_message_status_transition(msg.status, "QUEUED")
+    msg.status = "QUEUED"
+
+    validate_message_status_transition(msg.status, "SENDING")
+    msg.status = "SENDING"
+
+    validate_message_status_transition(msg.status, "SENT")
+    msg.status = "SENT"
+
+    validate_message_status_transition(msg.status, "DELIVERED")
+    msg.status = "DELIVERED"
+
+    validate_message_status_transition(msg.status, "READ")
+    msg.status = "READ"
+
+    # Invalid transitions must raise InvalidStateTransitionError
+    invalid_pairs = [
+        ("READ", "SENT"),
+        ("FAILED", "SENT"),
+        ("DELIVERED", "CREATED"),
+        ("READ", "CREATED"),
+        ("FAILED", "DELIVERED"),
+        ("UNKNOWN", "SENT"),
+    ]
+    for current, target in invalid_pairs:
+        with pytest.raises(InvalidStateTransitionError):
+            validate_message_status_transition(current, target)
