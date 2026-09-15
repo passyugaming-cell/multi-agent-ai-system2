@@ -37,8 +37,7 @@ def get_default_payment_provider() -> PaymentProvider:
             raise PaymentConfigurationError(
                 f"Unsupported production payment provider: '{settings.PAYMENT_PROVIDER}'"
             )
-    else:
-        # Development or testing environment
+    elif env in ("development", "testing"):
         provider_type = (settings.PAYMENT_PROVIDER or "").lower()
         if provider_type == "midtrans" and settings.MIDTRANS_SERVER_KEY and "mock" not in settings.MIDTRANS_SERVER_KEY.lower():
             return MidtransPaymentProvider(
@@ -46,6 +45,10 @@ def get_default_payment_provider() -> PaymentProvider:
                 is_sandbox=settings.MIDTRANS_IS_SANDBOX,
             )
         return FakePaymentProvider()
+    else:
+        raise PaymentConfigurationError(
+            f"Invalid or unknown application environment: '{settings.APP_ENV}'"
+        )
 
 
 class PaymentService:
@@ -55,7 +58,9 @@ class PaymentService:
             self.provider = get_default_payment_provider()
         else:
             from app.core.config import settings
-            if (settings.APP_ENV or "").lower() in ("production", "staging") and getattr(provider, "provider_name", "") == "fake":
+            env = (settings.APP_ENV or "").lower()
+            p_name = getattr(provider, "provider_name", None) or "unknown"
+            if env in ("production", "staging") and p_name == "fake":
                 raise PaymentConfigurationError(
                     "FakePaymentProvider cannot be used in production or staging environment."
                 )
@@ -91,7 +96,7 @@ class PaymentService:
                 f"Payment provider creation failed: {result.error_message or 'Unknown provider error'}"
             )
 
-        provider_name = getattr(self.provider, "provider_name", "fake")
+        provider_name = getattr(self.provider, "provider_name", None) or "unknown"
 
         payment = Payment(
             tenant_id=tenant_id,
@@ -217,7 +222,7 @@ class PaymentService:
         payment = (await self.session.execute(stmt)).scalar_one_or_none()
 
         if not payment:
-            provider_name = getattr(self.provider, "provider_name", "webhook")
+            provider_name = getattr(self.provider, "provider_name", None) or "unknown"
             payment = Payment(
                 tenant_id=webhook_res.tenant_id,
                 invoice_id=webhook_res.invoice_id,

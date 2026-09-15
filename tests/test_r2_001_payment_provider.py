@@ -8,9 +8,12 @@ from app.core import config
 from app.core.config import Settings
 from app.database.models.tenant import Tenant
 from app.billing.payments import PaymentService, get_default_payment_provider
-from app.billing.provider import FakePaymentProvider, MidtransPaymentProvider, PaymentResult
+from app.billing.provider import PaymentProvider, FakePaymentProvider, MidtransPaymentProvider, PaymentResult, RefundResult, WebhookResult
 from app.billing.exceptions import PaymentConfigurationError, PaymentFailedError
 from app.billing.invoices import InvoiceService
+from app.billing.plans import PlanService
+from app.billing.subscription import SubscriptionService
+from app.billing.state_machine import InvoiceStatus, PaymentStatus, SubscriptionStatus
 
 
 @pytest.fixture(autouse=True)
@@ -234,16 +237,146 @@ async def test_07_provider_failure_fails_closed(db_session: AsyncSession, tenant
 
 
 @pytest.mark.asyncio
-async def test_08_existing_payment_tests_pass(db_session: AsyncSession, tenant_a: Tenant):
-    """REQUIREMENT 8: Existing payment tests pass -> MidtransPaymentProvider & PaymentService integration."""
+async def test_08_existing_payment_tests_pass(db_session: AsyncSession, tenant_a: Tenant, monkeypatch):
+    """REQUIREMENT 8: Existing payment tests pass -> Full MidtransPaymentProvider & PaymentService behavior."""
     midtrans_provider = MidtransPaymentProvider(server_key="SB-Mid-key-12345", is_sandbox=True)
     assert midtrans_provider.provider_name == "midtrans"
-    assert midtrans_provider.server_key == "SB-Mid-key-12345"
+
+    async def mock_midtrans_create_payment(credentials, params):
+        return {
+            "success": True,
+            "transaction_id": "midtrans_tx_8888",
+            "transaction_status": "pending",
+        }
+
+    async def mock_midtrans_get_payment_status(credentials, order_id_or_transaction_id):
+        return {
+            "success": True,
+            "order_id": order_id_or_transaction_id,
+            "transaction_id": "midtrans_tx_8888",
+            "normalized_status": "SUCCEEDED",
+        }
+
+    async def mock_midtrans_refund_payment(credentials, order_id_or_transaction_id, amount, reason):
+        return {
+            "success": True,
+            "transaction_id": "midtrans_refund_1111",
+            "refund_amount": str(amount),
+        }
+
+    monkeypatch.setattr(midtrans_provider.adapter, "create_payment", mock_midtrans_create_payment)
+    monkeypatch.setattr(midtrans_provider.adapter, "get_payment_status", mock_midtrans_get_payment_status)
+    monkeypatch.setattr(midtrans_provider.adapter, "refund_payment", mock_midtrans_refund_payment)
+
+    inv_service = InvoiceService(db_session)
+    invoice = await inv_service.create_invoice(
+        tenant_id=tenant_a.id,
+        items_data=[{"description": "Business Plan Fee", "unit_price": "1999000.00", "quantity": 1}],
+    )
+
+    pay_service = PaymentService(db_session, provider=midtrans_provider)
+
+    # 1. Create payment intent
+    payment = await pay_service.create_payment_intent(tenant_a.id, invoice.id, Decimal("1999000.00"))
+    assert payment.status == PaymentStatus.PENDING
+    assert payment.provider == "midtrans"
+    assert payment.provider_payment_id == "midtrans_tx_8888"
+
+    # 2. Verify payment status via provider
+    verify_res = await midtrans_provider.verify_payment(payment.provider_payment_id)
+    assert verify_res.success is True
+    assert verify_res.status == "SUCCEEDED"
+
+    # 3. Confirm payment success
+    confirmed_payment = await pay_service.confirm_payment_success(tenant_a.id, payment.id)
+    assert confirmed_payment.status == PaymentStatus.SUCCEEDED
+
+    # 4. Refund execution via provider
+    refund_res = await midtrans_provider.refund(payment.provider_payment_id, Decimal("1999000.00"))
+    assert refund_res.success is True
+    assert refund_res.refund_id == "midtrans_refund_1111"
 
 
 @pytest.mark.asyncio
 async def test_09_existing_billing_regression_passes(db_session: AsyncSession, tenant_a: Tenant):
-    """REQUIREMENT 9: Existing billing regression passes -> PaymentService instantiation & provider identity."""
+    """REQUIREMENT 9: Existing billing regression passes -> Full subscription & invoice lifecycle."""
+    plan_service = PlanService(db_session)
+    plans = await plan_service.seed_plans()
+    assert len(plans) == 4
+
+    sub_service = SubscriptionService(db_session)
+    sub = await sub_service.create_trial_subscription(tenant_a.id)
+    assert sub.status == SubscriptionStatus.TRIALING
+
+    sub_active = await sub_service.activate_subscription(tenant_a.id, "pro")
+    assert sub_active.status == SubscriptionStatus.ACTIVE
+
+    inv_service = InvoiceService(db_session)
+    invoice = await inv_service.create_invoice(
+        tenant_id=tenant_a.id,
+        subscription_id=sub_active.id,
+        items_data=[{"description": "Pro Monthly Plan", "unit_price": "799000.00", "quantity": 1}],
+    )
+    assert invoice.status == InvoiceStatus.ISSUED
+
     pay_service = PaymentService(db_session)
-    assert pay_service.provider is not None
-    assert hasattr(pay_service.provider, "provider_name")
+    payment = await pay_service.create_payment_intent(tenant_a.id, invoice.id, Decimal("799000.00"))
+    assert payment.status == PaymentStatus.PENDING
+
+    confirmed = await pay_service.confirm_payment_success(tenant_a.id, payment.id)
+    assert confirmed.status == PaymentStatus.SUCCEEDED
+
+    updated_inv = await inv_service.get_invoice(tenant_a.id, invoice.id)
+    assert updated_inv.status == InvoiceStatus.PAID
+
+
+@pytest.mark.asyncio
+async def test_10_missing_provider_name_never_persists_fake(db_session: AsyncSession, tenant_a: Tenant, monkeypatch):
+    """REQUIREMENT 10: Missing/un-attributed provider_name defaults to 'unknown', NEVER 'fake', and unknown APP_ENV fails closed."""
+    # A. Custom provider lacking provider_name attribute
+    class CustomUntypedProvider(PaymentProvider):
+        async def create_payment(self, tenant_id, invoice_id, amount, currency="IDR", metadata=None):
+            return PaymentResult(success=True, provider_payment_id="custom_123", status="PENDING")
+
+        async def verify_payment(self, provider_payment_id):
+            return PaymentResult(success=True, provider_payment_id=provider_payment_id, status="SUCCEEDED")
+
+        async def refund(self, provider_payment_id, amount, reason=None):
+            return RefundResult(success=True, refund_id="ref_custom_123", amount=amount)
+
+        async def handle_webhook(self, payload, headers, secret=None):
+            return WebhookResult(
+                event_type="payment.succeeded",
+                provider_payment_id="custom_123",
+                amount=Decimal("1000.00"),
+                status="SUCCEEDED",
+                tenant_id=tenant_a.id,
+                invoice_id=uuid.uuid4(),
+            )
+
+    untyped_provider = CustomUntypedProvider()
+    untyped_provider.provider_name = None
+
+    pay_service = PaymentService(db_session, provider=untyped_provider)
+    inv_service = InvoiceService(db_session)
+    invoice = await inv_service.create_invoice(
+        tenant_id=tenant_a.id,
+        items_data=[{"description": "Custom Item", "unit_price": "1000.00", "quantity": 1}],
+    )
+
+    payment = await pay_service.create_payment_intent(tenant_a.id, invoice.id, Decimal("1000.00"))
+    assert payment.provider == "unknown"
+    assert payment.provider != "fake"
+
+    # B. Unknown / typo APP_ENV fails closed
+    typo_settings = Settings(
+        _env_file=None,
+        APP_ENV="development",
+    )
+    typo_settings.APP_ENV = "prod_typo"
+    monkeypatch.setattr(config, "settings", typo_settings)
+
+    with pytest.raises(PaymentConfigurationError) as excinfo:
+        get_default_payment_provider()
+
+    assert "Invalid or unknown application environment" in str(excinfo.value)
