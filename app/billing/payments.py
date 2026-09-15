@@ -9,15 +9,67 @@ from app.database.models.billing import Payment, Invoice, Subscription, Plan
 from app.billing.invoices import InvoiceService
 from app.billing.subscription import SubscriptionService
 from app.billing.state_machine import PaymentStatus, InvoiceStatus, validate_payment_transition
-from app.billing.exceptions import PaymentFailedError
-from app.billing.provider import PaymentProvider, FakePaymentProvider, WebhookResult
+from app.billing.exceptions import PaymentFailedError, PaymentConfigurationError
+from app.billing.provider import PaymentProvider, FakePaymentProvider, MidtransPaymentProvider, WebhookResult
 from app.billing.events import publish_billing_event
+
+
+def get_default_payment_provider() -> PaymentProvider:
+    from app.core.config import settings
+    env = (settings.APP_ENV or "").lower()
+    if env in ("production", "staging"):
+        provider_type = (settings.PAYMENT_PROVIDER or "").lower()
+        if not provider_type or provider_type == "fake":
+            raise PaymentConfigurationError(
+                "FakePaymentProvider is forbidden in production or staging environment. "
+                "An explicit production payment provider must be configured."
+            )
+        elif provider_type == "midtrans":
+            if not settings.MIDTRANS_SERVER_KEY or "mock" in settings.MIDTRANS_SERVER_KEY.lower():
+                raise PaymentConfigurationError(
+                    "MIDTRANS_SERVER_KEY is missing or invalid. Midtrans payment provider configuration is incomplete."
+                )
+            return MidtransPaymentProvider(
+                server_key=settings.MIDTRANS_SERVER_KEY,
+                is_sandbox=settings.MIDTRANS_IS_SANDBOX,
+            )
+        else:
+            raise PaymentConfigurationError(
+                f"Unsupported production payment provider: '{settings.PAYMENT_PROVIDER}'"
+            )
+    elif env in ("development", "testing"):
+        provider_type = (settings.PAYMENT_PROVIDER or "").lower()
+        if provider_type == "midtrans" and settings.MIDTRANS_SERVER_KEY and "mock" not in settings.MIDTRANS_SERVER_KEY.lower():
+            return MidtransPaymentProvider(
+                server_key=settings.MIDTRANS_SERVER_KEY,
+                is_sandbox=settings.MIDTRANS_IS_SANDBOX,
+            )
+        return FakePaymentProvider()
+    else:
+        raise PaymentConfigurationError(
+            f"Invalid or unknown application environment: '{settings.APP_ENV}'"
+        )
 
 
 class PaymentService:
     def __init__(self, db_session: AsyncSession, provider: PaymentProvider | None = None) -> None:
         self.session = db_session
-        self.provider = provider or FakePaymentProvider()
+        if provider is None:
+            self.provider = get_default_payment_provider()
+        else:
+            from app.core.config import settings
+            p_name = getattr(provider, "provider_name", None)
+            if not p_name or not isinstance(p_name, str) or not p_name.strip():
+                raise PaymentConfigurationError(
+                    "PaymentProvider passed to PaymentService must have a valid non-empty 'provider_name' attribute."
+                )
+            p_name_clean = p_name.strip().lower()
+            env = (settings.APP_ENV or "").lower()
+            if env in ("production", "staging") and p_name_clean == "fake":
+                raise PaymentConfigurationError(
+                    "FakePaymentProvider cannot be used in production or staging environment."
+                )
+            self.provider = provider
         self.invoice_service = InvoiceService(db_session)
         self.sub_service = SubscriptionService(db_session)
 
@@ -44,13 +96,20 @@ class PaymentService:
         now = datetime.now(timezone.utc)
         result = await self.provider.create_payment(tenant_id, invoice_id, amount, currency)
 
+        if not result.success:
+            raise PaymentFailedError(
+                f"Payment provider creation failed: {result.error_message or 'Unknown provider error'}"
+            )
+
+        provider_name = getattr(self.provider, "provider_name", None) or "unknown"
+
         payment = Payment(
             tenant_id=tenant_id,
             invoice_id=invoice_id,
             amount=amount,
             currency=currency,
             status=PaymentStatus.PENDING,
-            provider="fake",
+            provider=provider_name,
             provider_payment_id=result.provider_payment_id,
             attempted_at=now,
         )
@@ -168,13 +227,14 @@ class PaymentService:
         payment = (await self.session.execute(stmt)).scalar_one_or_none()
 
         if not payment:
+            provider_name = getattr(self.provider, "provider_name", None) or "unknown"
             payment = Payment(
                 tenant_id=webhook_res.tenant_id,
                 invoice_id=webhook_res.invoice_id,
                 amount=webhook_res.amount,
                 currency="IDR",
                 status=PaymentStatus.PENDING,
-                provider="webhook",
+                provider=provider_name,
                 provider_payment_id=webhook_res.provider_payment_id,
                 attempted_at=datetime.now(timezone.utc),
             )

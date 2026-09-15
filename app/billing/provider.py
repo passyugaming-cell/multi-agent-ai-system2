@@ -35,6 +35,8 @@ class WebhookResult:
 
 
 class PaymentProvider(ABC):
+    provider_name: str = "base"
+
     @abstractmethod
     async def create_payment(
         self,
@@ -71,6 +73,8 @@ class PaymentProvider(ABC):
 
 class MidtransPaymentProvider(PaymentProvider):
     """Real PaymentProvider implementation wrapping Midtrans Adapter."""
+
+    provider_name: str = "midtrans"
 
     def __init__(self, server_key: str, is_sandbox: bool = True) -> None:
         self.server_key = server_key
@@ -178,6 +182,8 @@ class MidtransPaymentProvider(PaymentProvider):
 
 class FakePaymentProvider(PaymentProvider):
     """Fake Payment Provider for testing and local development."""
+
+    provider_name: str = "fake"
 
     def __init__(self, secret: str = "test_webhook_secret") -> None:
         self.secret = secret
