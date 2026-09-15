@@ -25,7 +25,7 @@ def upgrade() -> None:
     dup_check = sa.text("""
         SELECT tenant_id, provider, provider_payment_id, COUNT(*) as cnt
         FROM payments
-        WHERE provider_payment_id IS NOT NULL AND provider_payment_id != ''
+        WHERE provider_payment_id IS NOT NULL
         GROUP BY tenant_id, provider, provider_payment_id
         HAVING COUNT(*) > 1
     """)
