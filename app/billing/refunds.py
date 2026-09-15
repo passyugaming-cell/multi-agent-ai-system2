@@ -118,7 +118,7 @@ class RefundService:
         if refund_amount > remaining_refundable:
             approval.status = "FAILED"
             approval.meta_data = dict(approval.meta_data or {}, failure_reason="Refund amount exceeds remaining refundable amount.")
-            await self.session.flush()
+            await self.session.commit()
             raise BillingError(
                 f"Refund amount ({refund_amount}) exceeds remaining refundable amount ({remaining_refundable})."
             )
