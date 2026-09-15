@@ -101,6 +101,10 @@ async def test_cross_tenant_foreign_key_prevention(async_client: AsyncClient, te
     test_session.add_all([tenant_a, tenant_b])
     await test_session.commit()
 
+    user_b = User(tenant_id=tenant_b.id, email="owner_b_fk@test.com", password_hash="hash_b", is_active=True)
+    test_session.add(user_b)
+    await test_session.commit()
+
     # Customer owned by Tenant A
     customer_a = Customer(
         tenant_id=tenant_a.id,
@@ -118,8 +122,12 @@ async def test_cross_tenant_foreign_key_prevention(async_client: AsyncClient, te
         "currency": "IDR",
         "items": [],
     }
-    res = await async_client.post("/api/v1/orders", json=order_payload, headers=headers_b)
-    assert res.status_code == 404
+    token_b = set_actor_context(AuthenticatedActor(user_id=user_b.id, tenant_id=tenant_b.id, role="owner", permissions=set(ROLE_PERMISSIONS["owner"])))
+    try:
+        res = await async_client.post("/api/v1/orders", json=order_payload, headers=headers_b)
+        assert res.status_code == 404
+    finally:
+        reset_actor_context(token_b)
 
 
 @pytest.mark.asyncio
@@ -128,6 +136,11 @@ async def test_tenant_isolation_customers_and_orders(async_client: AsyncClient, 
     tenant_a = Tenant(name="Tenant Alpha Customers", slug="tenant-a-cust", is_active=True)
     tenant_b = Tenant(name="Tenant Beta Customers", slug="tenant-b-cust", is_active=True)
     test_session.add_all([tenant_a, tenant_b])
+    await test_session.commit()
+
+    user_a = User(tenant_id=tenant_a.id, email="owner_a_cust@test.com", password_hash="hash_a", is_active=True)
+    user_b = User(tenant_id=tenant_b.id, email="owner_b_cust@test.com", password_hash="hash_b", is_active=True)
+    test_session.add_all([user_a, user_b])
     await test_session.commit()
 
     # 2. Create Customer in Tenant A
@@ -164,28 +177,36 @@ async def test_tenant_isolation_customers_and_orders(async_client: AsyncClient, 
     headers_b = {"X-Tenant-ID": str(tenant_b.id)}
 
     # Verify Tenant A can see customer & order
-    res_cust_a = await async_client.get("/api/v1/customers", headers=headers_a)
-    assert res_cust_a.status_code == 200
-    assert len(res_cust_a.json()) == 1
-    assert res_cust_a.json()[0]["name"] == "Customer Alpha"
+    token_a = set_actor_context(AuthenticatedActor(user_id=user_a.id, tenant_id=tenant_a.id, role="owner", permissions=set(ROLE_PERMISSIONS["owner"])))
+    try:
+        res_cust_a = await async_client.get("/api/v1/customers", headers=headers_a)
+        assert res_cust_a.status_code == 200
+        assert len(res_cust_a.json()) == 1
+        assert res_cust_a.json()[0]["name"] == "Customer Alpha"
 
-    res_order_a = await async_client.get("/api/v1/orders", headers=headers_a)
-    assert res_order_a.status_code == 200
-    assert len(res_order_a.json()) == 1
-    assert res_order_a.json()[0]["id"] == str(order_a.id)
+        res_order_a = await async_client.get("/api/v1/orders", headers=headers_a)
+        assert res_order_a.status_code == 200
+        assert len(res_order_a.json()) == 1
+        assert res_order_a.json()[0]["id"] == str(order_a.id)
+    finally:
+        reset_actor_context(token_a)
 
     # Verify Tenant B sees EMPTY customers and orders (Strict Tenant Isolation)
-    res_cust_b = await async_client.get("/api/v1/customers", headers=headers_b)
-    assert res_cust_b.status_code == 200
-    assert len(res_cust_b.json()) == 0
+    token_b = set_actor_context(AuthenticatedActor(user_id=user_b.id, tenant_id=tenant_b.id, role="owner", permissions=set(ROLE_PERMISSIONS["owner"])))
+    try:
+        res_cust_b = await async_client.get("/api/v1/customers", headers=headers_b)
+        assert res_cust_b.status_code == 200
+        assert len(res_cust_b.json()) == 0
 
-    res_order_b = await async_client.get("/api/v1/orders", headers=headers_b)
-    assert res_order_b.status_code == 200
-    assert len(res_order_b.json()) == 0
+        res_order_b = await async_client.get("/api/v1/orders", headers=headers_b)
+        assert res_order_b.status_code == 200
+        assert len(res_order_b.json()) == 0
 
-    # Tenant B direct GET customer_a by ID returns 404
-    res_get_cust_b = await async_client.get(f"/api/v1/customers/{customer_a.id}", headers=headers_b)
-    assert res_get_cust_b.status_code == 404
+        # Tenant B direct GET customer_a by ID returns 404
+        res_get_cust_b = await async_client.get(f"/api/v1/customers/{customer_a.id}", headers=headers_b)
+        assert res_get_cust_b.status_code == 404
+    finally:
+        reset_actor_context(token_b)
 
 
 @pytest.mark.asyncio

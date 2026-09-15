@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
 from app.core.context import get_tenant_id
+from app.core.auth import resolve_actor_permissions
 from app.core.exceptions import AppError
 from app.analytics.services import AnalyticsService
 from app.analytics.schemas import (
@@ -37,6 +38,7 @@ def require_tenant_id() -> uuid.UUID:
 @router.get("/financial", response_model=FinancialAnalyticsSchema)
 async def get_financial_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -46,6 +48,7 @@ async def get_financial_analytics(
 @router.get("/clients", response_model=ClientAnalyticsSchema)
 async def get_client_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -55,6 +58,7 @@ async def get_client_analytics(
 @router.get("/sales", response_model=SalesAnalyticsSchema)
 async def get_sales_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -64,6 +68,7 @@ async def get_sales_analytics(
 @router.get("/customers", response_model=CustomerAnalyticsSchema)
 async def get_customer_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -73,6 +78,7 @@ async def get_customer_analytics(
 @router.get("/ai", response_model=AIAnalyticsSchema)
 async def get_ai_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -82,6 +88,7 @@ async def get_ai_analytics(
 @router.get("/automation", response_model=AutomationAnalyticsSchema)
 async def get_automation_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -91,6 +98,7 @@ async def get_automation_analytics(
 @router.get("/subscriptions", response_model=SubscriptionAnalyticsSchema)
 async def get_subscription_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -100,6 +108,7 @@ async def get_subscription_analytics(
 @router.get("/funnel", response_model=List[SalesFunnelStageSchema])
 async def get_funnel_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -110,6 +119,7 @@ async def get_funnel_analytics(
 async def get_kpi_analytics(
     period: str = Query("30d", description="Period window e.g. 24h, 7d, 30d"),
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -120,6 +130,7 @@ async def get_kpi_analytics(
 async def get_trends_analytics(
     period_days: int = Query(30, description="Comparison window days"),
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -130,6 +141,7 @@ async def get_trends_analytics(
 async def get_anomalies_analytics(
     period_days: int = Query(30, description="Detection window days"),
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -140,6 +152,7 @@ async def get_anomalies_analytics(
 async def get_forecast_analytics(
     period_days: int = Query(30, description="Forecast baseline days"),
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -149,6 +162,7 @@ async def get_forecast_analytics(
 @router.get("/health")
 async def get_health_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -164,6 +178,7 @@ async def get_health_analytics(
 async def get_recommendations_analytics(
     period_days: int = Query(30, description="Evaluation window days"),
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -173,6 +188,7 @@ async def get_recommendations_analytics(
 @router.get("/daily-brief", response_model=DailyBusinessBriefSchema)
 async def get_daily_brief(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -182,6 +198,7 @@ async def get_daily_brief(
 @router.get("/weekly-review", response_model=WeeklyStrategicReviewSchema)
 async def get_weekly_review(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
     tenant_id = require_tenant_id()
     service = AnalyticsService(db)
@@ -192,7 +209,12 @@ async def get_weekly_review(
 @router.get("/owner/platform")
 async def get_owner_platform_analytics(
     db: AsyncSession = Depends(get_db),
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
 ):
+    from app.core.context import get_actor_context
+    actor = get_actor_context()
+    if not actor or not actor.is_platform_owner:
+        raise AppError("Permission denied: Platform Owner authority required.", status_code=403)
     service = AnalyticsService(db)
     fin = await service.financial.get_financial_analytics(tenant_id=None)
     clients = await service.clients.get_client_analytics(tenant_id=None)
