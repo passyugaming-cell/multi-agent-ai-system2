@@ -173,7 +173,7 @@ async def get_subscription(
     )
 
 
-@router.post("/subscription", response_model=SubscriptionResponse)
+@router.post("/subscription")
 async def activate_subscription(
     body: ActivateSubscriptionRequest,
     db: AsyncSession = Depends(get_db),
@@ -183,12 +183,59 @@ async def activate_subscription(
     actor = get_actor_context()
     if not actor or ("MANAGE_PAYMENTS" not in actor.permissions and not actor.is_platform_owner):
         raise AppError("Permission denied: MANAGE_PAYMENTS permission required.", status_code=403)
+
     sub_service = SubscriptionService(db)
+    plan_service = PlanService(db)
+    plan = await plan_service.get_plan_by_code(body.plan_code)
+    from app.billing.plans import calculate_billed_amount
+    billed_amount = calculate_billed_amount(plan.price_monthly, body.billing_cycle)
+
+    if billed_amount > 0:
+        # Generate Invoice and Payment Intent for paid plan activation
+        sub = await sub_service.get_subscription_or_none(tenant_id)
+        sub_id = sub.id if sub else None
+        inv_service = InvoiceService(db)
+        inv = await inv_service.create_invoice(
+            tenant_id=tenant_id,
+            subscription_id=sub_id,
+            items_data=[{
+                "description": f"Subscription plan: {plan.name} ({body.billing_cycle.upper()})",
+                "unit_price": plan.price_monthly if body.billing_cycle.upper() == "MONTHLY" else plan.price_yearly,
+                "quantity": 1,
+                "revenue_type": "SUBSCRIPTION",
+            }],
+            currency=plan.currency,
+        )
+        pay_service = PaymentService(db)
+        payment = await pay_service.create_payment_intent(
+            tenant_id=tenant_id,
+            invoice_id=inv.id,
+            amount=inv.total,
+            currency=inv.currency,
+        )
+        return {
+            "status": "PAYMENT_REQUIRED",
+            "message": f"Payment required to activate plan '{body.plan_code}'.",
+            "invoice": {
+                "id": str(inv.id),
+                "invoice_number": inv.invoice_number,
+                "total": float(inv.total),
+                "currency": inv.currency,
+            },
+            "payment": {
+                "id": str(payment.id),
+                "status": payment.status,
+                "provider": payment.provider,
+                "provider_payment_id": payment.provider_payment_id,
+            },
+        }
+
     sub = await sub_service.activate_subscription(
         tenant_id=tenant_id,
         plan_code=body.plan_code,
         billing_cycle=body.billing_cycle,
         actor=str(actor.user_id),
+        verified_payment=True,
     )
     return SubscriptionResponse(
         id=str(sub.id),
@@ -205,7 +252,7 @@ async def activate_subscription(
     )
 
 
-@router.post("/subscription/change-plan", response_model=SubscriptionResponse)
+@router.post("/subscription/change-plan")
 async def change_plan(
     body: ChangePlanRequest,
     db: AsyncSession = Depends(get_db),
@@ -215,12 +262,58 @@ async def change_plan(
     actor = get_actor_context()
     if not actor or ("MANAGE_PAYMENTS" not in actor.permissions and not actor.is_platform_owner):
         raise AppError("Permission denied: MANAGE_PAYMENTS permission required.", status_code=403)
+
     sub_service = SubscriptionService(db)
+    sub = await sub_service.get_subscription(tenant_id)
+    plan_service = PlanService(db)
+    new_plan = await plan_service.get_plan_by_code(body.new_plan_code)
+    cycle = body.billing_cycle.upper() if body.billing_cycle else sub.billing_cycle
+    from app.billing.plans import calculate_billed_amount
+    billed_amount = calculate_billed_amount(new_plan.price_monthly, cycle)
+
+    if billed_amount > 0:
+        inv_service = InvoiceService(db)
+        inv = await inv_service.create_invoice(
+            tenant_id=tenant_id,
+            subscription_id=sub.id,
+            items_data=[{
+                "description": f"Plan Upgrade: {new_plan.name} ({cycle})",
+                "unit_price": new_plan.price_monthly if cycle == "MONTHLY" else new_plan.price_yearly,
+                "quantity": 1,
+                "revenue_type": "SUBSCRIPTION",
+            }],
+            currency=new_plan.currency,
+        )
+        pay_service = PaymentService(db)
+        payment = await pay_service.create_payment_intent(
+            tenant_id=tenant_id,
+            invoice_id=inv.id,
+            amount=inv.total,
+            currency=inv.currency,
+        )
+        return {
+            "status": "PAYMENT_REQUIRED",
+            "message": f"Payment required to upgrade plan to '{body.new_plan_code}'.",
+            "invoice": {
+                "id": str(inv.id),
+                "invoice_number": inv.invoice_number,
+                "total": float(inv.total),
+                "currency": inv.currency,
+            },
+            "payment": {
+                "id": str(payment.id),
+                "status": payment.status,
+                "provider": payment.provider,
+                "provider_payment_id": payment.provider_payment_id,
+            },
+        }
+
     sub = await sub_service.change_plan(
         tenant_id=tenant_id,
         new_plan_code=body.new_plan_code,
         billing_cycle=body.billing_cycle,
         actor=str(actor.user_id),
+        verified_payment=True,
     )
     return SubscriptionResponse(
         id=str(sub.id),

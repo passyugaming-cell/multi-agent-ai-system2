@@ -83,13 +83,13 @@ async def test_subscription_lifecycle_and_trial(db_session: AsyncSession, tenant
     assert sub_repeat.id == sub.id
 
     # Activate paid plan
-    sub = await sub_service.activate_subscription(tenant_a.id, "pro", billing_cycle="MONTHLY")
+    sub = await sub_service.activate_subscription(tenant_a.id, "pro", billing_cycle="MONTHLY", verified_payment=True)
     assert sub.status == SubscriptionStatus.ACTIVE
     assert sub.plan.code == "pro"
     assert sub.amount == Decimal("799000.00")
 
     # Upgrade plan
-    sub = await sub_service.change_plan(tenant_a.id, "business", billing_cycle="YEARLY")
+    sub = await sub_service.change_plan(tenant_a.id, "business", billing_cycle="YEARLY", verified_payment=True)
     assert sub.plan.code == "business"
     assert sub.billing_cycle == "YEARLY"
     assert sub.amount == Decimal("20389800.00")
@@ -116,7 +116,7 @@ async def test_subscription_state_machine_validation():
 @pytest.mark.asyncio
 async def test_payment_failure_policy_lifecycle(db_session: AsyncSession, tenant_a: Tenant):
     sub_service = SubscriptionService(db_session)
-    await sub_service.activate_subscription(tenant_a.id, "starter")
+    await sub_service.activate_subscription(tenant_a.id, "starter", verified_payment=True)
 
     # Day 0: PAST_DUE
     sub = await sub_service.update_payment_failure_status(tenant_a.id, days_past_due=0)
@@ -153,7 +153,7 @@ async def test_entitlement_gating(db_session: AsyncSession, tenant_a: Tenant):
     assert ai_limit == 1000
 
     # Upgrade to Business
-    await sub_service.activate_subscription(tenant_a.id, "business")
+    await sub_service.activate_subscription(tenant_a.id, "business", verified_payment=True)
     assert await ent_resolver.has_feature(tenant_a.id, "owner_ai") is True
     business_limit = await ent_resolver.get_limit(tenant_a.id, UsageMetric.AI_CREDITS)
     assert business_limit == 50000
@@ -330,7 +330,7 @@ async def test_tenant_billing_isolation(db_session: AsyncSession, tenant_a: Tena
 
     # Provision tenant A and tenant B
     await sub_service.create_trial_subscription(tenant_a.id)
-    await sub_service.activate_subscription(tenant_b.id, "pro")
+    await sub_service.activate_subscription(tenant_b.id, "pro", verified_payment=True)
 
     sub_a = await sub_service.get_subscription(tenant_a.id)
     sub_b = await sub_service.get_subscription(tenant_b.id)
@@ -394,7 +394,9 @@ async def test_billing_api_endpoints(client: AsyncClient, db_session: AsyncSessi
         json={"new_plan_code": "pro", "billing_cycle": "MONTHLY"},
     )
     assert res_change.status_code == 200
-    assert res_change.json()["plan_code"] == "pro"
+    assert res_change.json()["status"] == "PAYMENT_REQUIRED"
+    assert "invoice" in res_change.json()
+    assert "payment" in res_change.json()
 
     # GET /api/v1/billing/usage
     res_usage = await client.get("/api/v1/billing/usage", headers=headers)

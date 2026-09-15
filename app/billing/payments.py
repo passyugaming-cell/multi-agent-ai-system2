@@ -88,13 +88,32 @@ class PaymentService:
         self,
         tenant_id: uuid.UUID,
         invoice_id: uuid.UUID,
-        amount: Decimal,
-        currency: str = "IDR",
+        amount: Decimal | None = None,
+        currency: str | None = None,
     ) -> Payment:
         invoice = await self.invoice_service.get_invoice(tenant_id, invoice_id)
 
+        # R2-002-P1-004: Strict tenant ownership invariant
+        if invoice.tenant_id != tenant_id:
+            raise PaymentFailedError(
+                f"Tenant ID mismatch: invoice tenant '{invoice.tenant_id}' does not match request tenant '{tenant_id}'."
+            )
+
+        # R2-002-P0-003: Derive authoritative amount and currency from invoice if missing or mismatch
+        auth_amount = invoice.total
+        auth_currency = invoice.currency
+
+        if amount is not None and amount != auth_amount:
+            raise PaymentFailedError(
+                f"Payment amount mismatch: requested '{amount}' does not match authoritative invoice total '{auth_amount}'."
+            )
+        if currency is not None and currency.upper() != auth_currency.upper():
+            raise PaymentFailedError(
+                f"Payment currency mismatch: requested '{currency}' does not match authoritative invoice currency '{auth_currency}'."
+            )
+
         now = datetime.now(timezone.utc)
-        result = await self.provider.create_payment(tenant_id, invoice_id, amount, currency)
+        result = await self.provider.create_payment(tenant_id, invoice_id, auth_amount, auth_currency)
 
         if not result.success:
             raise PaymentFailedError(
@@ -106,8 +125,8 @@ class PaymentService:
         payment = Payment(
             tenant_id=tenant_id,
             invoice_id=invoice_id,
-            amount=amount,
-            currency=currency,
+            amount=auth_amount,
+            currency=auth_currency,
             status=PaymentStatus.PENDING,
             provider=provider_name,
             provider_payment_id=result.provider_payment_id,
@@ -155,6 +174,7 @@ class PaymentService:
                 plan_code=p_code,
                 billing_cycle=sub.billing_cycle,
                 actor="PAYMENT_PROVIDER",
+                verified_payment=True,
             )
 
         await self.session.flush()
@@ -215,32 +235,106 @@ class PaymentService:
         headers: dict[str, str],
         secret: str = "test_webhook_secret",
     ) -> Payment:
-        """Processes payment provider webhook idempotently."""
+        """Processes payment provider webhook idempotently, deterministically, and with atomic concurrency safety."""
         webhook_res: WebhookResult = await self.provider.handle_webhook(payload, headers, secret)
 
-        stmt = select(Payment).where(
-            and_(
-                Payment.tenant_id == webhook_res.tenant_id,
-                Payment.provider_payment_id == webhook_res.provider_payment_id,
-            )
-        )
-        payment = (await self.session.execute(stmt)).scalar_one_or_none()
-
-        if not payment:
-            provider_name = getattr(self.provider, "provider_name", None) or "unknown"
-            payment = Payment(
+        # R2-002-P0-006: Unmatched Webhook Policy
+        # Verify that referenced invoice exists and belongs to the specified tenant
+        try:
+            invoice = await self.invoice_service.get_invoice(
                 tenant_id=webhook_res.tenant_id,
                 invoice_id=webhook_res.invoice_id,
-                amount=webhook_res.amount,
-                currency="IDR",
-                status=PaymentStatus.PENDING,
-                provider=provider_name,
-                provider_payment_id=webhook_res.provider_payment_id,
-                attempted_at=datetime.now(timezone.utc),
             )
-            self.session.add(payment)
-            await self.session.flush()
+        except Exception as err:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found for tenant '{webhook_res.tenant_id}'."
+            ) from err
 
+        if invoice.tenant_id != webhook_res.tenant_id:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: invoice tenant '{invoice.tenant_id}' mismatch with webhook tenant '{webhook_res.tenant_id}'."
+            )
+
+        # Verify webhook amount matches authoritative invoice total
+        if webhook_res.amount != invoice.total:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: webhook amount '{webhook_res.amount}' does not match invoice total '{invoice.total}'."
+            )
+
+        provider_name = getattr(self.provider, "provider_name", None) or "unknown"
+
+        # R2-002-P0-005 & R2-002-P0-007: Atomic claim/lock & single state authority
+        # Query with row locking if supported by DB driver
+        try:
+            stmt = select(Payment).where(
+                and_(
+                    Payment.tenant_id == webhook_res.tenant_id,
+                    Payment.provider == provider_name,
+                    Payment.provider_payment_id == webhook_res.provider_payment_id,
+                )
+            ).with_for_update()
+            payment = (await self.session.execute(stmt)).scalar_one_or_none()
+        except Exception:
+            # Fallback for DB dialects that do not support with_for_update
+            stmt = select(Payment).where(
+                and_(
+                    Payment.tenant_id == webhook_res.tenant_id,
+                    Payment.provider == provider_name,
+                    Payment.provider_payment_id == webhook_res.provider_payment_id,
+                )
+            )
+            payment = (await self.session.execute(stmt)).scalar_one_or_none()
+
+        if not payment:
+            # Attempt to find payment by invoice_id if provider_payment_id is not yet set
+            try:
+                stmt_inv = select(Payment).where(
+                    and_(
+                        Payment.tenant_id == webhook_res.tenant_id,
+                        Payment.invoice_id == webhook_res.invoice_id,
+                        Payment.status == PaymentStatus.PENDING,
+                    )
+                ).with_for_update()
+                payment = (await self.session.execute(stmt_inv)).scalar_one_or_none()
+            except Exception:
+                stmt_inv = select(Payment).where(
+                    and_(
+                        Payment.tenant_id == webhook_res.tenant_id,
+                        Payment.invoice_id == webhook_res.invoice_id,
+                        Payment.status == PaymentStatus.PENDING,
+                    )
+                )
+                payment = (await self.session.execute(stmt_inv)).scalar_one_or_none()
+
+        if not payment:
+            try:
+                payment = Payment(
+                    tenant_id=webhook_res.tenant_id,
+                    invoice_id=webhook_res.invoice_id,
+                    amount=invoice.total,
+                    currency=invoice.currency,
+                    status=PaymentStatus.PENDING,
+                    provider=provider_name,
+                    provider_payment_id=webhook_res.provider_payment_id,
+                    attempted_at=datetime.now(timezone.utc),
+                )
+                self.session.add(payment)
+                await self.session.flush()
+            except Exception:
+                # Concurrent insertion race condition caught by DB unique constraint
+                await self.session.rollback()
+                stmt = select(Payment).where(
+                    and_(
+                        Payment.tenant_id == webhook_res.tenant_id,
+                        Payment.provider == provider_name,
+                        Payment.provider_payment_id == webhook_res.provider_payment_id,
+                    )
+                )
+                payment = (await self.session.execute(stmt)).scalar_one_or_none()
+                if not payment:
+                    raise PaymentFailedError("Concurrent webhook processing conflict could not be resolved.")
+
+        # Single State Authority route
         if webhook_res.status == "SUCCEEDED" or webhook_res.event_type == "payment.succeeded":
             return await self.confirm_payment_success(
                 tenant_id=webhook_res.tenant_id,
