@@ -17,6 +17,25 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    if not inspector.has_table("payments"):
+        return
+
+    # Preflight check: Ensure no pre-existing duplicate (tenant_id, provider, provider_payment_id) rows exist
+    dup_check = sa.text("""
+        SELECT tenant_id, provider, provider_payment_id, COUNT(*) as cnt
+        FROM payments
+        WHERE provider_payment_id IS NOT NULL AND provider_payment_id != ''
+        GROUP BY tenant_id, provider, provider_payment_id
+        HAVING COUNT(*) > 1
+    """)
+    dups = conn.execute(dup_check).fetchall()
+    if dups:
+        dup_desc = ", ".join([f"(tenant={r[0]}, provider={r[1]}, provider_payment_id={r[2]}, count={r[3]})" for r in dups])
+        raise Exception(
+            f"Deployment blocked: Duplicate payment records found before migration. Resolve duplicates before applying uq_payments_tenant_provider_payment_id: {dup_desc}."
+        )
+
     dialect_name = conn.dialect.name
     if dialect_name == "sqlite":
         with op.batch_alter_table("payments") as batch_op:
@@ -41,6 +60,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    if not inspector.has_table("payments"):
+        return
+
     dialect_name = conn.dialect.name
     if dialect_name == "sqlite":
         with op.batch_alter_table("payments") as batch_op:

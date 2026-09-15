@@ -259,6 +259,11 @@ async def test_payment_webhook_idempotency(db_session: AsyncSession, tenant_a: T
     }
     headers = {"X-Signature": "valid_test_signature"}
 
+    # First create internal Payment intent
+    pmt = await pay_service.create_payment_intent(tenant_a.id, invoice.id, Decimal("100000.00"))
+
+    webhook_payload["provider_payment_id"] = pmt.provider_payment_id
+
     # First webhook execution
     p1 = await pay_service.handle_provider_webhook(webhook_payload, headers)
     assert p1.status == PaymentStatus.SUCCEEDED

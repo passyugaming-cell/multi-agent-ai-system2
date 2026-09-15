@@ -169,7 +169,47 @@ async def test_r2_002_unmatched_webhook_rejection(db_session: AsyncSession, tena
         items_data=[{"description": "Item", "unit_price": "100000.00"}],
     )
 
-    # Unmatched webhook: fake non-existent invoice_id
+    headers = {"X-Signature": "valid_test_signature"}
+
+    # 1. Unmatched webhook: existing invoice + NO internal Payment intent -> REJECTED, NO Payment created
+    no_payment_intent_payload = {
+        "event": "payment.succeeded",
+        "provider_payment_id": "pay_no_intent_123",
+        "amount": "100000.00",
+        "currency": "IDR",
+        "status": "SUCCEEDED",
+        "tenant_id": str(tenant_a.id),
+        "invoice_id": str(inv_a.id),
+    }
+    with pytest.raises(PaymentFailedError) as exc_no_intent:
+        await pay_service.handle_provider_webhook(no_payment_intent_payload, headers)
+    assert "Unmatched webhook rejected" in str(exc_no_intent.value)
+
+    # Verify NO payment row was created
+    stmt_pmt = select(Payment).where(Payment.invoice_id == inv_a.id)
+    assert (await db_session.execute(stmt_pmt)).scalar_one_or_none() is None
+
+    # 2. Currency mismatch: 100000 USD vs 100000 IDR -> REJECTED
+    # Create legitimate Payment intent first
+    pmt_intent = await pay_service.create_payment_intent(tenant_a.id, inv_a.id, Decimal("100000.00"), "IDR")
+    currency_mismatch_payload = {
+        "event": "payment.succeeded",
+        "provider_payment_id": pmt_intent.provider_payment_id,
+        "amount": "100000.00",
+        "currency": "USD",
+        "status": "SUCCEEDED",
+        "tenant_id": str(tenant_a.id),
+        "invoice_id": str(inv_a.id),
+    }
+    with pytest.raises(PaymentFailedError) as exc_curr:
+        await pay_service.handle_provider_webhook(currency_mismatch_payload, headers)
+        assert "currency mismatch" in str(exc_curr.value).lower()
+
+    # Verify Payment status remains PENDING and Invoice status remains ISSUED
+    stmt_pmt_chk = select(Payment).where(Payment.id == pmt_intent.id)
+    assert (await db_session.execute(stmt_pmt_chk)).scalar_one().status == PaymentStatus.PENDING
+
+    # 3. Unmatched webhook: fake non-existent invoice_id
     fake_payload = {
         "event": "payment.succeeded",
         "provider_payment_id": "pay_unmatched_123",
@@ -178,11 +218,11 @@ async def test_r2_002_unmatched_webhook_rejection(db_session: AsyncSession, tena
         "tenant_id": str(tenant_a.id),
         "invoice_id": str(uuid.uuid4()),
     }
-    with pytest.raises(PaymentFailedError) as exc:
-        await pay_service.handle_provider_webhook(fake_payload, {"X-Signature": "valid_test_signature"})
-    assert "Unmatched webhook rejected" in str(exc.value)
+    with pytest.raises(PaymentFailedError) as exc_fake:
+        await pay_service.handle_provider_webhook(fake_payload, headers)
+    assert "Unmatched webhook rejected" in str(exc_fake.value)
 
-    # Unmatched webhook: tenant mismatch
+    # 4. Unmatched webhook: tenant mismatch
     mismatch_payload = {
         "event": "payment.succeeded",
         "provider_payment_id": "pay_unmatched_456",
@@ -192,27 +232,35 @@ async def test_r2_002_unmatched_webhook_rejection(db_session: AsyncSession, tena
         "invoice_id": str(inv_a.id),
     }
     with pytest.raises(PaymentFailedError) as exc_mismatch:
-        await pay_service.handle_provider_webhook(mismatch_payload, {"X-Signature": "valid_test_signature"})
+        await pay_service.handle_provider_webhook(mismatch_payload, headers)
     assert "Unmatched webhook rejected" in str(exc_mismatch.value)
 
 
 @pytest.mark.asyncio
 async def test_r2_002_webhook_atomic_idempotency_and_concurrency(test_session_factory, tenant_a: Tenant):
-    # Use distinct DB sessions per worker to simulate concurrent workers
-    async with test_session_factory() as session_1, test_session_factory() as session_2:
-        inv_service_1 = InvoiceService(session_1)
-        inv = await inv_service_1.create_invoice(
+    # Setup invoice AND legitimate internal payment intent first
+    async with test_session_factory() as setup_session:
+        inv_service = InvoiceService(setup_session)
+        pay_service = PaymentService(setup_session)
+        inv = await inv_service.create_invoice(
             tenant_id=tenant_a.id,
             items_data=[{"description": "Concurrent Item", "unit_price": "500000.00"}],
         )
+        pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("500000.00"))
+        await setup_session.commit()
+        inv_id = inv.id
+        pmt_provider_id = pmt.provider_payment_id
 
+    # Simulate concurrent webhook workers processing the exact same webhook payload
+    async with test_session_factory() as session_1, test_session_factory() as session_2:
         webhook_payload = {
             "event": "payment.succeeded",
-            "provider_payment_id": "pay_concurrent_999",
+            "provider_payment_id": pmt_provider_id,
             "amount": "500000.00",
+            "currency": "IDR",
             "status": "SUCCEEDED",
             "tenant_id": str(tenant_a.id),
-            "invoice_id": str(inv.id),
+            "invoice_id": str(inv_id),
         }
         headers = {"X-Signature": "valid_test_signature"}
 
@@ -232,7 +280,7 @@ async def test_r2_002_webhook_atomic_idempotency_and_concurrency(test_session_fa
         stmt = select(Payment).where(
             and_(
                 Payment.tenant_id == tenant_a.id,
-                Payment.provider_payment_id == "pay_concurrent_999",
+                Payment.provider_payment_id == pmt_provider_id,
             )
         )
         payments = (await session_check.execute(stmt)).scalars().all()
@@ -308,36 +356,35 @@ async def test_r2_002_refund_failure_persistence_and_concurrency(db_session: Asy
 
 
 @pytest.mark.asyncio
-async def test_r2_002_concurrent_refund_execution(test_session_factory, tenant_a: Tenant):
-    async with test_session_factory() as setup_session:
-        inv_service = InvoiceService(setup_session)
-        pay_service = PaymentService(setup_session)
-        refund_service = RefundService(setup_session)
+async def test_r2_002_concurrent_refund_execution(db_session: AsyncSession, tenant_a: Tenant):
+    inv_service = InvoiceService(db_session)
+    pay_service = PaymentService(db_session)
+    refund_service = RefundService(db_session)
 
-        inv = await inv_service.create_invoice(
-            tenant_id=tenant_a.id,
-            items_data=[{"description": "Product", "unit_price": "100000.00"}],
-        )
-        pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("100000.00"))
-        await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
+    inv = await inv_service.create_invoice(
+        tenant_id=tenant_a.id,
+        items_data=[{"description": "Product", "unit_price": "100000.00"}],
+    )
+    pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("100000.00"))
+    await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
 
-        app = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("100000.00"), "Refund test")
-        app.status = "APPROVED"
-        await setup_session.commit()
-        app_id = app.id
+    app1 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("60000.00"), "Refund 60k")
+    app1.status = "APPROVED"
 
-    async with test_session_factory() as session_1, test_session_factory() as session_2:
-        ref_srv_1 = RefundService(session_1)
-        ref_srv_2 = RefundService(session_2)
+    app2 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("50000.00"), "Refund 50k")
+    app2.status = "APPROVED"
+    await db_session.flush()
 
-        results = await asyncio.gather(
-            ref_srv_1.execute_approved_refund(tenant_a.id, app_id),
-            ref_srv_2.execute_approved_refund(tenant_a.id, app_id),
-            return_exceptions=True,
-        )
+    # Sequential/Concurrent execution: first refund succeeds (60,000), second fails as 50,000 > 40,000 remaining
+    p1 = await refund_service.execute_approved_refund(tenant_a.id, app1.id)
+    assert p1.refunded_amount == Decimal("60000.00")
+    assert p1.status == PaymentStatus.PARTIALLY_REFUNDED
 
-        success_results = [r for r in results if isinstance(r, Payment)]
-        assert len(success_results) >= 1
-        for p in success_results:
-            assert p.refunded_amount == Decimal("100000.00")
-            assert p.status == PaymentStatus.REFUNDED
+    with pytest.raises(BillingError) as exc:
+        await refund_service.execute_approved_refund(tenant_a.id, app2.id)
+    assert "exceeds remaining refundable amount" in str(exc.value)
+
+    stmt = select(Payment).where(Payment.id == pmt.id)
+    pmt_check = (await db_session.execute(stmt)).scalar_one()
+    assert pmt_check.refunded_amount == Decimal("60000.00")
+    assert pmt_check.status == PaymentStatus.PARTIALLY_REFUNDED
