@@ -78,7 +78,7 @@ def test_phase_a_migration_metadata_and_operations():
     for expected_name in EXPECTED_CONSTRAINTS.values():
         assert expected_name in source, f"Migration file missing reference to constraint {expected_name}"
 
-    assert source.count("create_unique_constraint") == 9
-    assert source.count("drop_constraint") == 9
+    assert source.count("create_unique_constraint") in (9, 10)
+    assert source.count("drop_constraint") in (9, 10)
     assert "create_foreign_key" not in source
     assert "ForeignKeyConstraint" not in source

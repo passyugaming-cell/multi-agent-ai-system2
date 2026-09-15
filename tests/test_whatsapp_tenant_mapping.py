@@ -463,11 +463,21 @@ async def test_migration_active_duplicate_prevents_both_indexes(db_session, tena
 
     assert "Deployment blocked: Pre-existing active duplicate connections found" in str(exc_info.value)
 
-    # Assert neither unique index was created
-    idx_check = text("PRAGMA index_list('integration_connections')")
-    idx_list = [r[1] for r in (await db_session.execute(idx_check)).fetchall()]
-    assert "uq_active_provider_external_account" not in idx_list
+    # Assert neither unique index was created (using dialect-specific introspection)
+    dialect_name = db_session.bind.dialect.name
+    if dialect_name == "sqlite":
+        idx_check = text("PRAGMA index_list('integration_connections')")
+        idx_list = [r[1] for r in (await db_session.execute(idx_check)).fetchall()]
+        assert "uq_active_provider_external_account" not in idx_list
 
-    idx_check_cat = text("PRAGMA index_list('integrations')")
-    idx_list_cat = [r[1] for r in (await db_session.execute(idx_check_cat)).fetchall()]
-    assert "uq_catalog_integrations_provider" not in idx_list_cat
+        idx_check_cat = text("PRAGMA index_list('integrations')")
+        idx_list_cat = [r[1] for r in (await db_session.execute(idx_check_cat)).fetchall()]
+        assert "uq_catalog_integrations_provider" not in idx_list_cat
+    else:
+        idx_check = text("SELECT indexname FROM pg_indexes WHERE tablename = 'integration_connections'")
+        idx_list = [r[0] for r in (await db_session.execute(idx_check)).fetchall()]
+        assert "uq_active_provider_external_account" not in idx_list
+
+        idx_check_cat = text("SELECT indexname FROM pg_indexes WHERE tablename = 'integrations'")
+        idx_list_cat = [r[0] for r in (await db_session.execute(idx_check_cat)).fetchall()]
+        assert "uq_catalog_integrations_provider" not in idx_list_cat

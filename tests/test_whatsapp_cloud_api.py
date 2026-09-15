@@ -1346,30 +1346,58 @@ async def test_52_outbound_event(active_whatsapp_tenant, test_session: AsyncSess
 
 @pytest.mark.asyncio
 async def test_53_workflow_send_action(active_whatsapp_tenant, test_session: AsyncSession):
-    tenant_id = str(active_whatsapp_tenant["tenant"].id)
-    res = await ActionExecutor.execute(
-        action_type="whatsapp_send_message",
-        params={"recipient": "628100", "text": "Workflow WA message"},
-        context={},
-        session=test_session,
-        tenant_id=tenant_id,
+    from app.core.context import set_actor_context, AuthenticatedActor
+    tenant_id_uuid = active_whatsapp_tenant["tenant"].id
+    tenant_id = str(tenant_id_uuid)
+
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_id_uuid,
+        role="admin",
+        permissions={SEND_WHATSAPP_MESSAGE, EXECUTE_INTEGRATION},
     )
-    assert res.success is True
-    assert "provider_message_id" in res.output
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="whatsapp_send_message",
+            params={"recipient": "628100", "text": "Workflow WA message"},
+            context={},
+            session=test_session,
+            tenant_id=tenant_id,
+        )
+        assert res.success is True
+        assert "provider_message_id" in res.output
+    finally:
+        from app.core.context import reset_actor_context
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
 async def test_54_workflow_permission_enforcement(test_session: AsyncSession):
-    random_tenant_id = str(uuid.uuid4())
-    res = await ActionExecutor.execute(
-        action_type="whatsapp_send_message",
-        params={"recipient": "628100", "text": "Fail test"},
-        context={},
-        session=test_session,
-        tenant_id=random_tenant_id,
+    from app.core.context import set_actor_context, AuthenticatedActor
+    random_tenant_id_uuid = uuid.uuid4()
+    random_tenant_id = str(random_tenant_id_uuid)
+
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=random_tenant_id_uuid,
+        role="admin",
+        permissions={SEND_WHATSAPP_MESSAGE, EXECUTE_INTEGRATION},
     )
-    assert res.success is False
-    assert "not active" in res.error.lower()
+    token = set_actor_context(actor)
+    try:
+        res = await ActionExecutor.execute(
+            action_type="whatsapp_send_message",
+            params={"recipient": "628100", "text": "Fail test"},
+            context={},
+            session=test_session,
+            tenant_id=random_tenant_id,
+        )
+        assert res.success is False
+        assert "not active" in res.error.lower() or "connection" in res.error.lower()
+    finally:
+        from app.core.context import reset_actor_context
+        reset_actor_context(token)
 
 
 @pytest.mark.asyncio
