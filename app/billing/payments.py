@@ -58,9 +58,14 @@ class PaymentService:
             self.provider = get_default_payment_provider()
         else:
             from app.core.config import settings
+            p_name = getattr(provider, "provider_name", None)
+            if not p_name or not isinstance(p_name, str) or not p_name.strip():
+                raise PaymentConfigurationError(
+                    "PaymentProvider passed to PaymentService must have a valid non-empty 'provider_name' attribute."
+                )
+            p_name_clean = p_name.strip().lower()
             env = (settings.APP_ENV or "").lower()
-            p_name = getattr(provider, "provider_name", None) or "unknown"
-            if env in ("production", "staging") and p_name == "fake":
+            if env in ("production", "staging") and p_name_clean == "fake":
                 raise PaymentConfigurationError(
                     "FakePaymentProvider cannot be used in production or staging environment."
                 )

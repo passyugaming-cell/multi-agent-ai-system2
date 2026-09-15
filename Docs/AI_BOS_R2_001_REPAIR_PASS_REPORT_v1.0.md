@@ -56,7 +56,8 @@ Command: `poetry run pytest tests/test_r2_001_payment_provider.py -v`
 | `test_07_provider_failure_fails_closed` | Requirement 7: Provider failure fails closed -> `result.success == False` raises `PaymentFailedError`. | **PASSED** |
 | `test_08_existing_payment_tests_pass` | Requirement 8: Executes end-to-end payment intent, verification, and refund using `MidtransPaymentProvider`. | **PASSED** |
 | `test_09_existing_billing_regression_passes` | Requirement 9: Executes plan seeding, trial creation, plan upgrade, invoice issuance, payment intent, and payment confirmation. | **PASSED** |
-| `test_10_missing_provider_name_never_persists_fake` | Requirement 10: Missing/un-attributed `provider_name` defaults to `"unknown"` (NEVER `"fake"`), and invalid `APP_ENV` fails closed. | **PASSED** |
+| `test_10_invalid_provider_name_explicit_provider_rejected` | Requirement 10: Explicitly passed provider with missing/None/empty/whitespace `provider_name` is rejected with `PaymentConfigurationError`. | **PASSED** |
+| `test_11_unknown_app_env_fails_closed` | Requirement 11: Unknown or typo `APP_ENV` fails closed with `PaymentConfigurationError`. | **PASSED** |
 
 ---
 
@@ -114,7 +115,7 @@ Command: `poetry run pytest tests/test_r2_001_payment_provider.py -v`
 3. **`PAYMENT_PROVIDER=midtrans` without valid key:** Rejection at startup via `Settings` model validator (`ValidationError: MIDTRANS_SERVER_KEY must be explicitly configured`) AND at runtime in `get_default_payment_provider()` (`PaymentConfigurationError`).
 4. **Valid Midtrans configuration:** Successfully instantiates `MidtransPaymentProvider`, storing `provider="midtrans"` on created payment records.
 5. **Explicit `FakePaymentProvider` in test/development:** Allowed when `APP_ENV` is `"development"` or `"testing"`.
-6. **Provider Name Attribute Fallback Safety:** Fallback default in `getattr(self.provider, "provider_name", None) or "unknown"` returns `"unknown"`, NEVER `"fake"`.
+6. **Explicit Provider Name Validation:** Explicitly passed provider with missing/None/empty/whitespace `provider_name` is rejected with `PaymentConfigurationError("PaymentProvider passed to PaymentService must have a valid non-empty 'provider_name' attribute.")`.
 7. **Unknown/Typo `APP_ENV`:** Handled explicitly in `get_default_payment_provider()`, raising `PaymentConfigurationError("Invalid or unknown application environment")`.
 
 ---

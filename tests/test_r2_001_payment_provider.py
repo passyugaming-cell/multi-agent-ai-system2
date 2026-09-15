@@ -331,10 +331,12 @@ async def test_09_existing_billing_regression_passes(db_session: AsyncSession, t
 
 
 @pytest.mark.asyncio
-async def test_10_missing_provider_name_never_persists_fake(db_session: AsyncSession, tenant_a: Tenant, monkeypatch):
-    """REQUIREMENT 10: Missing/un-attributed provider_name defaults to 'unknown', NEVER 'fake', and unknown APP_ENV fails closed."""
-    # A. Custom provider lacking provider_name attribute
-    class CustomUntypedProvider(PaymentProvider):
+@pytest.mark.parametrize("invalid_name", [None, "", "   "])
+async def test_10_invalid_provider_name_explicit_provider_rejected(db_session: AsyncSession, tenant_a: Tenant, invalid_name):
+    """REQUIREMENT 10: Explicitly passed provider with missing/None/empty/whitespace provider_name is rejected with PaymentConfigurationError."""
+    class CustomInvalidProvider(PaymentProvider):
+        provider_name = invalid_name
+
         async def create_payment(self, tenant_id, invoice_id, amount, currency="IDR", metadata=None):
             return PaymentResult(success=True, provider_payment_id="custom_123", status="PENDING")
 
@@ -354,21 +356,17 @@ async def test_10_missing_provider_name_never_persists_fake(db_session: AsyncSes
                 invoice_id=uuid.uuid4(),
             )
 
-    untyped_provider = CustomUntypedProvider()
-    untyped_provider.provider_name = None
+    invalid_provider = CustomInvalidProvider()
 
-    pay_service = PaymentService(db_session, provider=untyped_provider)
-    inv_service = InvoiceService(db_session)
-    invoice = await inv_service.create_invoice(
-        tenant_id=tenant_a.id,
-        items_data=[{"description": "Custom Item", "unit_price": "1000.00", "quantity": 1}],
-    )
+    with pytest.raises(PaymentConfigurationError) as exc_info:
+        PaymentService(db_session, provider=invalid_provider)
 
-    payment = await pay_service.create_payment_intent(tenant_a.id, invoice.id, Decimal("1000.00"))
-    assert payment.provider == "unknown"
-    assert payment.provider != "fake"
+    assert "must have a valid non-empty 'provider_name'" in str(exc_info.value)
 
-    # B. Unknown / typo APP_ENV fails closed
+
+@pytest.mark.asyncio
+async def test_11_unknown_app_env_fails_closed(monkeypatch, db_session: AsyncSession):
+    """REQUIREMENT 11: Unknown or typo APP_ENV fails closed."""
     typo_settings = Settings(
         _env_file=None,
         APP_ENV="development",
