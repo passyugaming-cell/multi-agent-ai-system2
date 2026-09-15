@@ -61,6 +61,21 @@ def test_production_mock_google_oauth_fails():
     assert "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be explicitly configured" in str(excinfo.value)
 
 
+def test_production_fake_payment_provider_fails():
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            _env_file=None,
+            APP_ENV="production",
+            JWT_SECRET="a_prod_jwt_secret_32_characters_long_value!",
+            ENCRYPTION_KEY="a_prod_encryption_key_32_bytes_long_value!",
+            DATABASE_URL="postgresql+asyncpg://prod_user:prod_pass@prod-db:5432/prod_db",
+            GOOGLE_CLIENT_ID="real_google_client_id.apps.googleusercontent.com",
+            GOOGLE_CLIENT_SECRET="real_google_client_secret",
+            PAYMENT_PROVIDER="fake",
+        )
+    assert "PAYMENT_PROVIDER cannot be 'fake'" in str(excinfo.value)
+
+
 def test_production_valid_config_succeeds():
     s = Settings(
         _env_file=None,
@@ -70,8 +85,11 @@ def test_production_valid_config_succeeds():
         DATABASE_URL="postgresql+asyncpg://prod_user:prod_pass@prod-db:5432/prod_db",
         GOOGLE_CLIENT_ID="real_google_client_id.apps.googleusercontent.com",
         GOOGLE_CLIENT_SECRET="real_google_client_secret",
+        PAYMENT_PROVIDER="midtrans",
+        MIDTRANS_SERVER_KEY="Mid-server-key-real-123456",
     )
     assert s.APP_ENV == "production"
+    assert s.PAYMENT_PROVIDER == "midtrans"
 
 
 def test_credential_vault_rejects_fallback_key_in_production(monkeypatch):

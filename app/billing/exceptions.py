@@ -96,3 +96,12 @@ class WebhookVerificationError(BillingError):
             code="WEBHOOK_VERIFICATION_FAILED",
             status_code=401,
         )
+
+
+class PaymentConfigurationError(BillingError):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message=message,
+            code="PAYMENT_CONFIGURATION_ERROR",
+            status_code=500,
+        )

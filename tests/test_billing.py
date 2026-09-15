@@ -29,6 +29,23 @@ from app.agents.owner_ai.tools import tool_get_billing_summary
 from app.agents.base.schemas import ToolRequest
 
 
+@pytest.fixture(autouse=True)
+def mock_redis_revocation(monkeypatch):
+    revoked_jtis = set()
+
+    async def mock_is_revoked(jti: str) -> bool:
+        return jti in revoked_jtis
+
+    async def mock_revoke(jti: str, exp_timestamp: int | None = None, ttl: int = 86400):
+        revoked_jtis.add(jti)
+
+    import app.core.auth_service as auth_srv
+    import app.api.v1.auth as auth_api
+    monkeypatch.setattr(auth_srv, "is_token_revoked_redis", mock_is_revoked)
+    monkeypatch.setattr(auth_srv, "revoke_token_redis", mock_revoke)
+    monkeypatch.setattr(auth_api, "revoke_token_redis", mock_revoke)
+
+
 @pytest.mark.asyncio
 async def test_plan_seeding_and_pricing(db_session: AsyncSession):
     plan_service = PlanService(db_session)
@@ -334,11 +351,30 @@ async def test_tenant_billing_isolation(db_session: AsyncSession, tenant_a: Tena
 
 @pytest.mark.asyncio
 async def test_billing_api_endpoints(client: AsyncClient, db_session: AsyncSession, tenant_a: Tenant):
+    from app.database.models.user import User
+    from app.core.auth_service import hash_password, create_access_token
+
+    owner = User(
+        id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        email=f"billing_owner_{uuid.uuid4().hex[:6]}@example.com",
+        password_hash=hash_password("Owner123!"),
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(owner)
     sub_service = SubscriptionService(db_session)
     await sub_service.create_trial_subscription(tenant_a.id)
     await db_session.commit()
 
-    headers = {"X-Tenant-ID": str(tenant_a.id)}
+    token = create_access_token(
+        data={"sub": owner.email, "user_id": str(owner.id), "tenant_ids": [str(tenant_a.id)], "active_tenant_id": str(tenant_a.id)}
+    )
+
+    headers = {
+        "X-Tenant-ID": str(tenant_a.id),
+        "Authorization": f"Bearer {token}",
+    }
 
     # GET /api/v1/billing/plans
     res_plans = await client.get("/api/v1/billing/plans", headers=headers)

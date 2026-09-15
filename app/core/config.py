@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = "mock_google_client_id.apps.googleusercontent.com"
     GOOGLE_CLIENT_SECRET: str = "mock_google_client_secret"
 
+    # Payment Provider Configuration
+    PAYMENT_PROVIDER: str = "fake"
+    MIDTRANS_SERVER_KEY: str = ""
+    MIDTRANS_IS_SANDBOX: bool = True
+
     # Phase 2 Event Bus & Workflow Configuration
     EVENT_BUS_BACKEND: Literal["in_memory", "redis"] = "in_memory"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -57,6 +62,11 @@ class Settings(BaseSettings):
                 raise ValueError("DATABASE_URL must be explicitly configured for production/staging (cannot use default development database)")
             if "mock_google" in self.GOOGLE_CLIENT_ID or "mock_google" in self.GOOGLE_CLIENT_SECRET:
                 raise ValueError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be explicitly configured in production/staging")
+            if not self.PAYMENT_PROVIDER or self.PAYMENT_PROVIDER.lower() == "fake":
+                raise ValueError("PAYMENT_PROVIDER cannot be 'fake' or empty in production/staging environments")
+            if self.PAYMENT_PROVIDER.lower() == "midtrans":
+                if not self.MIDTRANS_SERVER_KEY or "mock" in self.MIDTRANS_SERVER_KEY.lower():
+                    raise ValueError("MIDTRANS_SERVER_KEY must be explicitly configured when PAYMENT_PROVIDER is 'midtrans' in production/staging")
         return self
 
 
