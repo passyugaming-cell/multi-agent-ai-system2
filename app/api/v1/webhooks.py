@@ -567,7 +567,16 @@ async def _process_whatsapp_webhook_body(
                         )
 
                     send_result_id = None
-                    if sender_phone and not conversation.human_handoff:
+                    # Re-read fresh conversation state directly from DB before outbound send to prevent race conditions
+                    fresh_conv = await conv_repo.get_by_id(tenant_id, conversation.id) if conversation.id else conversation
+                    active_conv = fresh_conv or conversation
+
+                    if (
+                        sender_phone
+                        and not active_conv.human_handoff
+                        and active_conv.status not in ("WAITING_HUMAN", "HUMAN_HANDLING", "HUMAN_ACTIVE", "CLOSED")
+                        and not route_result.handsoff_to_human
+                    ):
                         try:
                             send_res = await service.execute_operation(
                                 tenant_id=tenant_id,
@@ -584,6 +593,12 @@ async def _process_whatsapp_webhook_body(
                                 ) or send_res.get("message_id")
                         except Exception as send_err:
                             logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+                    else:
+                        logger.info(
+                            "Outbound customer message suppressed for conversation %s due to human ownership / status %s",
+                            conversation.id,
+                            active_conv.status,
+                        )
 
                     outbound_db_msg = await msg_repo.create(
                         tenant_id=tenant_id,
