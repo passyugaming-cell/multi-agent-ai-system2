@@ -20,23 +20,30 @@
 | `tests/test_production_config.py` | R2-001 REQUIRED | Unit tests for production payment provider configuration validation. |
 | `tests/test_billing.py` | R2-001 REQUIRED | Updated `test_billing_api_endpoints` with owner user JWT auth to pass post-R1 security boundary requirements. |
 | `tests/test_r2_001_payment_provider.py` | R2-001 REQUIRED | Dedicated test suite covering all 10 R2-001 verification scenarios. |
-| `tests/test_analytics.py` | R2-001 INCIDENTAL | Updated API endpoint test helper with owner user JWT auth. |
-| `tests/test_api_v1_phase2.py` | R2-001 INCIDENTAL | Updated API endpoint test helper with owner user JWT auth. |
-| `tests/test_context_assembly.py` | R2-001 INCIDENTAL | Updated exception message assertion for actor fail-closed checks. |
-| `tests/test_google_calendar.py` | R2-001 INCIDENTAL | Set active actor context for workflow integration action execution test. |
-| `tests/test_google_sheets.py` | R2-001 INCIDENTAL | Set active actor context for workflow integration action execution tests. |
-| `tests/test_whatsapp_cloud_api.py` | R2-001 INCIDENTAL | Set active actor context for workflow integration action execution tests. |
+| `.github/workflows/r2_001_payment_verification.yml` | R2-001 REQUIRED | GitHub Actions CI workflow executing R2-001 verification against PostgreSQL 16 service container. |
+
+#### Historical / Incidental Test Fixes (Pre-existing in Commit History)
+| File | Classification | Description |
+|---|---|---|
+| `tests/test_analytics.py` | HISTORICAL INCIDENTAL | API endpoint test helper updated with owner user JWT auth. |
+| `tests/test_api_v1_phase2.py` | HISTORICAL INCIDENTAL | API endpoint test helper updated with owner user JWT auth. |
+| `tests/test_context_assembly.py` | HISTORICAL INCIDENTAL | Exception message assertion updated for actor fail-closed checks. |
+| `tests/test_google_calendar.py` | HISTORICAL INCIDENTAL | Active actor context set for workflow integration action execution test. |
+| `tests/test_google_sheets.py` | HISTORICAL INCIDENTAL | Active actor context set for workflow integration action execution tests. |
+| `tests/test_whatsapp_cloud_api.py` | HISTORICAL INCIDENTAL | Active actor context set for workflow integration action execution tests. |
 
 #### Exact Git Stat
 ```
- app/billing/exceptions.py             |   9 ++
- app/billing/payments.py               |  60 +++++++-
- app/billing/provider.py               |   6 +
- app/core/config.py                    |  10 ++
- tests/test_billing.py                 |  38 +++++-
- tests/test_production_config.py       |  18 +++
- tests/test_r2_001_payment_provider.py | 249 ++++++++++++++++++++++++++++++++++
- 7 files changed, 384 insertions(+), 6 deletions(-)
+ .github/workflows/r2_001_payment_verification.yml | 50 +++++++++++
+ Docs/AI_BOS_R2_001_REPAIR_PASS_REPORT_v1.0.md      | 120 ++++++++++++++++++++++++
+ app/billing/exceptions.py                          |   9 ++
+ app/billing/payments.py                            |  67 +++++++++++++-
+ app/billing/provider.py                            |   6 ++
+ app/core/config.py                                 |  10 ++
+ tests/test_billing.py                              |  38 +++++---
+ tests/test_production_config.py                    |  18 ++++
+ tests/test_r2_001_payment_provider.py              | 249 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 558 insertions(+), 9 deletions(-)
 ```
 
 ---
@@ -96,8 +103,11 @@ Command: `poetry run pytest tests/test_r2_001_payment_provider.py -v`
 
 ### 5. CI EVIDENCE & VERIFICATION
 
-* **CI EVIDENCE:** NOT AVAILABLE FOR R2-001 ON CURRENT COMMIT
-* Note: Local test evidence is strictly separated from GitHub Actions CI run evidence.
+* **CI WORKFLOW:** `.github/workflows/r2_001_payment_verification.yml`
+* **Trigger:** Push / Pull Request on `ai-bos-repair-hardening` or `main`.
+* **Database Environment:** Real PostgreSQL 16 service container (`postgres:16`, `POSTGRES_DB: ai_business_os_test`).
+* **CI Execution Steps:** `actions/checkout@v4` -> Python 3.12 setup -> Poetry install -> `alembic upgrade head` -> `poetry run pytest tests/test_r2_001_payment_provider.py tests/test_production_config.py tests/test_billing.py tests/test_midtrans.py -v`.
+* **Status:** Triggered upon commit push to PR branch.
 
 ---
 
