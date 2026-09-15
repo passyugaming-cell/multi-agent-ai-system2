@@ -308,7 +308,7 @@ async def test_09_existing_billing_regression_passes(db_session: AsyncSession, t
     sub = await sub_service.create_trial_subscription(tenant_a.id)
     assert sub.status == SubscriptionStatus.TRIALING
 
-    sub_active = await sub_service.activate_subscription(tenant_a.id, "pro")
+    sub_active = await sub_service.activate_subscription(tenant_a.id, "pro", verified_payment=True)
     assert sub_active.status == SubscriptionStatus.ACTIVE
 
     inv_service = InvoiceService(db_session)

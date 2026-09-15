@@ -107,6 +107,7 @@ class SubscriptionService:
         plan_code: str,
         billing_cycle: str = "MONTHLY",
         actor: str = "SYSTEM",
+        verified_payment: bool = False,
     ) -> Subscription:
         sub = await self.get_subscription_or_none(tenant_id)
         try:
@@ -115,10 +116,20 @@ class SubscriptionService:
             await self.plan_service.seed_plans()
             plan = await self.plan_service.get_plan_by_code(plan_code)
 
+        billed_amount = calculate_billed_amount(plan.price_monthly, billing_cycle)
+
+        # R2-002-P0-001: Paid plan activation requires verified payment
+        if billed_amount > 0 and not verified_payment:
+            from app.billing.exceptions import BillingError
+            raise BillingError(
+                f"Cannot activate paid plan '{plan_code}' ({billed_amount} {plan.currency}) without verified payment.",
+                code="PAYMENT_VERIFICATION_REQUIRED",
+                status_code=402,
+            )
+
         now = datetime.now(timezone.utc)
         period_days = 365 if billing_cycle.upper() == "YEARLY" else 30
         period_end = now + timedelta(days=period_days)
-        billed_amount = calculate_billed_amount(plan.price_monthly, billing_cycle)
 
         if not sub:
             sub = Subscription(
@@ -195,6 +206,7 @@ class SubscriptionService:
         new_plan_code: str,
         billing_cycle: str | None = None,
         actor: str = "USER",
+        verified_payment: bool = False,
     ) -> Subscription:
         sub = await self.get_subscription(tenant_id)
         try:
@@ -205,6 +217,15 @@ class SubscriptionService:
 
         cycle = billing_cycle.upper() if billing_cycle else sub.billing_cycle
         billed_amount = calculate_billed_amount(new_plan.price_monthly, cycle)
+
+        # R2-002-P0-002: Paid plan change requires verified payment
+        if billed_amount > 0 and not verified_payment:
+            from app.billing.exceptions import BillingError
+            raise BillingError(
+                f"Cannot change plan to paid plan '{new_plan_code}' ({billed_amount} {new_plan.currency}) without verified payment.",
+                code="PAYMENT_VERIFICATION_REQUIRED",
+                status_code=402,
+            )
 
         prev_plan_id = sub.plan_id
         prev_status = sub.status

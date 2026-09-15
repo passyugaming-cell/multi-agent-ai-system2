@@ -249,6 +249,7 @@ class Payment(BaseModel):
         index=True,
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    refunded_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0.00"), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="IDR", nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(100), default="fake", nullable=False)
@@ -261,6 +262,7 @@ class Payment(BaseModel):
 
     __table_args__ = (
         Index("idx_payments_tenant_status", "tenant_id", "status"),
+        UniqueConstraint("tenant_id", "provider", "provider_payment_id", name="uq_payments_tenant_provider_payment_id"),
     )
 
 

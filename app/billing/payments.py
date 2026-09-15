@@ -88,13 +88,32 @@ class PaymentService:
         self,
         tenant_id: uuid.UUID,
         invoice_id: uuid.UUID,
-        amount: Decimal,
-        currency: str = "IDR",
+        amount: Decimal | None = None,
+        currency: str | None = None,
     ) -> Payment:
         invoice = await self.invoice_service.get_invoice(tenant_id, invoice_id)
 
+        # R2-002-P1-004: Strict tenant ownership invariant
+        if invoice.tenant_id != tenant_id:
+            raise PaymentFailedError(
+                f"Tenant ID mismatch: invoice tenant '{invoice.tenant_id}' does not match request tenant '{tenant_id}'."
+            )
+
+        # R2-002-P0-003: Derive authoritative amount and currency from invoice if missing or mismatch
+        auth_amount = invoice.total
+        auth_currency = invoice.currency
+
+        if amount is not None and amount != auth_amount:
+            raise PaymentFailedError(
+                f"Payment amount mismatch: requested '{amount}' does not match authoritative invoice total '{auth_amount}'."
+            )
+        if currency is not None and currency.upper() != auth_currency.upper():
+            raise PaymentFailedError(
+                f"Payment currency mismatch: requested '{currency}' does not match authoritative invoice currency '{auth_currency}'."
+            )
+
         now = datetime.now(timezone.utc)
-        result = await self.provider.create_payment(tenant_id, invoice_id, amount, currency)
+        result = await self.provider.create_payment(tenant_id, invoice_id, auth_amount, auth_currency)
 
         if not result.success:
             raise PaymentFailedError(
@@ -106,8 +125,8 @@ class PaymentService:
         payment = Payment(
             tenant_id=tenant_id,
             invoice_id=invoice_id,
-            amount=amount,
-            currency=currency,
+            amount=auth_amount,
+            currency=auth_currency,
             status=PaymentStatus.PENDING,
             provider=provider_name,
             provider_payment_id=result.provider_payment_id,
@@ -155,6 +174,7 @@ class PaymentService:
                 plan_code=p_code,
                 billing_cycle=sub.billing_cycle,
                 actor="PAYMENT_PROVIDER",
+                verified_payment=True,
             )
 
         await self.session.flush()
@@ -215,32 +235,69 @@ class PaymentService:
         headers: dict[str, str],
         secret: str = "test_webhook_secret",
     ) -> Payment:
-        """Processes payment provider webhook idempotently."""
+        """Processes payment provider webhook idempotently, deterministically, and with atomic concurrency safety."""
         webhook_res: WebhookResult = await self.provider.handle_webhook(payload, headers, secret)
 
+        # R2-002-P0-006: Unmatched Webhook Policy
+        # Verify that referenced invoice exists and belongs to the specified tenant.
+        # Catch ONLY InvoiceNotFoundError so DB/connection errors propagate directly as infrastructure failures.
+        from app.billing.exceptions import InvoiceNotFoundError
+        try:
+            invoice = await self.invoice_service.get_invoice(
+                tenant_id=webhook_res.tenant_id,
+                invoice_id=webhook_res.invoice_id,
+            )
+        except InvoiceNotFoundError as err:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found for tenant '{webhook_res.tenant_id}'."
+            ) from err
+
+        if invoice.tenant_id != webhook_res.tenant_id:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: invoice tenant '{invoice.tenant_id}' mismatch with webhook tenant '{webhook_res.tenant_id}'."
+            )
+
+        # R2-002 FOLLOW-UP: Verify webhook amount AND currency match authoritative invoice total and currency
+        if webhook_res.amount != invoice.total:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: webhook amount '{webhook_res.amount}' does not match invoice total '{invoice.total}'."
+            )
+        if (webhook_res.currency or "").upper() != invoice.currency.upper():
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: currency mismatch. Webhook currency '{webhook_res.currency}' does not match invoice currency '{invoice.currency}'."
+            )
+
+        provider_name = getattr(self.provider, "provider_name", None) or "unknown"
+
+        # R2-002 FOLLOW-UP: Lock and resolve legitimate internal Payment intent.
+        # DO NOT blindly create a Payment if no internal intent exists!
         stmt = select(Payment).where(
             and_(
                 Payment.tenant_id == webhook_res.tenant_id,
+                Payment.provider == provider_name,
                 Payment.provider_payment_id == webhook_res.provider_payment_id,
             )
-        )
+        ).with_for_update()
         payment = (await self.session.execute(stmt)).scalar_one_or_none()
 
         if not payment:
-            provider_name = getattr(self.provider, "provider_name", None) or "unknown"
-            payment = Payment(
-                tenant_id=webhook_res.tenant_id,
-                invoice_id=webhook_res.invoice_id,
-                amount=webhook_res.amount,
-                currency="IDR",
-                status=PaymentStatus.PENDING,
-                provider=provider_name,
-                provider_payment_id=webhook_res.provider_payment_id,
-                attempted_at=datetime.now(timezone.utc),
-            )
-            self.session.add(payment)
-            await self.session.flush()
+            # Attempt to find payment by invoice_id if provider_payment_id was not populated during creation
+            stmt_inv = select(Payment).where(
+                and_(
+                    Payment.tenant_id == webhook_res.tenant_id,
+                    Payment.invoice_id == webhook_res.invoice_id,
+                    Payment.status == PaymentStatus.PENDING,
+                )
+            ).with_for_update()
+            payment = (await self.session.execute(stmt_inv)).scalar_one_or_none()
 
+        # R2-002-P0-006 REPAIR: If no legitimate internal Payment record exists, REJECT!
+        if not payment:
+            raise PaymentFailedError(
+                f"Unmatched webhook rejected: no matching internal payment intent found for invoice '{webhook_res.invoice_id}' and provider payment ID '{webhook_res.provider_payment_id}'."
+            )
+
+        # Single State Authority route
         if webhook_res.status == "SUCCEEDED" or webhook_res.event_type == "payment.succeeded":
             return await self.confirm_payment_success(
                 tenant_id=webhook_res.tenant_id,

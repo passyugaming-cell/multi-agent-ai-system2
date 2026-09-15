@@ -32,6 +32,7 @@ class WebhookResult:
     status: str
     tenant_id: uuid.UUID
     invoice_id: uuid.UUID
+    currency: str = "IDR"
 
 
 class PaymentProvider(ABC):
@@ -170,6 +171,7 @@ class MidtransPaymentProvider(PaymentProvider):
         tenant_id = uuid.UUID(payload.get("tenant_id")) if "tenant_id" in payload else uuid.UUID(int=0)
         invoice_id = uuid.UUID(order_id) if order_id else uuid.UUID(int=0)
 
+        currency = str(payload.get("currency", "IDR"))
         return WebhookResult(
             event_type=f"payment.{norm_status.lower()}",
             provider_payment_id=payload.get("transaction_id") or str(order_id),
@@ -177,6 +179,7 @@ class MidtransPaymentProvider(PaymentProvider):
             status=norm_status,
             tenant_id=tenant_id,
             invoice_id=invoice_id,
+            currency=currency,
         )
 
 
@@ -247,6 +250,7 @@ class FakePaymentProvider(PaymentProvider):
         invoice_id = uuid.UUID(payload["invoice_id"])
         status = payload.get("status", "SUCCEEDED")
 
+        currency = str(payload.get("currency", "IDR"))
         return WebhookResult(
             event_type=event_type,
             provider_payment_id=payment_id,
@@ -254,4 +258,5 @@ class FakePaymentProvider(PaymentProvider):
             status=status,
             tenant_id=tenant_id,
             invoice_id=invoice_id,
+            currency=currency,
         )
