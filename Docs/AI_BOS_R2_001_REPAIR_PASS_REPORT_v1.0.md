@@ -41,7 +41,7 @@
 
 ---
 
-### 2. TARGETED R2-001 TEST RESULTS (10/10 PASS)
+### 2. LOCAL TEST EVIDENCE — TARGETED R2-001 TEST RESULTS (11/11 PASS)
 
 Command: `poetry run pytest tests/test_r2_001_payment_provider.py -v`
 
@@ -96,8 +96,8 @@ Command: `poetry run pytest tests/test_r2_001_payment_provider.py -v`
 
 ### 5. CI EVIDENCE & VERIFICATION
 
-* Dedicated GitHub Actions PostgreSQL 16 CI workflow executing `alembic upgrade head` and pytest against PostgreSQL 16 service container.
-* All environment variable configurations validated via `Pydantic` `Settings` in `app/core/config.py`.
+* **CI EVIDENCE:** NOT AVAILABLE FOR R2-001 ON CURRENT COMMIT
+* Note: Local test evidence is strictly separated from GitHub Actions CI run evidence.
 
 ---
 
