@@ -1,0 +1,70 @@
+name: R1 Security & Tenant Authorization Verification
+
+on:
+  push:
+    branches: [ ai-bos-repair-hardening, main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  r1-postgres16-security-verification:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: ai_business_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U user -d ai_business_os_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-root
+
+      - name: Install extra test packages
+        run: |
+          poetry run pip install pytest pytest-asyncio httpx "pydantic[email]" google-genai redis PyJWT cryptography aiosqlite email-validator
+
+      - name: Execute Alembic Migration Chain (Fresh Upgrade to Head)
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run alembic upgrade head
+
+      - name: Run Complete Task R1 Security & Tenant Authorization Test Suite
+        env:
+          DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+          TEST_DATABASE_URL: postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test
+        run: |
+          poetry run pytest \
+            tests/test_r1_real_jwt_security.py \
+            tests/test_r1_workflow_privilege_escalation.py \
+            tests/test_auth_api.py \
+            tests/test_tenant_isolation_phase1.py \
+            tests/test_approvals_and_tasks.py \
+            tests/test_action_risk_authority.py \
+            tests/test_owner_ai_security_boundary.py \
+            tests/test_phase6_integrations.py \
+            tests/test_integrity_error_classification.py \
+            -v

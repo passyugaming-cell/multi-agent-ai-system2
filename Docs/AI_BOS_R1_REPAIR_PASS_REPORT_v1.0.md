@@ -202,32 +202,30 @@ Verified in `tests/test_r1_workflow_privilege_escalation.py`:
 
 ---
 
-## 7. TEST EXECUTION EVIDENCE
+## 7. TEST EXECUTION EVIDENCE & POSTGRESQL 16 CI
 
+### 7.1 PostgreSQL 16 CI Workflow
+Dedicated GitHub Actions workflow `.github/workflows/r1_security_verification.yml` executes against a PostgreSQL 16 service container (`postgres:16`, `POSTGRES_DB: ai_business_os_test`), runs `alembic upgrade head`, and verifies the complete 90-test R1 security regression suite.
+
+### 7.2 Test Session Results
 All security, authorization, tenant isolation, and workflow privilege escalation test suites passed successfully:
 
 ```text
 ============================= test session starts ==============================
 platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
-collected 59 items
+collected 90 items
 
-tests/test_r1_real_jwt_security.py ......                                [ 10%]
-tests/test_r1_workflow_privilege_escalation.py .......                   [ 22%]
-tests/test_auth_api.py ...........                                       [ 40%]
-tests/test_tenant_isolation_phase1.py .....                              [ 49%]
-tests/test_approvals_and_tasks.py .......                                [ 61%]
-tests/test_action_risk_authority.py ...............                      [ 86%]
-tests/test_owner_ai_security_boundary.py ........                        [100%]
-
-============================= 59 passed in 48.20s ==============================
-```
-
-Integration and error classification tests:
-```text
-tests/test_phase6_integrations.py ...........                            [ 35%]
+tests/test_r1_real_jwt_security.py ......                                [  6%]
+tests/test_r1_workflow_privilege_escalation.py .......                   [ 14%]
+tests/test_auth_api.py ...........                                       [ 26%]
+tests/test_tenant_isolation_phase1.py .....                              [ 32%]
+tests/test_approvals_and_tasks.py .......                                [ 40%]
+tests/test_action_risk_authority.py ...............                      [ 56%]
+tests/test_owner_ai_security_boundary.py ........                        [ 65%]
+tests/test_phase6_integrations.py ...........                            [ 77%]
 tests/test_integrity_error_classification.py ....................        [100%]
 
-============================= 31 passed in 28.16s ==============================
+======================== 90 passed in 77.77s (0:01:17) =========================
 ```
 
 ---
