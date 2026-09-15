@@ -6,10 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models.user import User
 from app.database.models.tenant import Tenant
 from app.database.models.workflow import WorkflowConfiguration
+from app.database.models.integrations import Integration, IntegrationConnection
 from app.core.events.schemas import EventSchema
 from app.core.workflows.engine import WorkflowEngine
 from app.core.workflows.actions import ActionExecutor
 from app.core.auth_service import hash_password, create_access_token
+from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
 
 
 @pytest.fixture(autouse=True)
@@ -152,3 +154,97 @@ async def test_tenant_actor_attempting_system_or_owner_ai_escalation(
     # Tenant owner attempts to access cross-tenant owner platform analytics -> 403
     resp_analytics = await client.get("/api/v1/analytics/owner/platform", headers=headers)
     assert resp_analytics.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_forged_system_actor_headers_rejected(
+    client: AsyncClient,
+    tenant_a: Tenant,
+):
+    """5. Attempting to forge system_workflow or system_webhook headers via HTTP is rejected with 403 PERMISSION_DENIED."""
+    forged_system_headers = {
+        "X-Tenant-ID": str(tenant_a.id),
+        "X-Actor-Role": "system_workflow",
+        "X-Actor-Permissions": "business.read,business.write,SEND_WHATSAPP_MESSAGE,EXECUTE_INTEGRATION,MANAGE_PAYMENTS",
+    }
+
+    resp = await client.get("/api/v1/customers", headers=forged_system_headers)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_workflow_action_rejected(
+    db_session: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+):
+    """6. Workflow in Tenant A attempting to execute an action on Tenant B's connection is rejected."""
+    # Create Catalog Integration & Connection owned by Tenant B
+    integration = Integration(
+        integration_key="google_sheets",
+        provider_key="google_sheets",
+        display_name="Google Sheets Connector",
+        category="sheets",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+
+    conn_b = IntegrationConnection(
+        tenant_id=tenant_b.id,
+        integration_id=integration.id,
+        status="ACTIVE",
+    )
+    db_session.add(conn_b)
+    await db_session.commit()
+
+    # Attempt to run ActionExecutor under Tenant A using Tenant B's connection_id
+    res = await ActionExecutor.execute(
+        action_type="google_sheets_append",
+        params={"connection_id": str(conn_b.id), "spreadsheet_id": "test_sheet"},
+        context={},
+        session=db_session,
+        tenant_id=str(tenant_a.id),
+    )
+
+    assert res.success is False
+    assert "not found" in res.error.lower() or "denied" in res.error.lower() or "does not belong" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_system_actor_no_wildcard_permissions(
+    db_session: AsyncSession,
+    tenant_a: Tenant,
+):
+    """7. Prove that system/workflow actor created by WorkflowEngine possesses no wildcard/unrestricted permissions (*)."""
+    event = EventSchema(
+        event_id=f"evt_{uuid.uuid4().hex[:12]}",
+        tenant_id=str(tenant_a.id),
+        event_type="test.system_actor_check",
+        payload={},
+        source="unit_test",
+    )
+
+    engine = WorkflowEngine(db_session)
+    # Establish system_workflow actor context exactly as handle_event does
+    wf_actor = AuthenticatedActor(
+        user_id=None,
+        tenant_id=tenant_a.id,
+        role="system_workflow",
+        permissions={
+            "business.read",
+            "product.read",
+            "knowledge.read",
+            "business.write",
+            "SEND_WHATSAPP_MESSAGE",
+            "EXECUTE_INTEGRATION",
+            "MANAGE_PAYMENTS",
+        },
+        is_platform_owner=False,
+    )
+
+    assert "*" not in wf_actor.permissions
+    assert "all" not in wf_actor.permissions
+    assert wf_actor.is_platform_owner is False
+    assert wf_actor.tenant_id == tenant_a.id

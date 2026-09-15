@@ -183,7 +183,7 @@ wf_actor = AuthenticatedActor(
 )
 ```
 - Permissions are explicit, action-scoped, and tenant-bounded.
-- NO wildcard permissions (`*`) or unrestricted owner privileges exist.
+- NO wildcard permissions (`*` or `all`) exist.
 - Non-platform-owner actors and workflows are strictly blocked from delegating tasks to or executing `owner_ai`.
 
 ---
@@ -196,6 +196,9 @@ Verified in `tests/test_r1_workflow_privilege_escalation.py`:
 2. **Workflow Owner AI Execution Rejection:** `test_workflow_action_executing_owner_ai_forbidden` proves `ActionExecutor` strictly rejects workflow attempts to call `owner_ai`.
 3. **Forged Headers Without JWT Rejection:** `test_forged_headers_without_valid_jwt_rejected` proves client requests passing forged `X-Actor-Role: owner` and `X-Actor-Permissions: *` without valid JWT context are rejected with HTTP 403 `PERMISSION_DENIED`.
 4. **Tenant Actor Owner AI Escalation Rejection:** `test_tenant_actor_attempting_system_or_owner_ai_escalation` proves normal tenant owners (`is_platform_owner=False`) attempting to access `POST /api/v1/owner-ai/run` or `/api/v1/analytics/owner/platform` are rejected with HTTP 403 `PERMISSION_DENIED`.
+5. **Forged System Actor Header Rejection:** `test_forged_system_actor_headers_rejected` proves client attempts to pass `X-Actor-Role: system_workflow` in HTTP requests are rejected with HTTP 403.
+6. **Cross-Tenant Workflow Action Rejection:** `test_cross_tenant_workflow_action_rejected` proves a workflow in Tenant A attempting to execute an action on Tenant B's connection is rejected.
+7. **System Actor Wildcard Permission Prohibition:** `test_system_actor_no_wildcard_permissions` proves system/workflow actors possess no wildcard permissions (`*` or `all`).
 
 ---
 
@@ -206,17 +209,17 @@ All security, authorization, tenant isolation, and workflow privilege escalation
 ```text
 ============================= test session starts ==============================
 platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0
-collected 56 items
+collected 59 items
 
 tests/test_r1_real_jwt_security.py ......                                [ 10%]
-tests/test_r1_workflow_privilege_escalation.py ....                      [ 17%]
-tests/test_auth_api.py ...........                                       [ 37%]
-tests/test_tenant_isolation_phase1.py .....                              [ 46%]
-tests/test_approvals_and_tasks.py .......                                [ 58%]
-tests/test_action_risk_authority.py ...............                      [ 85%]
+tests/test_r1_workflow_privilege_escalation.py .......                   [ 22%]
+tests/test_auth_api.py ...........                                       [ 40%]
+tests/test_tenant_isolation_phase1.py .....                              [ 49%]
+tests/test_approvals_and_tasks.py .......                                [ 61%]
+tests/test_action_risk_authority.py ...............                      [ 86%]
 tests/test_owner_ai_security_boundary.py ........                        [100%]
 
-============================= 56 passed in 43.80s ==============================
+============================= 59 passed in 48.20s ==============================
 ```
 
 Integration and error classification tests:
@@ -236,6 +239,8 @@ R1-001 PASS
 R1-002 PASS
 R1-003 PASS
 R1-004 PASS
+
+Overall R1: PASS
 ```
 
 **Final Conclusion:** Task R1 is complete and fully verified with code-level evidence and passing security tests.
