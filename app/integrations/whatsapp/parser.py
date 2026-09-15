@@ -61,14 +61,17 @@ class WhatsAppParser:
                         if msg_type not in ["TEXT", "IMAGE", "VIDEO", "AUDIO", "DOCUMENT"]:
                             msg_type = "OTHER"
 
-                        text_content = None
+                        text_content = ""
                         msg_text = getattr(msg, "text", None) or (msg.get("text") if isinstance(msg, dict) else None)
                         msg_image = getattr(msg, "image", None) or (msg.get("image") if isinstance(msg, dict) else None)
 
                         if msg_text:
-                            text_content = getattr(msg_text, "body", None) or (msg_text.get("body") if isinstance(msg_text, dict) else None)
+                            text_content = getattr(msg_text, "body", None) or (msg_text.get("body") if isinstance(msg_text, dict) else "")
                         elif msg_image:
-                            text_content = getattr(msg_image, "caption", None) or (msg_image.get("caption") if isinstance(msg_image, dict) else None)
+                            text_content = getattr(msg_image, "caption", None) or (msg_image.get("caption") if isinstance(msg_image, dict) else "")
+
+                        if msg_type != "TEXT" and not text_content:
+                            text_content = ""
 
                         # Timestamp integrity (R3-012)
                         # Do NOT silently overwrite event occurrence time with server receive time
@@ -98,8 +101,8 @@ class WhatsAppParser:
                             external_message_id=msg_id,
                             direction="INBOUND",
                             message_type=msg_type,
-                            text=text_content or (f"[{msg_type} message]" if msg_type != "TEXT" else ""),
-                            timestamp=event_ts or server_received_at,  # UniversalMessage schema fallback
+                            text=text_content,
+                            timestamp=event_ts or server_received_at,  # Valid event occurrence time or server receipt fallback
                             metadata={
                                 "sender_phone": normalized_sender_phone or sender_phone,
                                 "raw_sender_phone": sender_phone,
