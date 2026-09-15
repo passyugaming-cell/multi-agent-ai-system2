@@ -36,21 +36,23 @@ def upgrade() -> None:
             f"Deployment blocked: Duplicate payment records found before migration. Resolve duplicates before applying uq_payments_tenant_provider_payment_id: {dup_desc}."
         )
 
+    cols = [c["name"] for c in inspector.get_columns("payments")]
     dialect_name = conn.dialect.name
-    if dialect_name == "sqlite":
-        with op.batch_alter_table("payments") as batch_op:
-            batch_op.add_column(
-                sa.Column("refunded_amount", sa.Numeric(precision=14, scale=2), server_default="0.00", nullable=False)
-            )
-            batch_op.create_unique_constraint(
-                "uq_payments_tenant_provider_payment_id",
-                ["tenant_id", "provider", "provider_payment_id"],
-            )
-    else:
+
+    if "refunded_amount" not in cols:
         op.add_column(
             "payments",
             sa.Column("refunded_amount", sa.Numeric(precision=14, scale=2), server_default="0.00", nullable=False),
         )
+
+    if dialect_name == "sqlite":
+        op.create_index(
+            "uq_payments_tenant_provider_payment_id",
+            "payments",
+            ["tenant_id", "provider", "provider_payment_id"],
+            unique=True,
+        )
+    else:
         op.create_unique_constraint(
             "uq_payments_tenant_provider_payment_id",
             "payments",
@@ -64,11 +66,14 @@ def downgrade() -> None:
     if not inspector.has_table("payments"):
         return
 
+    cols = [c["name"] for c in inspector.get_columns("payments")]
     dialect_name = conn.dialect.name
+
     if dialect_name == "sqlite":
-        with op.batch_alter_table("payments") as batch_op:
-            batch_op.drop_constraint("uq_payments_tenant_provider_payment_id", type_="unique")
-            batch_op.drop_column("refunded_amount")
+        op.drop_index("uq_payments_tenant_provider_payment_id", table_name="payments")
+        if "refunded_amount" in cols:
+            op.drop_column("payments", "refunded_amount")
     else:
         op.drop_constraint("uq_payments_tenant_provider_payment_id", "payments", type_="unique")
-        op.drop_column("payments", "refunded_amount")
+        if "refunded_amount" in cols:
+            op.drop_column("payments", "refunded_amount")

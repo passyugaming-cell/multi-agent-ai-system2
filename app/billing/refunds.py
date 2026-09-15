@@ -138,7 +138,7 @@ class RefundService:
         if not res.success:
             approval.status = "FAILED"
             approval.meta_data = dict(approval.meta_data or {}, failure_reason=res.error_message or "Provider refund failed.")
-            await self.session.flush()
+            await self.session.commit()
             await publish_billing_event(
                 event_type="refund.failed",
                 tenant_id=tenant_id,

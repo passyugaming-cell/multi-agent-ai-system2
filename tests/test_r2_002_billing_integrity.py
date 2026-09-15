@@ -1,12 +1,16 @@
 import asyncio
+import os
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from alembic.config import Config
+from alembic import command
+from app.core.config import settings
 
 from app.database.models.tenant import Tenant
 from app.database.models.user import User
@@ -158,6 +162,103 @@ async def test_r2_002_paid_plan_activation_and_change_gating(db_session: AsyncSe
     assert exc_change.value.status_code == 402
 
 
+# MIGRATION PREFLIGHT TEST FOR DUPLICATE DATA (FINDING 3)
+@pytest.mark.asyncio
+async def test_r2_002_migration_preflight_duplicate_data_rejection(test_session_factory, tenant_a: Tenant, tenant_b: Tenant):
+    """FINDING 3: Verifies that Alembic migration upgrade preflight blocks deployment when duplicate payment records exist."""
+    async with test_session_factory() as db_session:
+        # Re-create payments table without unique constraint to simulate pre-migration state on SQLite/PostgreSQL
+        if db_session.bind.dialect.name == "sqlite":
+            await db_session.execute(text("PRAGMA foreign_keys=OFF;"))
+            await db_session.execute(text("DROP TABLE IF EXISTS payments;"))
+            await db_session.execute(text("""
+                CREATE TABLE payments (
+                    id CHAR(32) NOT NULL PRIMARY KEY,
+                    tenant_id CHAR(32) NOT NULL,
+                    invoice_id CHAR(32) NOT NULL,
+                    amount NUMERIC(14, 2) NOT NULL,
+                    refunded_amount NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+                    currency VARCHAR(10) NOT NULL DEFAULT 'IDR',
+                    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+                    provider VARCHAR(100) NOT NULL DEFAULT 'fake',
+                    provider_payment_id VARCHAR(255),
+                    attempted_at DATETIME,
+                    paid_at DATETIME,
+                    failed_at DATETIME,
+                    failure_reason TEXT,
+                    metadata JSON,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                );
+            """))
+            await db_session.execute(text("PRAGMA foreign_keys=ON;"))
+        else:
+            await db_session.execute(text("ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payments_tenant_provider_payment_id;"))
+        await db_session.commit()
+
+        # Stamp alembic_version to revision prior to uq_payments_tenant_provider_payment_id
+        await db_session.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL, CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num));"))
+        await db_session.execute(text("DELETE FROM alembic_version;"))
+        await db_session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('add_phase_a_parent_comp_uniq');"))
+        await db_session.commit()
+
+        # Insert duplicate payment records for same (tenant_id, provider, provider_payment_id)
+        inv_service = InvoiceService(db_session)
+        inv1 = await inv_service.create_invoice(tenant_id=tenant_a.id, items_data=[{"description": "Inv 1", "unit_price": "100000.00"}])
+        inv2 = await inv_service.create_invoice(tenant_id=tenant_a.id, items_data=[{"description": "Inv 2", "unit_price": "100000.00"}])
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        p1_id = uuid.uuid4()
+        p2_id = uuid.uuid4()
+
+        p1 = Payment(
+            id=p1_id,
+            tenant_id=tenant_a.id,
+            invoice_id=inv1.id,
+            amount=Decimal("100000.00"),
+            currency="IDR",
+            status=PaymentStatus.PENDING,
+            provider="midtrans",
+            provider_payment_id="dup_provider_pay_123",
+        )
+        p2 = Payment(
+            id=p2_id,
+            tenant_id=tenant_a.id,
+            invoice_id=inv2.id,
+            amount=Decimal("100000.00"),
+            currency="IDR",
+            status=PaymentStatus.PENDING,
+            provider="midtrans",
+            provider_payment_id="dup_provider_pay_123",
+        )
+        db_session.add_all([p1, p2])
+        await db_session.commit()
+
+    # Invoke Alembic upgrade head against active DB engine
+    alembic_cfg = Config("alembic.ini")
+    active_db_url = os.getenv("TEST_DATABASE_URL") or settings.DATABASE_URL
+    alembic_cfg.set_main_option("sqlalchemy.url", active_db_url)
+
+    with pytest.raises(Exception) as exc_info:
+        command.upgrade(alembic_cfg, "head")
+
+    assert "Deployment blocked: Duplicate payment records found before migration" in str(exc_info.value)
+
+    # Verify duplicate records were NOT silently deleted
+    async with test_session_factory() as check_session:
+        stmt = select(Payment).where(Payment.id.in_([p1_id, p2_id]))
+        pmts = (await check_session.execute(stmt)).scalars().all()
+        assert len(pmts) == 2
+
+        # Clean up duplicates and re-run migration to verify clean-data upgrade succeeds
+        for p in pmts:
+            await check_session.delete(p)
+        await check_session.commit()
+
+    # Clean upgrade re-run
+    command.upgrade(alembic_cfg, "head")
+
+
 # PHASE 5: IDEMPOTENCY & UNMATCHED WEBHOOK TESTS
 @pytest.mark.asyncio
 async def test_r2_002_unmatched_webhook_rejection(db_session: AsyncSession, tenant_a: Tenant, tenant_b: Tenant):
@@ -203,11 +304,13 @@ async def test_r2_002_unmatched_webhook_rejection(db_session: AsyncSession, tena
     }
     with pytest.raises(PaymentFailedError) as exc_curr:
         await pay_service.handle_provider_webhook(currency_mismatch_payload, headers)
-        assert "currency mismatch" in str(exc_curr.value).lower()
+    assert "currency mismatch" in str(exc_curr.value).lower()
 
     # Verify Payment status remains PENDING and Invoice status remains ISSUED
     stmt_pmt_chk = select(Payment).where(Payment.id == pmt_intent.id)
     assert (await db_session.execute(stmt_pmt_chk)).scalar_one().status == PaymentStatus.PENDING
+    stmt_inv_chk = select(Invoice).where(Invoice.id == inv_a.id)
+    assert (await db_session.execute(stmt_inv_chk)).scalar_one().status == InvoiceStatus.ISSUED
 
     # 3. Unmatched webhook: fake non-existent invoice_id
     fake_payload = {
@@ -326,65 +429,154 @@ async def test_r2_002_refund_full_and_partial_integrity(db_session: AsyncSession
 
 
 @pytest.mark.asyncio
-async def test_r2_002_refund_failure_persistence_and_concurrency(db_session: AsyncSession, tenant_a: Tenant):
-    inv_service = InvoiceService(db_session)
-    failing_provider = MockFailingRefundProvider()
-    pay_service = PaymentService(db_session, provider=failing_provider)
-    refund_service = RefundService(db_session)
-    refund_service.payment_service = pay_service
+async def test_r2_002_refund_failure_persistence_and_concurrency(test_session_factory, tenant_a: Tenant):
+    """FINDING 6: Verify refund failure persistence across independent DB sessions."""
+    async with test_session_factory() as setup_session:
+        inv_service = InvoiceService(setup_session)
+        failing_provider = MockFailingRefundProvider()
+        pay_service = PaymentService(setup_session, provider=failing_provider)
+        refund_service = RefundService(setup_session)
+        refund_service.payment_service = pay_service
 
-    inv = await inv_service.create_invoice(
-        tenant_id=tenant_a.id,
-        items_data=[{"description": "Product", "unit_price": "200000.00"}],
-    )
-    pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("200000.00"))
-    await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
+        inv = await inv_service.create_invoice(
+            tenant_id=tenant_a.id,
+            items_data=[{"description": "Product", "unit_price": "200000.00"}],
+        )
+        pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("200000.00"))
+        await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
 
-    app = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("100000.00"), "Refund test")
-    app.status = "APPROVED"
-    await db_session.flush()
+        app = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("100000.00"), "Refund test")
+        app.status = "APPROVED"
+        await setup_session.commit()
+        app_id, pmt_id = app.id, pmt.id
 
-    # Provider fails during refund -> throws PaymentFailedError
-    with pytest.raises(PaymentFailedError):
-        await refund_service.execute_approved_refund(tenant_a.id, app.id)
+    async with test_session_factory() as exec_session:
+        ref_srv = RefundService(exec_session)
+        ref_srv.payment_service = PaymentService(exec_session, provider=MockFailingRefundProvider())
 
-    # Verify Approval status is persisted as FAILED with error message
-    stmt = select(Approval).where(Approval.id == app.id)
-    app_db = (await db_session.execute(stmt)).scalar_one()
-    assert app_db.status == "FAILED"
-    assert "Simulated bank timeout" in app_db.meta_data.get("failure_reason", "")
+        with pytest.raises(PaymentFailedError):
+            await ref_srv.execute_approved_refund(tenant_a.id, app_id)
+
+    # Verify Approval status is persisted as FAILED with error message across a NEW independent session
+    async with test_session_factory() as check_session:
+        stmt = select(Approval).where(Approval.id == app_id)
+        app_db = (await check_session.execute(stmt)).scalar_one()
+        assert app_db.status == "FAILED"
+        assert "Simulated bank timeout" in app_db.meta_data.get("failure_reason", "")
+
+        stmt_pmt = select(Payment).where(Payment.id == pmt_id)
+        pmt_db = (await check_session.execute(stmt_pmt)).scalar_one()
+        assert pmt_db.refunded_amount == Decimal("0.00")
+        assert pmt_db.status == PaymentStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
-async def test_r2_002_concurrent_refund_execution(db_session: AsyncSession, tenant_a: Tenant):
-    inv_service = InvoiceService(db_session)
-    pay_service = PaymentService(db_session)
-    refund_service = RefundService(db_session)
+async def test_r2_002_concurrent_over_refund_prevention(test_session_factory, tenant_a: Tenant):
+    """FINDING 1: Test two distinct refund approvals (60,000 and 50,000) on a 100,000 payment executed concurrently.
 
-    inv = await inv_service.create_invoice(
-        tenant_id=tenant_a.id,
-        items_data=[{"description": "Product", "unit_price": "100000.00"}],
-    )
-    pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("100000.00"))
-    await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
+    Expectation: System MUST NOT over-refund (110,000). Total refunded must equal 60,000 or 50,000,
+    and one operation must fail with remaining balance rejection.
+    """
+    async with test_session_factory() as setup_session:
+        inv_service = InvoiceService(setup_session)
+        pay_service = PaymentService(setup_session)
+        refund_service = RefundService(setup_session)
 
-    app1 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("60000.00"), "Refund 60k")
-    app1.status = "APPROVED"
+        inv = await inv_service.create_invoice(
+            tenant_id=tenant_a.id,
+            items_data=[{"description": "Product", "unit_price": "100000.00"}],
+        )
+        pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("100000.00"))
+        await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
 
-    app2 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("50000.00"), "Refund 50k")
-    app2.status = "APPROVED"
-    await db_session.flush()
+        app1 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("60000.00"), "Refund 60k")
+        app1.status = "APPROVED"
 
-    # Sequential/Concurrent execution: first refund succeeds (60,000), second fails as 50,000 > 40,000 remaining
-    p1 = await refund_service.execute_approved_refund(tenant_a.id, app1.id)
-    assert p1.refunded_amount == Decimal("60000.00")
-    assert p1.status == PaymentStatus.PARTIALLY_REFUNDED
+        app2 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("50000.00"), "Refund 50k")
+        app2.status = "APPROVED"
 
-    with pytest.raises(BillingError) as exc:
-        await refund_service.execute_approved_refund(tenant_a.id, app2.id)
-    assert "exceeds remaining refundable amount" in str(exc.value)
+        await setup_session.commit()
+        pmt_id = pmt.id
+        app1_id = app1.id
+        app2_id = app2.id
+        is_postgresql = setup_session.bind.dialect.name == "postgresql"
 
-    stmt = select(Payment).where(Payment.id == pmt.id)
-    pmt_check = (await db_session.execute(stmt)).scalar_one()
-    assert pmt_check.refunded_amount == Decimal("60000.00")
-    assert pmt_check.status == PaymentStatus.PARTIALLY_REFUNDED
+    async with test_session_factory() as session_1, test_session_factory() as session_2:
+        ref_srv_1 = RefundService(session_1)
+        ref_srv_2 = RefundService(session_2)
+
+        if is_postgresql:
+            results = await asyncio.gather(
+                ref_srv_1.execute_approved_refund(tenant_a.id, app1_id),
+                ref_srv_2.execute_approved_refund(tenant_a.id, app2_id),
+                return_exceptions=True,
+            )
+            exceptions = [r for r in results if isinstance(r, Exception)]
+            assert len(exceptions) >= 1
+        else:
+            # SQLite does not support FOR UPDATE row locks across concurrent async connections.
+            # Test sequential execution on SQLite to prove business logic balance validation.
+            p1 = await ref_srv_1.execute_approved_refund(tenant_a.id, app1_id)
+            assert p1.refunded_amount == Decimal("60000.00")
+            with pytest.raises(BillingError) as exc_info:
+                await ref_srv_2.execute_approved_refund(tenant_a.id, app2_id)
+            assert "exceeds remaining refundable amount" in str(exc_info.value)
+
+    async with test_session_factory() as check_session:
+        pmt_check = await PaymentService(check_session).get_payment(tenant_a.id, pmt_id)
+        # Total refunded MUST NOT exceed 100,000 (must be 60,000 or 50,000)
+        assert pmt_check.refunded_amount in (Decimal("60000.00"), Decimal("50000.00"))
+        assert pmt_check.refunded_amount <= Decimal("100000.00")
+        assert pmt_check.status == PaymentStatus.PARTIALLY_REFUNDED
+
+
+@pytest.mark.asyncio
+async def test_r2_002_concurrent_valid_partial_refunds(test_session_factory, tenant_a: Tenant):
+    """FINDING 2: Test two valid partial refund approvals (60,000 and 40,000) on a 100,000 payment executed concurrently across independent DB sessions.
+
+    Expectation: Both succeed, final refunded_amount == 100,000, Payment status == REFUNDED, no over-refund.
+    """
+    async with test_session_factory() as setup_session:
+        inv_service = InvoiceService(setup_session)
+        pay_service = PaymentService(setup_session)
+        refund_service = RefundService(setup_session)
+
+        inv = await inv_service.create_invoice(
+            tenant_id=tenant_a.id,
+            items_data=[{"description": "Product", "unit_price": "100000.00"}],
+        )
+        pmt = await pay_service.create_payment_intent(tenant_a.id, inv.id, Decimal("100000.00"))
+        await pay_service.confirm_payment_success(tenant_a.id, pmt.id)
+
+        app1 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("60000.00"), "Refund 60k")
+        app1.status = "APPROVED"
+
+        app2 = await refund_service.request_refund(tenant_a.id, pmt.id, Decimal("40000.00"), "Refund 40k")
+        app2.status = "APPROVED"
+
+        await setup_session.commit()
+        pmt_id = pmt.id
+        app1_id = app1.id
+        app2_id = app2.id
+        is_postgresql = setup_session.bind.dialect.name == "postgresql"
+
+    async with test_session_factory() as session_1, test_session_factory() as session_2:
+        ref_srv_1 = RefundService(session_1)
+        ref_srv_2 = RefundService(session_2)
+
+        if is_postgresql:
+            results = await asyncio.gather(
+                ref_srv_1.execute_approved_refund(tenant_a.id, app1_id),
+                ref_srv_2.execute_approved_refund(tenant_a.id, app2_id),
+                return_exceptions=True,
+            )
+            for r in results:
+                assert not isinstance(r, Exception), f"Unexpected exception in concurrent refund: {r}"
+        else:
+            await ref_srv_1.execute_approved_refund(tenant_a.id, app1_id)
+            await ref_srv_2.execute_approved_refund(tenant_a.id, app2_id)
+
+    async with test_session_factory() as check_session:
+        pmt_check = await PaymentService(check_session).get_payment(tenant_a.id, pmt_id)
+        assert pmt_check.refunded_amount == Decimal("100000.00")
+        assert pmt_check.status == PaymentStatus.REFUNDED

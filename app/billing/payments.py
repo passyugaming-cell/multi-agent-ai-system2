@@ -239,13 +239,15 @@ class PaymentService:
         webhook_res: WebhookResult = await self.provider.handle_webhook(payload, headers, secret)
 
         # R2-002-P0-006: Unmatched Webhook Policy
-        # Verify that referenced invoice exists and belongs to the specified tenant
+        # Verify that referenced invoice exists and belongs to the specified tenant.
+        # Catch ONLY InvoiceNotFoundError so DB/connection errors propagate directly as infrastructure failures.
+        from app.billing.exceptions import InvoiceNotFoundError
         try:
             invoice = await self.invoice_service.get_invoice(
                 tenant_id=webhook_res.tenant_id,
                 invoice_id=webhook_res.invoice_id,
             )
-        except Exception as err:
+        except InvoiceNotFoundError as err:
             raise PaymentFailedError(
                 f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found for tenant '{webhook_res.tenant_id}'."
             ) from err
@@ -262,7 +264,7 @@ class PaymentService:
             )
         if (webhook_res.currency or "").upper() != invoice.currency.upper():
             raise PaymentFailedError(
-                f"Unmatched webhook rejected: webhook currency '{webhook_res.currency}' does not match invoice currency '{invoice.currency}'."
+                f"Unmatched webhook rejected: currency mismatch. Webhook currency '{webhook_res.currency}' does not match invoice currency '{invoice.currency}'."
             )
 
         provider_name = getattr(self.provider, "provider_name", None) or "unknown"
