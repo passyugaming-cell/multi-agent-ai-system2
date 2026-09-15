@@ -37,14 +37,16 @@ def upgrade() -> None:
             dup_desc = ", ".join([f"(tenant={r[0]}, external_id={r[1]}, count={r[2]})" for r in dups_msg])
             raise Exception(f"Migration blocked: Duplicate messages found for external_message_id: {dup_desc}")
 
-        op.create_index(
-            "uq_messages_tenant_external_id",
-            "messages",
-            ["tenant_id", "external_message_id"],
-            unique=True,
-            postgresql_where=sa.text("external_message_id IS NOT NULL AND external_message_id != ''"),
-            sqlite_where=sa.text("external_message_id IS NOT NULL AND external_message_id != ''"),
-        )
+        existing_indexes = [i["name"] for i in inspector.get_indexes("messages")]
+        if "uq_messages_tenant_external_id" not in existing_indexes:
+            op.create_index(
+                "uq_messages_tenant_external_id",
+                "messages",
+                ["tenant_id", "external_message_id"],
+                unique=True,
+                postgresql_where=sa.text("external_message_id IS NOT NULL AND external_message_id != ''"),
+                sqlite_where=sa.text("external_message_id IS NOT NULL AND external_message_id != ''"),
+            )
 
     # 2. Customers phone unique index preflight & creation
     if inspector.has_table("customers"):
@@ -60,14 +62,16 @@ def upgrade() -> None:
             dup_desc = ", ".join([f"(tenant={r[0]}, phone={r[1]}, count={r[2]})" for r in dups_cust])
             raise Exception(f"Migration blocked: Duplicate customers found for phone: {dup_desc}")
 
-        op.create_index(
-            "uq_customers_tenant_phone",
-            "customers",
-            ["tenant_id", "phone"],
-            unique=True,
-            postgresql_where=sa.text("phone IS NOT NULL AND phone != ''"),
-            sqlite_where=sa.text("phone IS NOT NULL AND phone != ''"),
-        )
+        existing_indexes = [i["name"] for i in inspector.get_indexes("customers")]
+        if "uq_customers_tenant_phone" not in existing_indexes:
+            op.create_index(
+                "uq_customers_tenant_phone",
+                "customers",
+                ["tenant_id", "phone"],
+                unique=True,
+                postgresql_where=sa.text("phone IS NOT NULL AND phone != ''"),
+                sqlite_where=sa.text("phone IS NOT NULL AND phone != ''"),
+            )
 
     # 3. Conversations active channel unique index preflight & creation
     if inspector.has_table("conversations"):
@@ -83,14 +87,16 @@ def upgrade() -> None:
             dup_desc = ", ".join([f"(tenant={r[0]}, customer={r[1]}, channel={r[2]}, count={r[3]})" for r in dups_conv])
             raise Exception(f"Migration blocked: Duplicate active conversations found: {dup_desc}")
 
-        op.create_index(
-            "uq_active_conversations_tenant_customer_channel",
-            "conversations",
-            ["tenant_id", "customer_id", "channel"],
-            unique=True,
-            postgresql_where=sa.text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
-            sqlite_where=sa.text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
-        )
+        existing_indexes = [i["name"] for i in inspector.get_indexes("conversations")]
+        if "uq_active_conversations_tenant_customer_channel" not in existing_indexes:
+            op.create_index(
+                "uq_active_conversations_tenant_customer_channel",
+                "conversations",
+                ["tenant_id", "customer_id", "channel"],
+                unique=True,
+                postgresql_where=sa.text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
+                sqlite_where=sa.text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
+            )
 
     # 4. Integration executions idempotency_key unique index preflight & creation
     if inspector.has_table("integration_executions"):
@@ -106,14 +112,16 @@ def upgrade() -> None:
             dup_desc = ", ".join([f"(tenant={r[0]}, idempotency_key={r[1]}, count={r[2]})" for r in dups_exec])
             raise Exception(f"Migration blocked: Duplicate integration executions found: {dup_desc}")
 
-        op.create_index(
-            "uq_integration_executions_tenant_idempotency",
-            "integration_executions",
-            ["tenant_id", "idempotency_key"],
-            unique=True,
-            postgresql_where=sa.text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
-            sqlite_where=sa.text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
-        )
+        existing_indexes = [i["name"] for i in inspector.get_indexes("integration_executions")]
+        if "uq_integration_executions_tenant_idempotency" not in existing_indexes:
+            op.create_index(
+                "uq_integration_executions_tenant_idempotency",
+                "integration_executions",
+                ["tenant_id", "idempotency_key"],
+                unique=True,
+                postgresql_where=sa.text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+                sqlite_where=sa.text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+            )
 
 
 def downgrade() -> None:
