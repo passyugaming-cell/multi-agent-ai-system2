@@ -338,7 +338,7 @@ class IntegrationService:
                 while existing and existing.status == "RUNNING" and poll_count < 50:
                     await asyncio.sleep(0.05)
                     poll_count += 1
-                    self.session.expire_all()
+                    await self.session.rollback()
                     existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
 
                 if existing and existing.status in ("COMPLETED", "FAILED"):
@@ -393,7 +393,6 @@ class IntegrationService:
                     await self.session.flush()
                 await self.session.commit()
             except IntegrityError:
-                await self.session.rollback()
                 if execution in self.session:
                     self.session.expunge(execution)
 
@@ -402,7 +401,7 @@ class IntegrationService:
                 while existing and existing.status == "RUNNING" and poll_count < 50:
                     await asyncio.sleep(0.05)
                     poll_count += 1
-                    self.session.expire_all()
+                    await self.session.rollback()
                     existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
 
                 if existing:

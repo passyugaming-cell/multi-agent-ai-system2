@@ -785,3 +785,212 @@ async def test_r3_postgres_multi_session_service_idempotency_race(test_session_f
     assert res_a.execution_id == res_b.execution_id
     assert res_a.status == "COMPLETED"
     assert res_b.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_r3_postgres_multi_session_concurrent_status_webhook_race(test_session_factory, async_client):
+    import json
+    import hmac
+    import hashlib
+    import asyncio
+    from sqlalchemy import select
+    from httpx import ASGITransport, AsyncClient
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.database.models.integrations import IntegrationExecution
+    from app.repositories.domain import CustomerRepository, ConversationRepository
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Status Webhook Race Tenant", slug=f"swr-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        app_secret = "secret_status_race_123"
+        phone_number_id = "777888"
+        await _setup_active_whatsapp_integration(tenant, session_setup, phone_number_id=phone_number_id, app_secret=app_secret)
+
+        cust = Customer(tenant_id=tenant.id, name="Status Race Cust", phone="62811223344")
+        session_setup.add(cust)
+        await session_setup.commit()
+
+        conv = Conversation(tenant_id=tenant.id, customer_id=cust.id, channel="whatsapp", status="OPEN")
+        session_setup.add(conv)
+        await session_setup.commit()
+
+        msg = Message(
+            tenant_id=tenant.id,
+            conversation_id=conv.id,
+            direction="OUTBOUND",
+            message_type="TEXT",
+            status="SENT",
+            text="Concurrent status test",
+            external_message_id="wamid.status_concur_123",
+        )
+        session_setup.add(msg)
+        await session_setup.commit()
+
+        tenant_id = tenant.id
+        msg_id = msg.id
+
+    webhook_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": phone_number_id},
+                            "statuses": [
+                                {
+                                    "id": "wamid.status_concur_123",
+                                    "status": "delivered",
+                                    "timestamp": "1710000000",
+                                    "recipient_id": "62811223344",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    from app.main import app as fastapi_app
+    import app.database.session as session_module
+
+    async def _make_request():
+        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url="http://test") as client:
+            return await client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
+
+    res_a, res_b = await asyncio.gather(_make_request(), _make_request())
+
+    assert res_a.status_code == 200
+    assert res_b.status_code == 200
+
+    results = [res_a.json()["processed"][0]["status"], res_b.json()["processed"][0]["status"]]
+    assert "delivered" in results
+    assert "duplicate_event" in results
+
+    # Assert exactly ONE IntegrationExecution record created
+    async with test_session_factory() as s_check:
+        stmt = select(IntegrationExecution).where(
+            IntegrationExecution.tenant_id == tenant_id,
+            IntegrationExecution.idempotency_key == "wa_status_wamid.status_concur_123_delivered",
+        )
+        execs = (await s_check.execute(stmt)).scalars().all()
+        assert len(execs) == 1
+
+        # Assert Message.status is DELIVERED
+        msg_check = (await s_check.execute(select(Message).where(Message.id == msg_id))).scalar_one()
+        assert msg_check.status == "DELIVERED"
+
+
+@pytest.mark.asyncio
+async def test_r3_postgres_multi_session_concurrent_inbound_webhook_race(test_session_factory, monkeypatch):
+    import json
+    import hmac
+    import hashlib
+    import asyncio
+    from sqlalchemy import select
+    from httpx import ASGITransport, AsyncClient
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.repositories.domain import MessageRepository
+    from app.integrations.schemas import OperationExecutionResult
+    from app.integrations.service import IntegrationService
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Inbound Webhook Race Tenant", slug=f"iwr-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        app_secret = "secret_inbound_race_123"
+        phone_number_id = "777999"
+        await _setup_active_whatsapp_integration(tenant, session_setup, phone_number_id=phone_number_id, app_secret=app_secret)
+
+        tenant_id = tenant.id
+
+    provider_calls = 0
+
+    async def mock_execute_op(*args, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        await asyncio.sleep(0.05)
+        now = datetime.now(timezone.utc)
+        return OperationExecutionResult(
+            execution_id=uuid.uuid4(),
+            connection_id=uuid.uuid4(),
+            operation="send_message",
+            status="COMPLETED",
+            started_at=now,
+            completed_at=now,
+            result={"provider_message_id": "wamid.inbound_race_reply_001"},
+        )
+
+    monkeypatch.setattr(IntegrationService, "execute_operation", mock_execute_op)
+
+    external_msg_id = f"wamid.inbound_concur_{uuid.uuid4().hex[:6]}"
+    webhook_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": phone_number_id},
+                            "messages": [
+                                {
+                                    "from": "6281255556666",
+                                    "id": external_msg_id,
+                                    "timestamp": "1710000000",
+                                    "type": "text",
+                                    "text": {"body": "Concurrent inbound message"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    from app.main import app as fastapi_app
+
+    async def _make_request():
+        async with AsyncClient(transport=ASGITransport(app=fastapi_app), base_url="http://test") as client:
+            return await client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
+
+    res_a, res_b = await asyncio.gather(_make_request(), _make_request())
+
+    assert res_a.status_code == 200
+    assert res_b.status_code == 200
+
+    results = [res_a.json()["processed"][0]["status"], res_b.json()["processed"][0]["status"]]
+    assert "processed" in results
+    assert "duplicate" in results
+
+    # Verify exactly ONE inbound message row created
+    async with test_session_factory() as s_check:
+        stmt = select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.external_message_id == external_msg_id,
+        )
+        msgs = (await s_check.execute(stmt)).scalars().all()
+        assert len(msgs) == 1
+
+    # Verify adapter called exactly once for reply
+    assert provider_calls == 1
