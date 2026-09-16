@@ -1,6 +1,8 @@
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_actor_context
@@ -19,8 +21,16 @@ from app.repositories.domain import (
     MessageRepository,
 )
 from app.memory.service import MemoryService
+from app.database.models.workflow import Task
 
 logger = logging.getLogger("core.context_assembly")
+
+MAX_PRODUCTS = 10
+MAX_KNOWLEDGE = 10
+MAX_CONVERSATION_MESSAGES = 10
+MAX_MEMORY_ITEMS = 10
+MAX_TASK_ITEMS = 10
+MAX_TOTAL_CONTEXT_BYTES = 16384  # 16 KB maximum context size budget guard
 
 SERVER_AGENT_CONTEXT_POLICY: Dict[str, set[str]] = {
     "ai_sales": {"business_profile", "products", "knowledge", "business_memory", "client_memory", "customer", "conversation"},
@@ -60,7 +70,7 @@ SAFE_CONVERSATION_FIELDS = {
 }
 
 SAFE_MEMORY_FIELDS = {
-    "key", "content", "memory_type", "importance"
+    "key", "content", "memory_type", "importance", "confidence", "source", "status", "version", "expires_at", "last_verified_at"
 }
 
 SAFE_TASK_FIELDS = {
@@ -144,14 +154,15 @@ class ContextAssemblyService:
         self.mem_service = MemoryService(session)
 
     def _validate_actor_and_tenant(
-        self, tenant_id: uuid.UUID
-    ) -> tuple[Optional[str], Optional[str], List[str]]:
-        """Enforces trusted server-side actor verification and strict tenant isolation.
+        self, tenant_id: uuid.UUID, agent_name: Optional[str] = None
+    ) -> Any:
+        """Enforces trusted server-side actor verification, Owner AI boundary, and strict tenant isolation.
 
         Fail-closed rules:
         1. Context assembly MUST fail closed if no server-side AuthenticatedActor exists in _actor_context.
         2. Request fields / parameters CANNOT bypass authorization or grant permissions.
         3. Authenticated actor tenant MUST match request tenant_id.
+        4. Owner AI agent ("owner_ai") MUST ONLY be accessible to Human Platform Owner (is_platform_owner is True).
         """
         active_actor = get_actor_context()
 
@@ -169,46 +180,76 @@ class ContextAssemblyService:
                 status_code=403,
             )
 
-        return (
-            str(active_actor.user_id) if active_actor.user_id else None,
-            active_actor.role,
-            list(active_actor.permissions),
-        )
+        if (agent_name or "").lower() == "owner_ai":
+            if not getattr(active_actor, "is_platform_owner", False):
+                raise AppException(
+                    code="PERMISSION_DENIED",
+                    message="Forbidden: Only Human Platform Owner can access Owner AI context.",
+                    status_code=403,
+                )
+
+        return active_actor
 
     def _determine_categories(
         self,
+        active_actor: Any,
         agent_name: Optional[str],
         task_type: Optional[str],
         requested_categories: Optional[List[str]],
     ) -> List[str]:
-        """Determines minimum necessary context categories based on server-controlled policy.
+        """Determines minimum necessary context categories based on server-controlled policy & actor permissions.
 
         Security constraints:
         1. SERVER_AGENT_CONTEXT_POLICY is authoritative.
         2. If agent_name is unknown, fallback to minimal safe context ({'business_profile'}).
         3. Requested categories CANNOT expand privileges. They can only narrow (intersect) the agent's policy set.
+        4. Category authorization check: checks actor permissions for restricted categories (analytics, tasks).
         """
         agent = (agent_name or "").lower()
         policy = SERVER_AGENT_CONTEXT_POLICY.get(agent, {"business_profile"})
 
         if requested_categories:
-            allowed = policy.intersection(set(requested_categories))
-            return sorted(list(allowed))
+            allowed_set = policy.intersection(set(requested_categories))
+        else:
+            allowed_set = set(policy)
 
-        return sorted(list(policy))
+        is_platform_owner = getattr(active_actor, "is_platform_owner", False)
+        actor_perms = active_actor.permissions or set()
+
+        final_categories: set[str] = set()
+        for cat in allowed_set:
+            if cat == "analytics":
+                if is_platform_owner or bool({"business.read", "analytics.read", "*"}.intersection(actor_perms)):
+                    final_categories.add(cat)
+            elif cat == "tasks":
+                if is_platform_owner or bool({"business.read", "business.write", "tasks.read", "*"}.intersection(actor_perms)):
+                    final_categories.add(cat)
+            elif cat == "products":
+                if is_platform_owner or bool({"business.read", "products.read", "*"}.intersection(actor_perms)):
+                    final_categories.add(cat)
+            elif cat == "knowledge":
+                if is_platform_owner or bool({"business.read", "knowledge.read", "*"}.intersection(actor_perms)):
+                    final_categories.add(cat)
+            else:
+                final_categories.add(cat)
+
+        return sorted(list(final_categories))
 
     async def assemble_context(
         self,
         request: ContextAssemblyRequest,
     ) -> AssembledContext:
         """Assembles safe, minimum-necessary, structured context for an AI task."""
-        # 1. Enforce fail-closed authentication and tenant isolation
-        actor_id, actor_role, actor_permissions = self._validate_actor_and_tenant(
-            request.tenant_id
+        # 1. Enforce fail-closed authentication, Owner AI boundary, and tenant isolation
+        active_actor = self._validate_actor_and_tenant(
+            request.tenant_id, request.agent_name
         )
+        actor_id = str(active_actor.user_id) if active_actor.user_id else None
+        actor_role = active_actor.role
+        actor_permissions = list(active_actor.permissions)
 
         categories = self._determine_categories(
-            request.agent_name, request.task_type, request.include_categories
+            active_actor, request.agent_name, request.task_type, request.include_categories
         )
 
         facts: Dict[str, Any] = {}
@@ -239,18 +280,18 @@ class ContextAssemblyService:
 
             # Filter products if query text is specific (minimum necessary context)
             if query_text:
-                q_tokens = [t.lower() for t in query_text.split() if len(t) > 0]
-                matched_prods = []
-                for p in active_prods:
-                    p_name_lower = p.name.lower()
-                    p_sku_lower = (p.sku or "").lower()
-                    if all(tok in p_name_lower or tok in p_sku_lower for tok in q_tokens):
-                        matched_prods.append(p)
-                if matched_prods:
+                q_tokens = [t.lower() for t in query_text.split() if len(t) > 2]
+                if q_tokens:
+                    matched_prods = []
+                    for p in active_prods:
+                        p_text = f"{p.name} {p.sku or ''} {getattr(p, 'description', '') or ''}".lower()
+                        if any(tok in p_text for tok in q_tokens):
+                            matched_prods.append(p)
+                    # Empty-result semantics: if query provided but no matches exist, return empty
                     active_prods = matched_prods
 
             product_catalog_facts = []
-            for p in active_prods[:10]:
+            for p in active_prods[:MAX_PRODUCTS]:
                 p_dict = _project_safe_fields(p, SAFE_PRODUCT_FIELDS)
                 p_dict["variants"] = [
                     _project_safe_fields(v, SAFE_VARIANT_FIELDS)
@@ -265,34 +306,70 @@ class ContextAssemblyService:
         if "knowledge" in categories:
             approved_items = await self.know_repo.list_active_and_approved(request.tenant_id)
             if query_text:
-                q_tokens = [t.lower() for t in query_text.split() if len(t) > 0]
-                filtered_know = []
-                for k in approved_items:
-                    k_text = (k.title + " " + k.content + " " + (k.category_key or "")).lower()
-                    if any(tok in k_text for tok in q_tokens):
-                        filtered_know.append(k)
-                if filtered_know:
+                q_tokens = [t.lower() for t in query_text.split() if len(t) > 2]
+                if q_tokens:
+                    filtered_know = []
+                    for k in approved_items:
+                        k_text = (k.title + " " + k.content + " " + (k.category_key or "")).lower()
+                        if any(tok in k_text for tok in q_tokens):
+                            filtered_know.append(k)
+                    # Empty-result semantics: if query provided but no matches exist, return empty
                     approved_items = filtered_know
 
             knowledge_data = [
                 _project_safe_fields(k, SAFE_KNOWLEDGE_FIELDS)
-                for k in approved_items[:10]
+                for k in approved_items[:MAX_KNOWLEDGE]
             ]
 
-        # 5. Retrieve Customer and Conversation History
+        conversation_summary_data: Optional[str] = None
+
+        # 5. Retrieve Customer, Conversation History & Conversation Summary
         if "customer" in categories and request.customer_id:
             cust = await self.cust_repo.get_by_id(request.tenant_id, request.customer_id)
             if cust:
                 customer_data = _project_safe_fields(cust, SAFE_CUSTOMER_FIELDS)
 
         if "conversation" in categories and request.conversation_id:
-            recent_msgs = await self.msg_repo.list_by_conversation(request.tenant_id, request.conversation_id, limit=10)
+            conv = await self.conv_repo.get_by_id(request.tenant_id, request.conversation_id)
+            if conv and getattr(conv, "summary", None):
+                conversation_summary_data = conv.summary
+
+            recent_msgs = await self.msg_repo.list_by_conversation(
+                request.tenant_id, request.conversation_id, limit=MAX_CONVERSATION_MESSAGES
+            )
             conversation_history_data = [
                 _project_safe_fields(m, SAFE_CONVERSATION_FIELDS)
                 for m in recent_msgs
             ]
 
-        # 6. Retrieve Memory Context (Business Memory & Client Memory)
+        # 6. Retrieve Analytics Context (for authorized Owner AI / Analyst)
+        if "analytics" in categories:
+            try:
+                from app.analytics.services import AnalyticsService
+                analytics_svc = AnalyticsService(self.session)
+                health_data = await analytics_svc.get_business_health(request.tenant_id)
+                facts["analytics"] = health_data
+            except Exception as e:
+                logger.warning("Failed to retrieve analytics context for tenant %s: %s", request.tenant_id, e)
+
+        # 7. Retrieve Task Context (for authorized Owner AI / Task Execution)
+        if "tasks" in categories:
+            stmt = (
+                select(Task)
+                .where(
+                    Task.tenant_id == request.tenant_id,
+                    Task.status.in_(["CREATED", "ASSIGNED", "IN_PROGRESS", "WAITING_DATA", "WAITING_APPROVAL", "BLOCKED"]),
+                )
+                .order_by(Task.created_at.desc())
+                .limit(MAX_TASK_ITEMS)
+            )
+            active_tasks = (await self.session.execute(stmt)).scalars().all()
+            task_context_data = {
+                "active_tasks_count": len(active_tasks),
+                "tasks": [_project_safe_fields(t, SAFE_TASK_FIELDS) for t in active_tasks],
+            }
+
+        # 8. Retrieve Memory Context (Business Memory & Client Memory)
         if "business_memory" in categories or "client_memory" in categories:
             mem_context = await self.mem_service.get_relevant_context(
                 tenant_id=request.tenant_id,
@@ -302,14 +379,40 @@ class ContextAssemblyService:
             if "business_memory" in categories:
                 business_memory_data = [
                     _project_safe_fields(m, SAFE_MEMORY_FIELDS)
-                    for m in mem_context.business_memories
+                    for m in mem_context.business_memories[:MAX_MEMORY_ITEMS]
                 ]
 
             if "client_memory" in categories:
                 client_memory_data = [
                     _project_safe_fields(m, SAFE_MEMORY_FIELDS)
-                    for m in mem_context.client_memories
+                    for m in mem_context.client_memories[:MAX_MEMORY_ITEMS]
                 ]
+
+        # Enforce Context Budget Limit (Trimming lower-priority context if size exceeds budget)
+        def _get_bytes_len() -> int:
+            payload = {
+                "facts": facts,
+                "business_profile": business_profile_data,
+                "knowledge": knowledge_data,
+                "customer": customer_data,
+                "conversation_summary": conversation_summary_data,
+                "conversation_history": conversation_history_data,
+                "business_memory": business_memory_data,
+                "client_memory": client_memory_data,
+                "task_context": task_context_data,
+            }
+            return len(json.dumps(payload, default=str).encode("utf-8"))
+
+        if _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            logger.warning("Context byte size exceeds budget limit (%d > %d). Trimming low-priority context.", _get_bytes_len(), MAX_TOTAL_CONTEXT_BYTES)
+            while client_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                client_memory_data.pop()
+            while business_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                business_memory_data.pop()
+            while len(conversation_history_data) > 2 and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                conversation_history_data.pop(0)
+            while len(knowledge_data) > 1 and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                knowledge_data.pop()
 
         # Sanitize assembled data to prevent secret leakage
         sanitized_facts = sanitize_data(facts)
@@ -319,6 +422,7 @@ class ContextAssemblyService:
         sanitized_conv = sanitize_data(conversation_history_data)
         sanitized_biz_mem = sanitize_data(business_memory_data)
         sanitized_client_mem = sanitize_data(client_memory_data)
+        sanitized_task_ctx = sanitize_data(task_context_data) if task_context_data else None
 
         assembled = AssembledContext(
             tenant_id=request.tenant_id,
@@ -331,10 +435,11 @@ class ContextAssemblyService:
             business_profile=sanitized_bp,
             knowledge=sanitized_knowledge,
             customer=sanitized_customer,
+            conversation_summary=conversation_summary_data,
             conversation_history=sanitized_conv,
             business_memory=sanitized_biz_mem,
             client_memory=sanitized_client_mem,
-            task_context=task_context_data,
+            task_context=sanitized_task_ctx,
             assembled_categories=categories,
         )
 
@@ -364,7 +469,9 @@ class ContextAssemblyService:
         knowledge_block = f"[APPROVED KNOWLEDGE]\n{assembled.knowledge}\n[/APPROVED KNOWLEDGE]" if assembled.knowledge else "[APPROVED KNOWLEDGE]\nNone provided\n[/APPROVED KNOWLEDGE]"
         biz_mem_block = f"[BUSINESS MEMORY]\n{assembled.business_memory}\n[/BUSINESS MEMORY]" if assembled.business_memory else "[BUSINESS MEMORY]\nNone provided\n[/BUSINESS MEMORY]"
         client_mem_block = f"[CLIENT MEMORY]\n{assembled.client_memory}\n[/CLIENT MEMORY]" if assembled.client_memory else "[CLIENT MEMORY]\nNone provided\n[/CLIENT MEMORY]"
+        conv_summary_block = f"[CONVERSATION SUMMARY]\n{assembled.conversation_summary}\n[/CONVERSATION SUMMARY]" if assembled.conversation_summary else ""
         conv_block = f"[CONVERSATION HISTORY]\n{assembled.conversation_history}\n[/CONVERSATION HISTORY]" if assembled.conversation_history else "[CONVERSATION HISTORY]\nNone provided\n[/CONVERSATION HISTORY]"
+        task_ctx_block = f"[TASK / WORKFLOW STATE]\n{assembled.task_context}\n[/TASK / WORKFLOW STATE]" if assembled.task_context else ""
 
         untrusted_input = f"[UNTRUSTED USER INPUT]\n{user_message}\n[/UNTRUSTED USER INPUT]"
 
@@ -387,9 +494,13 @@ class ContextAssemblyService:
             knowledge_block,
             biz_mem_block,
             client_mem_block,
-            conv_block,
-            untrusted_input,
         ])
+        if conv_summary_block:
+            full_prompt_parts.append(conv_summary_block)
+        full_prompt_parts.append(conv_block)
+        if task_ctx_block:
+            full_prompt_parts.append(task_ctx_block)
+        full_prompt_parts.append(untrusted_input)
 
         full_prompt = "\n\n".join(full_prompt_parts)
 
@@ -399,7 +510,9 @@ class ContextAssemblyService:
             approved_knowledge_block=knowledge_block,
             business_memory_block=biz_mem_block,
             client_memory_block=client_mem_block,
+            conversation_summary_block=conv_summary_block,
             conversation_history_block=conv_block,
+            task_context_block=task_ctx_block,
             untrusted_user_input=untrusted_input,
             full_prompt=full_prompt,
         )

@@ -425,6 +425,7 @@ async def test_10_all_six_specialist_agents_real_execution_path(test_engine, set
             tenant_id=t1_id,
             role="owner",
             permissions={"business.read", "product.read", "knowledge.read"},
+            is_platform_owner=True,
         )
         token = set_actor_context(actor_t1)
         try:
@@ -461,7 +462,7 @@ async def test_10_all_six_specialist_agents_real_execution_path(test_engine, set
                     ai_req_arg = mock_gen.call_args.args[0] if mock_gen.call_args.args else mock_gen.call_args.kwargs.get("request")
                     assert "[FACTS - AUTHORITATIVE SYSTEM TRUTH]" in ai_req_arg.user_message
 
-            # Test Owner AI Orchestrator real orchestrate execution path
+            # Test Owner AI Orchestrator real orchestrate execution path (as Human Platform Owner)
             orchestrator = OwnerAIOrchestrator(session)
             res_owner = await orchestrator.orchestrate(tenant_id=t1_id, objective="Test business health and strategy")
             assert res_owner.status.value in ("COMPLETED", "PARTIAL")
@@ -626,7 +627,7 @@ async def test_13_handlers_and_services_fail_closed_without_actor(test_engine, s
             tenant_id=str(t1_id),
         )
         assert wf_res.success is False
-        assert "Authentication required" in wf_res.error
+        assert "PERMISSION_DENIED" in wf_res.error
 
 
 @pytest.mark.asyncio
@@ -682,4 +683,4 @@ async def test_14_approval_service_fail_closed_without_actor(test_engine, setup_
                 decided_by="admin_user",
             )
         assert exc_info.value.status_code == 403
-        assert "Authentication required" in exc_info.value.message
+        assert "PERMISSION_DENIED" in exc_info.value.message
