@@ -280,12 +280,13 @@ class ContextAssemblyService:
 
             # Filter products if query text is specific (minimum necessary context)
             if query_text:
-                q_tokens = [t.lower() for t in query_text.split() if len(t) > 2]
+                q_tokens = [t.lower() for t in query_text.split() if len(t) > 0]
                 if q_tokens:
                     matched_prods = []
                     for p in active_prods:
-                        p_text = f"{p.name} {p.sku or ''} {getattr(p, 'description', '') or ''}".lower()
-                        if any(tok in p_text for tok in q_tokens):
+                        p_name_lower = p.name.lower()
+                        p_sku_lower = (p.sku or "").lower()
+                        if all(tok in p_name_lower or tok in p_sku_lower for tok in q_tokens):
                             matched_prods.append(p)
                     # Empty-result semantics: if query provided but no matches exist, return empty
                     active_prods = matched_prods
@@ -306,7 +307,7 @@ class ContextAssemblyService:
         if "knowledge" in categories:
             approved_items = await self.know_repo.list_active_and_approved(request.tenant_id)
             if query_text:
-                q_tokens = [t.lower() for t in query_text.split() if len(t) > 2]
+                q_tokens = [t.lower() for t in query_text.split() if len(t) > 0]
                 if q_tokens:
                     filtered_know = []
                     for k in approved_items:

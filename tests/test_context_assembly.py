@@ -219,7 +219,7 @@ async def test_04_current_authoritative_facts_override_stale_memory(test_engine,
             req = ContextAssemblyRequest(
                 tenant_id=t1_id,
                 agent_name="ai_sales",
-                query_text="Super Shirt price",
+                query_text="Super Shirt",
             )
             ctx = await service.assemble_context(req)
 
