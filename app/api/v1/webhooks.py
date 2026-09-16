@@ -3,6 +3,7 @@ import json
 import logging
 import hmac
 import hashlib
+import asyncio
 from typing import Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
@@ -608,14 +609,17 @@ async def _process_whatsapp_webhook_body(
                                 params={"recipient_phone": sender_phone, "text": route_result.response_text},
                                 allow_internal=True,
                             )
-                            if isinstance(send_res, dict):
-                                send_result_id = (
-                                    send_res.get("data", {}).get("message_id")
-                                    if isinstance(send_res.get("data"), dict)
-                                    else None
-                                ) or send_res.get("message_id")
 
-                            if send_result_id:
+                            if send_res.status == "COMPLETED" and send_res.result:
+                                res_dict = send_res.result
+                                if isinstance(res_dict, dict):
+                                    send_result_id = (
+                                        res_dict.get("data", {}).get("message_id")
+                                        if isinstance(res_dict.get("data"), dict)
+                                        else None
+                                    ) or res_dict.get("message_id") or res_dict.get("provider_message_id")
+
+                            if send_res.status == "COMPLETED" and send_result_id:
                                 outbound_db_msg.external_message_id = send_result_id
                                 await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "SENT")
                                 await publish_integration_event(
@@ -630,14 +634,20 @@ async def _process_whatsapp_webhook_body(
                                     },
                                     source="whatsapp_webhook",
                                 )
+                            elif send_res.status == "FAILED":
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
                             else:
                                 await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
-                        except TimeoutError as timeout_err:
+                        except (TimeoutError, asyncio.TimeoutError) as timeout_err:
                             logger.error("Timeout sending WhatsApp response: %s", timeout_err)
                             await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
                         except Exception as send_err:
-                            logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
-                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
+                            if "timeout" in str(send_err).lower():
+                                logger.error("Timeout/ambiguous error sending WhatsApp response: %s", send_err)
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
+                            else:
+                                logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
                     else:
                         logger.info(
                             "Outbound customer message suppressed for conversation %s due to human ownership / status %s",
@@ -679,36 +689,66 @@ async def _process_whatsapp_webhook_body(
                         meta["status_timestamp"] = st.get("timestamp")
                         existing_msg.metadata_ = meta
 
+                        transition_successful = True
                         if target_status:
                             try:
                                 await msg_repo.transition_status(tenant_id, existing_msg.id, target_status)
                             except Exception as trans_err:
+                                transition_successful = False
                                 logger.warning("Could not transition message %s to status %s: %s", existing_msg.id, target_status, trans_err)
 
-                exec_rec = IntegrationExecution(
-                    tenant_id=tenant_id,
-                    connection_id=target_connection.id,
-                    operation=f"status_{raw_status_val}",
-                    status="COMPLETED",
-                    idempotency_key=idempotency_key,
-                    started_at=datetime.now(timezone.utc),
-                    completed_at=datetime.now(timezone.utc),
-                    response_payload={"status": raw_status_val, "status_id": status_id},
-                )
-                db.add(exec_rec)
+                        if transition_successful:
+                            exec_rec = IntegrationExecution(
+                                tenant_id=tenant_id,
+                                connection_id=target_connection.id,
+                                operation=f"status_{raw_status_val}",
+                                status="COMPLETED",
+                                idempotency_key=idempotency_key,
+                                started_at=datetime.now(timezone.utc),
+                                completed_at=datetime.now(timezone.utc),
+                                response_payload={"status": raw_status_val, "status_id": status_id},
+                            )
+                            db.add(exec_rec)
 
-                await publish_integration_event(
-                    tenant_id=tenant_id,
-                        event_type=f"whatsapp.message_{raw_status_val}",
-                    payload={
-                        "status_id": status_id,
-                            "status": raw_status_val,
-                        "recipient_id": st.get("recipient_id"),
-                    },
-                    idempotency_key=idempotency_key,
-                )
+                            await publish_integration_event(
+                                tenant_id=tenant_id,
+                                event_type=f"whatsapp.message_{raw_status_val}",
+                                payload={
+                                    "status_id": status_id,
+                                    "status": raw_status_val,
+                                    "recipient_id": st.get("recipient_id"),
+                                },
+                                idempotency_key=idempotency_key,
+                            )
 
-                processed_results.append({"status_id": status_id, "status": raw_status_val})
+                            processed_results.append({"status_id": status_id, "status": raw_status_val})
+                        else:
+                            processed_results.append({"status_id": status_id, "status": "status_transition_rejected"})
+                    else:
+                        exec_rec = IntegrationExecution(
+                            tenant_id=tenant_id,
+                            connection_id=target_connection.id,
+                            operation=f"status_{raw_status_val}",
+                            status="COMPLETED",
+                            idempotency_key=idempotency_key,
+                            started_at=datetime.now(timezone.utc),
+                            completed_at=datetime.now(timezone.utc),
+                            response_payload={"status": raw_status_val, "status_id": status_id},
+                        )
+                        db.add(exec_rec)
+
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type=f"whatsapp.message_{raw_status_val}",
+                            payload={
+                                "status_id": status_id,
+                                "status": raw_status_val,
+                                "recipient_id": st.get("recipient_id"),
+                            },
+                            idempotency_key=idempotency_key,
+                        )
+
+                        processed_results.append({"status_id": status_id, "status": raw_status_val})
 
     await db.commit()
     return {"status": "success", "tenant_id": str(tenant_id), "processed": processed_results}

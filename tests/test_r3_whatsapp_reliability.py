@@ -143,3 +143,80 @@ async def test_r3_runtime_repository_status_transition_enforcement(db_session: A
     # Attempting illegal runtime transition must raise InvalidStateTransitionError
     with pytest.raises(InvalidStateTransitionError):
         await msg_repo.transition_status(tenant.id, msg.id, "SENT")
+
+
+@pytest.mark.asyncio
+async def test_r3_webhook_status_event_invalid_transition_rejection(async_client, test_session):
+    import json
+    import hmac
+    import hashlib
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    tenant = Tenant(name="Status Rejection Tenant", slug=f"srt-{uuid.uuid4().hex[:6]}", is_active=True)
+    test_session.add(tenant)
+    await test_session.commit()
+
+    app_secret = "secret_status_rej_123"
+    phone_number_id = "888123"
+    await _setup_active_whatsapp_integration(tenant, test_session, phone_number_id=phone_number_id, app_secret=app_secret)
+
+    cust = Customer(tenant_id=tenant.id, name="Status Cust", phone="62811112222")
+    test_session.add(cust)
+    await test_session.commit()
+
+    conv = Conversation(tenant_id=tenant.id, customer_id=cust.id, channel="whatsapp", status="OPEN")
+    test_session.add(conv)
+    await test_session.commit()
+
+    # Create a message currently in CREATED status
+    msg = Message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        direction="OUTBOUND",
+        message_type="TEXT",
+        status="CREATED",
+        text="Status event test",
+        external_message_id="wamid.status_rej_001",
+    )
+    test_session.add(msg)
+    await test_session.commit()
+
+    # Deliver a status webhook claiming 'delivered' (CREATED -> DELIVERED is illegal)
+    webhook_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": phone_number_id},
+                            "statuses": [
+                                {
+                                    "id": "wamid.status_rej_001",
+                                    "status": "delivered",
+                                    "timestamp": "1710000000",
+                                    "recipient_id": "62811112222",
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    res = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
+    assert res.status_code == 200
+    assert res.json()["processed"][0]["status"] == "status_transition_rejected"
+
+    # Verify DB status remains CREATED and was not corrupted
+    await test_session.refresh(msg)
+    assert msg.status == "CREATED"

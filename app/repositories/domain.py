@@ -312,7 +312,7 @@ class MessageRepository(BaseRepository[Message]):
     ) -> Message:
         from app.core.messaging_state import validate_message_status_transition
 
-        stmt = select(Message).where(Message.tenant_id == tenant_id, Message.id == message_id)
+        stmt = select(Message).where(Message.tenant_id == tenant_id, Message.id == message_id).with_for_update()
         result = await self.session.execute(stmt)
         message = result.scalar_one_or_none()
         if not message:
