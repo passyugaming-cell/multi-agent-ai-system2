@@ -566,10 +566,30 @@ async def _process_whatsapp_webhook_body(
                             source="message_router",
                         )
 
+                    await publish_integration_event(
+                        tenant_id=tenant_id,
+                        event_type="whatsapp.message_received",
+                        payload={
+                            "external_message_id": un_msg.external_message_id,
+                            "customer_id": str(customer.id),
+                            "conversation_id": str(conversation.id),
+                            "message_type": un_msg.message_type,
+                            "text": un_msg.text,
+                        },
+                    )
+
                     send_result_id = None
-                    # Re-read fresh conversation state directly from DB before outbound send to prevent race conditions
                     fresh_conv = await conv_repo.get_by_id(tenant_id, conversation.id) if conversation.id else conversation
                     active_conv = fresh_conv or conversation
+
+                    outbound_db_msg = await msg_repo.create(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation.id,
+                        direction="OUTBOUND",
+                        message_type="TEXT",
+                        text=route_result.response_text,
+                        external_message_id=None,
+                    )
 
                     if (
                         sender_phone
@@ -578,6 +598,9 @@ async def _process_whatsapp_webhook_body(
                         and not route_result.handsoff_to_human
                     ):
                         try:
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "QUEUED")
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "SENDING")
+
                             send_res = await service.execute_operation(
                                 tenant_id=tenant_id,
                                 connection_id=target_connection.id,
@@ -591,48 +614,37 @@ async def _process_whatsapp_webhook_body(
                                     if isinstance(send_res.get("data"), dict)
                                     else None
                                 ) or send_res.get("message_id")
+
+                            if send_result_id:
+                                outbound_db_msg.external_message_id = send_result_id
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "SENT")
+                                await publish_integration_event(
+                                    tenant_id=tenant_id,
+                                    event_type="whatsapp.message_sent",
+                                    payload={
+                                        "external_message_id": send_result_id,
+                                        "message_id": str(outbound_db_msg.id),
+                                        "customer_id": str(customer.id),
+                                        "conversation_id": str(conversation.id),
+                                        "text": route_result.response_text,
+                                    },
+                                    source="whatsapp_webhook",
+                                )
+                            else:
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
+                        except TimeoutError as timeout_err:
+                            logger.error("Timeout sending WhatsApp response: %s", timeout_err)
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
                         except Exception as send_err:
                             logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
                     else:
                         logger.info(
                             "Outbound customer message suppressed for conversation %s due to human ownership / status %s",
                             conversation.id,
                             active_conv.status,
                         )
-
-                    outbound_db_msg = await msg_repo.create(
-                        tenant_id=tenant_id,
-                        conversation_id=conversation.id,
-                        direction="OUTBOUND",
-                        message_type="TEXT",
-                        text=route_result.response_text,
-                        external_message_id=send_result_id,
-                    )
-
-                    await publish_integration_event(
-                        tenant_id=tenant_id,
-                        event_type="whatsapp.message_received",
-                        payload={
-                            "external_message_id": un_msg.external_message_id,
-                            "customer_id": str(customer.id),
-                            "conversation_id": str(conversation.id),
-                            "message_type": un_msg.message_type,
-                            "text": un_msg.text,
-                        },
-                    )
-
-                    await publish_integration_event(
-                        tenant_id=tenant_id,
-                        event_type="whatsapp.message_sent",
-                        payload={
-                            "external_message_id": send_result_id,
-                            "message_id": str(outbound_db_msg.id),
-                            "customer_id": str(customer.id),
-                            "conversation_id": str(conversation.id),
-                            "text": route_result.response_text,
-                        },
-                        source="whatsapp_webhook",
-                    )
+                        await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
 
                     processed_results.append({
                         "external_message_id": un_msg.external_message_id,
@@ -643,46 +655,60 @@ async def _process_whatsapp_webhook_body(
             statuses = val.get("statuses", [])
             for st in statuses:
                 status_id = st.get("id")
-                status_val = st.get("status", "").lower()
-                idempotency_key = f"wa_status_{status_id}_{status_val}"
+                raw_status_val = st.get("status", "").lower()
+                idempotency_key = f"wa_status_{status_id}_{raw_status_val}"
 
                 existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
                 if existing_exec:
                     processed_results.append({"status_id": status_id, "status": "duplicate_event"})
                     continue
 
+                status_map = {
+                    "sent": "SENT",
+                    "delivered": "DELIVERED",
+                    "read": "READ",
+                    "failed": "FAILED",
+                }
+                target_status = status_map.get(raw_status_val)
+
                 if status_id:
                     existing_msg = await msg_repo.get_by_external_id(tenant_id, status_id)
                     if existing_msg:
                         meta = dict(existing_msg.metadata_ or {})
-                        meta["delivery_status"] = status_val
+                        meta["delivery_status"] = raw_status_val
                         meta["status_timestamp"] = st.get("timestamp")
                         existing_msg.metadata_ = meta
+
+                        if target_status:
+                            try:
+                                await msg_repo.transition_status(tenant_id, existing_msg.id, target_status)
+                            except Exception as trans_err:
+                                logger.warning("Could not transition message %s to status %s: %s", existing_msg.id, target_status, trans_err)
 
                 exec_rec = IntegrationExecution(
                     tenant_id=tenant_id,
                     connection_id=target_connection.id,
-                    operation=f"status_{status_val}",
+                    operation=f"status_{raw_status_val}",
                     status="COMPLETED",
                     idempotency_key=idempotency_key,
                     started_at=datetime.now(timezone.utc),
                     completed_at=datetime.now(timezone.utc),
-                    response_payload={"status": status_val, "status_id": status_id},
+                    response_payload={"status": raw_status_val, "status_id": status_id},
                 )
                 db.add(exec_rec)
 
                 await publish_integration_event(
                     tenant_id=tenant_id,
-                    event_type=f"whatsapp.message_{status_val}",
+                        event_type=f"whatsapp.message_{raw_status_val}",
                     payload={
                         "status_id": status_id,
-                        "status": status_val,
+                            "status": raw_status_val,
                         "recipient_id": st.get("recipient_id"),
                     },
                     idempotency_key=idempotency_key,
                 )
 
-                processed_results.append({"status_id": status_id, "status": status_val})
+                processed_results.append({"status_id": status_id, "status": raw_status_val})
 
     await db.commit()
     return {"status": "success", "tenant_id": str(tenant_id), "processed": processed_results}

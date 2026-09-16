@@ -307,6 +307,22 @@ class MessageRepository(BaseRepository[Message]):
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
+    async def transition_status(
+        self, tenant_id: uuid.UUID, message_id: uuid.UUID, target_status: str
+    ) -> Message:
+        from app.core.messaging_state import validate_message_status_transition
+
+        stmt = select(Message).where(Message.tenant_id == tenant_id, Message.id == message_id)
+        result = await self.session.execute(stmt)
+        message = result.scalar_one_or_none()
+        if not message:
+            raise ValueError(f"Message {message_id} not found for tenant {tenant_id}")
+
+        validate_message_status_transition(message.status, target_status)
+        message.status = target_status
+        await self.session.flush()
+        return message
+
 
 class OrderRepository(BaseRepository[Order]):
     def __init__(self, session: AsyncSession):

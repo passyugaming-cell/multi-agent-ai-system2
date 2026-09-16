@@ -101,3 +101,45 @@ async def test_r3_message_status_state_machine(db_session: AsyncSession):
     for current, target in invalid_pairs:
         with pytest.raises(InvalidStateTransitionError):
             validate_message_status_transition(current, target)
+
+
+@pytest.mark.asyncio
+async def test_r3_runtime_repository_status_transition_enforcement(db_session: AsyncSession):
+    from app.core.messaging_state import InvalidStateTransitionError
+
+    tenant = Tenant(name="Runtime Transition Tenant", slug=f"rtt-{uuid.uuid4().hex[:6]}", is_active=True)
+    db_session.add(tenant)
+    await db_session.commit()
+
+    cust = await CustomerRepository(db_session).get_or_create(tenant.id, "081233332222")
+    conv = await ConversationRepository(db_session).get_or_create_active(tenant.id, cust.id)
+
+    msg_repo = MessageRepository(db_session)
+    msg = await msg_repo.create(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        direction="OUTBOUND",
+        message_type="TEXT",
+        text="Runtime state transition test",
+    )
+    assert msg.status == "CREATED"
+
+    # Valid transitions via MessageRepository
+    await msg_repo.transition_status(tenant.id, msg.id, "QUEUED")
+    assert msg.status == "QUEUED"
+
+    await msg_repo.transition_status(tenant.id, msg.id, "SENDING")
+    assert msg.status == "SENDING"
+
+    await msg_repo.transition_status(tenant.id, msg.id, "SENT")
+    assert msg.status == "SENT"
+
+    await msg_repo.transition_status(tenant.id, msg.id, "DELIVERED")
+    assert msg.status == "DELIVERED"
+
+    await msg_repo.transition_status(tenant.id, msg.id, "READ")
+    assert msg.status == "READ"
+
+    # Attempting illegal runtime transition must raise InvalidStateTransitionError
+    with pytest.raises(InvalidStateTransitionError):
+        await msg_repo.transition_status(tenant.id, msg.id, "SENT")
