@@ -388,94 +388,103 @@ class ContextAssemblyService:
                     for m in mem_context.client_memories[:MAX_MEMORY_ITEMS]
                 ]
 
-        # Enforce Context Budget Limit (Trimming lower-priority context if size exceeds budget)
-        def _get_bytes_len() -> int:
-            payload = {
-                "tenant_id": str(request.tenant_id),
-                "agent_name": request.agent_name,
-                "task_type": request.task_type,
-                "actor_id": actor_id,
-                "actor_role": actor_role,
-                "actor_permissions": actor_permissions,
-                "facts": facts,
-                "business_profile": business_profile_data,
-                "knowledge": knowledge_data,
-                "customer": customer_data,
-                "conversation_summary": conversation_summary_data,
-                "conversation_history": conversation_history_data,
-                "business_memory": business_memory_data,
-                "client_memory": client_memory_data,
-                "task_context": task_context_data,
-                "assembled_categories": categories,
-            }
-            return len(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
+        # Helper to construct trial AssembledContext and measure exact serialized model_dump bytes
+        def _build_assembled(
+            cust_mem: List[Dict[str, Any]],
+            biz_mem: List[Dict[str, Any]],
+            conv_hist: List[Dict[str, Any]],
+            conv_sum: Optional[str],
+            know: List[Dict[str, Any]],
+            tasks_ctx: Optional[Dict[str, Any]],
+        ) -> AssembledContext:
+            return AssembledContext(
+                tenant_id=request.tenant_id,
+                agent_name=request.agent_name,
+                task_type=request.task_type,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                actor_permissions=actor_permissions,
+                facts=sanitize_data(facts),
+                business_profile=sanitize_data(business_profile_data) if business_profile_data else None,
+                knowledge=sanitize_data(know),
+                customer=sanitize_data(customer_data) if customer_data else None,
+                conversation_summary=conv_sum,
+                conversation_history=sanitize_data(conv_hist),
+                business_memory=sanitize_data(biz_mem),
+                client_memory=sanitize_data(cust_mem),
+                task_context=sanitize_data(tasks_ctx) if tasks_ctx else None,
+                assembled_categories=categories,
+            )
 
-        if _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+        def _get_model_dump_bytes(ctx: AssembledContext) -> int:
+            return len(json.dumps(ctx.model_dump(mode="json"), sort_keys=True, default=str).encode("utf-8"))
+
+        trial_ctx = _build_assembled(
+            client_memory_data,
+            business_memory_data,
+            conversation_history_data,
+            conversation_summary_data,
+            knowledge_data,
+            task_context_data,
+        )
+
+        if _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
             logger.warning(
                 "Context byte size exceeds budget limit (%d > %d). Trimming low-priority context.",
-                _get_bytes_len(),
+                _get_model_dump_bytes(trial_ctx),
                 MAX_TOTAL_CONTEXT_BYTES,
             )
             # 1. Trim client memory first
-            while client_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            while client_memory_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 client_memory_data.pop()
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 2. Trim business memory next
-            while business_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            while business_memory_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 business_memory_data.pop()
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 3. Trim conversation history next (older messages removed first)
-            while conversation_history_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            while conversation_history_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 conversation_history_data.pop(0)
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 4. Trim conversation summary next
-            if conversation_summary_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            if conversation_summary_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 conversation_summary_data = None
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 5. Trim knowledge items next
-            while knowledge_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            while knowledge_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 knowledge_data.pop()
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 6. Trim task context next
-            if task_context_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            if task_context_data and _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 task_context_data = None
+                trial_ctx = _build_assembled(
+                    client_memory_data, business_memory_data, conversation_history_data, conversation_summary_data, knowledge_data, task_context_data
+                )
 
             # 7. Fail closed if authoritative DB facts + business profile alone exceed budget
-            if _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+            if _get_model_dump_bytes(trial_ctx) > MAX_TOTAL_CONTEXT_BYTES:
                 raise AppException(
                     code="CONTEXT_BUDGET_EXCEEDED",
                     message=f"Authoritative system facts and business profile exceed maximum allowed context budget of {MAX_TOTAL_CONTEXT_BYTES} bytes.",
                     status_code=400,
                 )
 
-        # Sanitize assembled data to prevent secret leakage
-        sanitized_facts = sanitize_data(facts)
-        sanitized_bp = sanitize_data(business_profile_data) if business_profile_data else None
-        sanitized_knowledge = sanitize_data(knowledge_data)
-        sanitized_customer = sanitize_data(customer_data) if customer_data else None
-        sanitized_conv = sanitize_data(conversation_history_data)
-        sanitized_biz_mem = sanitize_data(business_memory_data)
-        sanitized_client_mem = sanitize_data(client_memory_data)
-        sanitized_task_ctx = sanitize_data(task_context_data) if task_context_data else None
-
-        assembled = AssembledContext(
-            tenant_id=request.tenant_id,
-            agent_name=request.agent_name,
-            task_type=request.task_type,
-            actor_id=actor_id,
-            actor_role=actor_role,
-            actor_permissions=actor_permissions,
-            facts=sanitized_facts,
-            business_profile=sanitized_bp,
-            knowledge=sanitized_knowledge,
-            customer=sanitized_customer,
-            conversation_summary=conversation_summary_data,
-            conversation_history=sanitized_conv,
-            business_memory=sanitized_biz_mem,
-            client_memory=sanitized_client_mem,
-            task_context=sanitized_task_ctx,
-            assembled_categories=categories,
-        )
+        assembled = trial_ctx
 
         logger.info(
             "Assembled context for tenant %s [agent=%s, task=%s, categories=%s]",
