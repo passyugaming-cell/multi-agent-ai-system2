@@ -47,10 +47,26 @@ class MessageRouter:
         message: Message,
         session: AsyncSession,
     ) -> RouterResult:
-        # 1. Check Human Handoff / AI Enabled status
-        if conversation.human_handoff or not conversation.ai_enabled:
+        # 1. Re-verify conversation status & ownership from DB state
+        # (Prevents race conditions where a human claimed the conversation while worker was queued)
+        if conversation.id:
+            from sqlalchemy import select
+            stmt = select(Conversation).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.id == conversation.id,
+            ).execution_options(populate_existing=True)
+            res = await session.execute(stmt)
+            fresh_conv = res.scalar_one_or_none()
+            if fresh_conv:
+                conversation = fresh_conv
+
+        if (
+            conversation.human_handoff
+            or not conversation.ai_enabled
+            or conversation.status in ("WAITING_HUMAN", "HUMAN_HANDLING", "HUMAN_ACTIVE", "CLOSED")
+        ):
             logger.info(
-                f"Conversation {conversation.id} has human_handoff={conversation.human_handoff} / ai_enabled={conversation.ai_enabled}. AI disabled."
+                f"Conversation {conversation.id} is human-owned or closed (status={conversation.status}, human_handoff={conversation.human_handoff}, ai_enabled={conversation.ai_enabled}). AI response suppressed."
             )
             return RouterResult(
                 response_text="[SYSTEM] Message logged for human agent.",

@@ -1,13 +1,98 @@
 import pytest
 from decimal import Decimal
 import uuid
+import hmac
+import hashlib
+import json
+from datetime import datetime, timezone, timedelta
 from httpx import AsyncClient
+from sqlalchemy import select
 
-from app.database.models import Tenant, Product
+from app.database.models import Tenant, Product, Subscription, Plan, PlanFeature
+from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential
+from app.integrations.service import IntegrationService
 from app.core.router.router import MessageRouter
 from app.core.router.intent import StructuredIntent
 from app.core.ai_gateway import AIGateway
 from tests.fake_ai import FakeAIProvider
+
+
+async def _setup_active_whatsapp_integration(tenant, db_session, phone_number_id="67890", app_secret="test_secret_123"):
+    stmt = select(Integration).where(Integration.integration_key == "whatsapp_cloud_api")
+    integration = (await db_session.execute(stmt)).scalars().first()
+    if not integration:
+        integration = Integration(
+            display_name="WhatsApp Cloud API",
+            integration_key="whatsapp_cloud_api",
+            provider_key="whatsapp_cloud_api",
+            category="channel",
+            status="AVAILABLE",
+            is_enabled=True,
+            configuration={"api_version": "v18.0"},
+        )
+        db_session.add(integration)
+        await db_session.commit()
+
+    plan = Plan(
+        name="Pro Plan",
+        code=f"pro_{uuid.uuid4().hex[:6]}",
+        price_monthly=Decimal("100.00"),
+        price_yearly=Decimal("1000.00"),
+        currency="IDR",
+        is_active=True,
+    )
+    db_session.add(plan)
+    await db_session.commit()
+
+    pf = PlanFeature(
+        plan_id=plan.id,
+        feature_key="whatsapp_cloud_api",
+        is_enabled=True,
+    )
+    db_session.add(pf)
+    await db_session.commit()
+
+    now = datetime.now(timezone.utc)
+    sub = Subscription(
+        tenant_id=tenant.id,
+        plan_id=plan.id,
+        status="ACTIVE",
+        billing_cycle="MONTHLY",
+        started_at=now,
+        current_period_start=now,
+        current_period_end=now + timedelta(days=30),
+    )
+    db_session.add(sub)
+    await db_session.commit()
+
+    conn = IntegrationConnection(
+        tenant_id=tenant.id,
+        integration_id=integration.id,
+        status="ACTIVE",
+        external_account_id=phone_number_id,
+        meta_data={"phone_number_id": phone_number_id},
+    )
+    db_session.add(conn)
+    await db_session.commit()
+
+    service = IntegrationService(db_session)
+    creds_dict = {
+        "phone_number_id": phone_number_id,
+        "access_token": "test_access_token",
+        "app_secret": app_secret,
+        "verify_token": "test_verify_token",
+    }
+    enc_secret = service.vault.encrypt_credentials(creds_dict)
+
+    cred = IntegrationCredential(
+        tenant_id=tenant.id,
+        connection_id=conn.id,
+        credential_type="bearer_token",
+        encrypted_secret=enc_secret,
+    )
+    db_session.add(cred)
+    await db_session.commit()
+    return conn
 
 
 @pytest.mark.asyncio
@@ -16,6 +101,10 @@ async def test_e2e_deterministic_price_query_without_ai(async_client: AsyncClien
     tenant = Tenant(name="E2E Tenant 1", slug="e2e-tenant-1", is_active=True)
     test_session.add(tenant)
     await test_session.commit()
+
+    app_secret = "secret_e2e_123"
+    phone_number_id = "67890"
+    await _setup_active_whatsapp_integration(tenant, test_session, phone_number_id=phone_number_id, app_secret=app_secret)
 
     product = Product(
         tenant_id=tenant.id,
@@ -27,8 +116,6 @@ async def test_e2e_deterministic_price_query_without_ai(async_client: AsyncClien
     test_session.add(product)
     await test_session.commit()
 
-    headers = {"X-Tenant-ID": str(tenant.id)}
-
     webhook_payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -39,7 +126,7 @@ async def test_e2e_deterministic_price_query_without_ai(async_client: AsyncClien
                         "field": "messages",
                         "value": {
                             "messaging_product": "whatsapp",
-                            "metadata": {"display_phone_number": "12345", "phone_number_id": "67890"},
+                            "metadata": {"display_phone_number": "12345", "phone_number_id": phone_number_id},
                             "contacts": [{"profile": {"name": "Test Customer"}, "wa_id": "08111111111"}],
                             "messages": [
                                 {
@@ -57,7 +144,11 @@ async def test_e2e_deterministic_price_query_without_ai(async_client: AsyncClien
         ],
     }
 
-    res = await async_client.post("/api/v1/integrations/whatsapp/webhook", json=webhook_payload, headers=headers)
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    res = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
     assert res.status_code == 200
     processed = res.json()["processed"][0]
     assert processed["status"] == "processed"

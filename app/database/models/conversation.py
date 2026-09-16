@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, Text, Boolean, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import String, Text, Boolean, ForeignKey, Index, UniqueConstraint, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,4 +40,13 @@ class Conversation(BaseModel):
         Index("idx_conversations_tenant_customer", "tenant_id", "customer_id"),
         Index("idx_conversations_tenant_status", "tenant_id", "status"),
         Index("idx_conversations_tenant_created", "tenant_id", "created_at"),
+        Index(
+            "uq_active_conversations_tenant_customer_channel",
+            "tenant_id",
+            "customer_id",
+            "channel",
+            unique=True,
+            postgresql_where=sa_text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
+            sqlite_where=sa_text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
+        ),
     )

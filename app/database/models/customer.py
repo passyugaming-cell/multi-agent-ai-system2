@@ -1,6 +1,6 @@
 import uuid
 from typing import Any
-from sqlalchemy import String, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import String, ForeignKey, Index, UniqueConstraint, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,4 +28,12 @@ class Customer(BaseModel):
         UniqueConstraint("tenant_id", "id", name="uq_customers_tenant_id"),
         Index("idx_customers_tenant_phone", "tenant_id", "phone"),
         Index("idx_customers_tenant_external_id", "tenant_id", "external_id"),
+        Index(
+            "uq_customers_tenant_phone",
+            "tenant_id",
+            "phone",
+            unique=True,
+            postgresql_where=sa_text("phone IS NOT NULL AND phone != ''"),
+            sqlite_where=sa_text("phone IS NOT NULL AND phone != ''"),
+        ),
     )

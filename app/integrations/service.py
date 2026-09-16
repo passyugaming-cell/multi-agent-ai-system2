@@ -330,20 +330,30 @@ class IntegrationService:
         self._check_permission(actor_permissions, EXECUTE_INTEGRATION, allow_internal=allow_internal)
 
         if idempotency_key:
+            import asyncio
             existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
             if existing:
-                return OperationExecutionResult(
-                    execution_id=existing.id,
-                    connection_id=existing.connection_id,
-                    operation=existing.operation,
-                    status=existing.status,
-                    result=existing.response_payload,
-                    error_code=existing.error_code,
-                    safe_error_message=existing.safe_error_message,
-                    started_at=existing.started_at,
-                    completed_at=existing.completed_at,
-                    retry_count=existing.retry_count,
-                )
+                # If execution is currently RUNNING by another worker, await completion briefly
+                poll_count = 0
+                while existing and existing.status == "RUNNING" and poll_count < 50:
+                    await asyncio.sleep(0.05)
+                    poll_count += 1
+                    self.session.expire_all()
+                    existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+
+                if existing and existing.status in ("COMPLETED", "FAILED"):
+                    return OperationExecutionResult(
+                        execution_id=existing.id,
+                        connection_id=existing.connection_id,
+                        operation=existing.operation,
+                        status=existing.status,
+                        result=existing.response_payload,
+                        error_code=existing.error_code,
+                        safe_error_message=existing.safe_error_message,
+                        started_at=existing.started_at,
+                        completed_at=existing.completed_at,
+                        retry_count=existing.retry_count,
+                    )
 
         connection = await self._get_connection(tenant_id, connection_id)
         if connection.status not in ("ACTIVE", "CONNECTED"):
@@ -374,8 +384,42 @@ class IntegrationService:
             started_at=now,
             request_payload=redact_secrets(params),
         )
-        self.session.add(execution)
-        await self.session.flush()
+
+        if idempotency_key:
+            import asyncio
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(execution)
+                    await self.session.flush()
+            except IntegrityError:
+                if execution in self.session:
+                    self.session.expunge(execution)
+
+                poll_count = 0
+                existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+                while (not existing or existing.status == "RUNNING") and poll_count < 50:
+                    await asyncio.sleep(0.05)
+                    poll_count += 1
+                    self.session.expire_all()
+                    existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+
+                if existing:
+                    return OperationExecutionResult(
+                        execution_id=existing.id,
+                        connection_id=existing.connection_id,
+                        operation=existing.operation,
+                        status=existing.status,
+                        result=existing.response_payload,
+                        error_code=existing.error_code,
+                        safe_error_message=existing.safe_error_message,
+                        started_at=existing.started_at,
+                        completed_at=existing.completed_at,
+                        retry_count=existing.retry_count,
+                    )
+                raise
+        else:
+            self.session.add(execution)
+            await self.session.flush()
 
         try:
             async def _run():
@@ -388,7 +432,9 @@ class IntegrationService:
                     session=self.session,
                 )
 
-            res = await execute_with_retry(_run, max_retries=3)
+            # Non-idempotent operations like outbound message sends must NOT be retried blindly upon ambiguous failure/timeout
+            effective_retries = 1 if operation in ("send_message", "send_whatsapp", "send_email", "send_sms") else 3
+            res = await execute_with_retry(_run, max_retries=effective_retries)
 
             execution.status = "COMPLETED"
             execution.completed_at = datetime.now(timezone.utc)
@@ -397,7 +443,7 @@ class IntegrationService:
             connection.last_success_at = datetime.now(timezone.utc)
             connection.error_message = None
 
-            await self.session.commit()
+            await self.session.flush()
 
             await publish_integration_event(
                 tenant_id=tenant_id,
@@ -431,7 +477,7 @@ class IntegrationService:
             connection.last_error_at = datetime.now(timezone.utc)
             connection.error_message = execution.safe_error_message
 
-            await self.session.commit()
+            await self.session.flush()
 
             await publish_integration_event(
                 tenant_id=tenant_id,
@@ -562,7 +608,11 @@ class IntegrationService:
 
         if is_postgres:
             diag = getattr(orig, "diag", None)
-            cname = getattr(diag, "constraint_name", None) if diag is not None else None
+            cname = (
+                getattr(orig, "constraint_name", None)
+                or getattr(getattr(orig, "__cause__", None), "constraint_name", None)
+                or (getattr(diag, "constraint_name", None) if diag is not None else None)
+            )
             if cname == "uq_active_provider_external_account":
                 raise PermanentIntegrationError(
                     f"External account '{external_account_id}' is already connected to another tenant.",

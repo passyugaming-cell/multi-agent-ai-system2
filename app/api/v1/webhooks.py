@@ -3,15 +3,18 @@ import json
 import logging
 import hmac
 import hashlib
+import asyncio
 from typing import Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
 from fastapi.responses import Response, PlainTextResponse
 from sqlalchemy import select, and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
 from app.database.models.tenant import Tenant
+from app.database.models.message import Message
 from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential, IntegrationExecution
 from app.integrations.service import IntegrationService
 from app.integrations.adapters.whatsapp_cloud_api import WhatsAppCloudApiAdapter
@@ -492,37 +495,31 @@ async def _process_whatsapp_webhook_body(
                     sender_phone = un_msg.metadata.get("sender_phone")
                     sender_name = un_msg.metadata.get("sender_name") or "WhatsApp Customer"
 
-                    customer = None
-                    if sender_phone:
-                        customer = await cust_repo.get_by_phone(tenant_id, sender_phone)
-
-                    if not customer:
-                        customer = await cust_repo.create(
-                            tenant_id=tenant_id,
-                            name=sender_name,
-                            phone=sender_phone,
-                            external_id=sender_phone,
-                        )
+                    customer, customer_created = await cust_repo.get_or_create(
+                        tenant_id=tenant_id,
+                        phone=sender_phone or "628000000000",
+                        name=sender_name,
+                        external_id=sender_phone,
+                    )
+                    if customer_created:
                         await publish_integration_event(
                             tenant_id=tenant_id,
                             event_type="customer.created",
                             payload={
                                 "customer_id": str(customer.id),
-                                "phone": sender_phone,
-                                "name": sender_name,
+                                "phone": customer.phone,
+                                "name": customer.name,
                                 "channel": "whatsapp",
                             },
                             source="whatsapp_webhook",
                         )
 
-                    conversation = await conv_repo.get_active_by_customer(tenant_id, customer.id)
-                    if not conversation:
-                        conversation = await conv_repo.create(
-                            tenant_id=tenant_id,
-                            customer_id=customer.id,
-                            channel="whatsapp",
-                            status="OPEN",
-                        )
+                    conversation, conversation_created = await conv_repo.get_or_create_active(
+                        tenant_id=tenant_id,
+                        customer_id=customer.id,
+                        channel="whatsapp",
+                    )
+                    if conversation_created:
                         await publish_integration_event(
                             tenant_id=tenant_id,
                             event_type="conversation.created",
@@ -535,7 +532,7 @@ async def _process_whatsapp_webhook_body(
                             source="whatsapp_webhook",
                         )
 
-                    inbound_db_msg = await msg_repo.create(
+                    inbound_db_msg = Message(
                         tenant_id=tenant_id,
                         conversation_id=conversation.id,
                         direction="INBOUND",
@@ -544,6 +541,23 @@ async def _process_whatsapp_webhook_body(
                         external_message_id=un_msg.external_message_id,
                         metadata_=un_msg.metadata,
                     )
+
+                    try:
+                        async with db.begin_nested():
+                            db.add(inbound_db_msg)
+                            await db.flush()
+                    except IntegrityError:
+                        if inbound_db_msg in db:
+                            db.expunge(inbound_db_msg)
+                        if un_msg.external_message_id:
+                            existing_msg = await msg_repo.get_by_external_id(tenant_id, un_msg.external_message_id)
+                            if existing_msg:
+                                processed_results.append({
+                                    "external_message_id": un_msg.external_message_id,
+                                    "status": "duplicate",
+                                })
+                                continue
+                        raise
 
                     route_result = await message_router.route_message(
                         tenant_id=tenant_id,
@@ -566,34 +580,6 @@ async def _process_whatsapp_webhook_body(
                             source="message_router",
                         )
 
-                    send_result_id = None
-                    if sender_phone and not conversation.human_handoff:
-                        try:
-                            send_res = await service.execute_operation(
-                                tenant_id=tenant_id,
-                                connection_id=target_connection.id,
-                                operation="send_message",
-                                params={"recipient_phone": sender_phone, "text": route_result.response_text},
-                                allow_internal=True,
-                            )
-                            if isinstance(send_res, dict):
-                                send_result_id = (
-                                    send_res.get("data", {}).get("message_id")
-                                    if isinstance(send_res.get("data"), dict)
-                                    else None
-                                ) or send_res.get("message_id")
-                        except Exception as send_err:
-                            logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
-
-                    outbound_db_msg = await msg_repo.create(
-                        tenant_id=tenant_id,
-                        conversation_id=conversation.id,
-                        direction="OUTBOUND",
-                        message_type="TEXT",
-                        text=route_result.response_text,
-                        external_message_id=send_result_id,
-                    )
-
                     await publish_integration_event(
                         tenant_id=tenant_id,
                         event_type="whatsapp.message_received",
@@ -606,18 +592,82 @@ async def _process_whatsapp_webhook_body(
                         },
                     )
 
-                    await publish_integration_event(
+                    send_result_id = None
+                    fresh_conv = await conv_repo.get_by_id(tenant_id, conversation.id) if conversation.id else conversation
+                    active_conv = fresh_conv or conversation
+
+                    outbound_db_msg = await msg_repo.create(
                         tenant_id=tenant_id,
-                        event_type="whatsapp.message_sent",
-                        payload={
-                            "external_message_id": send_result_id,
-                            "message_id": str(outbound_db_msg.id),
-                            "customer_id": str(customer.id),
-                            "conversation_id": str(conversation.id),
-                            "text": route_result.response_text,
-                        },
-                        source="whatsapp_webhook",
+                        conversation_id=conversation.id,
+                        direction="OUTBOUND",
+                        message_type="TEXT",
+                        text=route_result.response_text,
+                        external_message_id=None,
                     )
+
+                    if (
+                        sender_phone
+                        and not active_conv.human_handoff
+                        and active_conv.status not in ("WAITING_HUMAN", "HUMAN_HANDLING", "HUMAN_ACTIVE", "CLOSED")
+                        and not route_result.handsoff_to_human
+                    ):
+                        try:
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "QUEUED")
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "SENDING")
+
+                            send_res = await service.execute_operation(
+                                tenant_id=tenant_id,
+                                connection_id=target_connection.id,
+                                operation="send_message",
+                                params={"recipient_phone": sender_phone, "text": route_result.response_text},
+                                allow_internal=True,
+                            )
+
+                            if send_res.status == "COMPLETED" and send_res.result:
+                                res_dict = send_res.result
+                                if isinstance(res_dict, dict):
+                                    send_result_id = (
+                                        res_dict.get("data", {}).get("message_id")
+                                        if isinstance(res_dict.get("data"), dict)
+                                        else None
+                                    ) or res_dict.get("message_id") or res_dict.get("provider_message_id")
+
+                            if send_res.status == "COMPLETED" and send_result_id:
+                                outbound_db_msg.external_message_id = send_result_id
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "SENT")
+                                await publish_integration_event(
+                                    tenant_id=tenant_id,
+                                    event_type="whatsapp.message_sent",
+                                    payload={
+                                        "external_message_id": send_result_id,
+                                        "message_id": str(outbound_db_msg.id),
+                                        "customer_id": str(customer.id),
+                                        "conversation_id": str(conversation.id),
+                                        "text": route_result.response_text,
+                                    },
+                                    source="whatsapp_webhook",
+                                )
+                            elif send_res.status == "FAILED":
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
+                            else:
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
+                        except (TimeoutError, asyncio.TimeoutError) as timeout_err:
+                            logger.error("Timeout sending WhatsApp response: %s", timeout_err)
+                            await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
+                        except Exception as send_err:
+                            if "timeout" in str(send_err).lower():
+                                logger.error("Timeout/ambiguous error sending WhatsApp response: %s", send_err)
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "UNKNOWN")
+                            else:
+                                logger.error("Failed to send WhatsApp response via adapter: %s", send_err)
+                                await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
+                    else:
+                        logger.info(
+                            "Outbound customer message suppressed for conversation %s due to human ownership / status %s",
+                            conversation.id,
+                            active_conv.status,
+                        )
+                        await msg_repo.transition_status(tenant_id, outbound_db_msg.id, "FAILED")
 
                     processed_results.append({
                         "external_message_id": un_msg.external_message_id,
@@ -628,46 +678,83 @@ async def _process_whatsapp_webhook_body(
             statuses = val.get("statuses", [])
             for st in statuses:
                 status_id = st.get("id")
-                status_val = st.get("status", "").lower()
-                idempotency_key = f"wa_status_{status_id}_{status_val}"
+                raw_status_val = st.get("status", "").lower()
+                idempotency_key = f"wa_status_{status_id}_{raw_status_val}"
 
                 existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
                 if existing_exec:
                     processed_results.append({"status_id": status_id, "status": "duplicate_event"})
                     continue
 
-                if status_id:
-                    existing_msg = await msg_repo.get_by_external_id(tenant_id, status_id)
-                    if existing_msg:
-                        meta = dict(existing_msg.metadata_ or {})
-                        meta["delivery_status"] = status_val
-                        meta["status_timestamp"] = st.get("timestamp")
-                        existing_msg.metadata_ = meta
+                status_map = {
+                    "sent": "SENT",
+                    "delivered": "DELIVERED",
+                    "read": "READ",
+                    "failed": "FAILED",
+                }
+                target_status = status_map.get(raw_status_val)
 
+                # Reserve IntegrationExecution atomically BEFORE state transition & event publishing
                 exec_rec = IntegrationExecution(
                     tenant_id=tenant_id,
                     connection_id=target_connection.id,
-                    operation=f"status_{status_val}",
+                    operation=f"status_{raw_status_val}",
                     status="COMPLETED",
                     idempotency_key=idempotency_key,
                     started_at=datetime.now(timezone.utc),
                     completed_at=datetime.now(timezone.utc),
-                    response_payload={"status": status_val, "status_id": status_id},
+                    response_payload={"status": raw_status_val, "status_id": status_id},
                 )
-                db.add(exec_rec)
+
+                try:
+                    async with db.begin_nested():
+                        db.add(exec_rec)
+                        await db.flush()
+                except IntegrityError:
+                    if exec_rec in db:
+                        db.expunge(exec_rec)
+                    existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
+                    if existing_exec:
+                        processed_results.append({"status_id": status_id, "status": "duplicate_event"})
+                        continue
+                    raise
+
+                if status_id:
+                    existing_msg = await msg_repo.get_by_external_id(tenant_id, status_id)
+                    if existing_msg:
+                        meta = dict(existing_msg.metadata_ or {})
+                        meta["delivery_status"] = raw_status_val
+                        meta["status_timestamp"] = st.get("timestamp")
+                        existing_msg.metadata_ = meta
+
+                        transition_successful = True
+                        if target_status:
+                            try:
+                                await msg_repo.transition_status(tenant_id, existing_msg.id, target_status)
+                            except Exception as trans_err:
+                                transition_successful = False
+                                logger.warning("Could not transition message %s to status %s: %s", existing_msg.id, target_status, trans_err)
+
+                        if not transition_successful:
+                            exec_rec.status = "FAILED"
+                            exec_rec.error_code = "INVALID_STATUS_TRANSITION"
+                            exec_rec.safe_error_message = f"Could not transition message status to {target_status}"
+                            exec_rec.response_payload = {"status": raw_status_val, "status_id": status_id, "rejected": True}
+                            processed_results.append({"status_id": status_id, "status": "status_transition_rejected"})
+                            continue
 
                 await publish_integration_event(
                     tenant_id=tenant_id,
-                    event_type=f"whatsapp.message_{status_val}",
+                    event_type=f"whatsapp.message_{raw_status_val}",
                     payload={
                         "status_id": status_id,
-                        "status": status_val,
+                        "status": raw_status_val,
                         "recipient_id": st.get("recipient_id"),
                     },
                     idempotency_key=idempotency_key,
                 )
 
-                processed_results.append({"status_id": status_id, "status": status_val})
+                processed_results.append({"status_id": status_id, "status": raw_status_val})
 
     await db.commit()
     return {"status": "success", "tenant_id": str(tenant_id), "processed": processed_results}

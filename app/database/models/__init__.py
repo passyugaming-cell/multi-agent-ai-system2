@@ -15,6 +15,13 @@ from app.database.models.audit import ProvisioningAudit
 from app.database.models.agent import AgentExecution
 from app.database.models.memory import BusinessMemory, ClientMemory, MemoryChangeProposal
 from app.database.models.owner_ai import OwnerAIExecution, Recommendation
+from app.database.models.integrations import (
+    Integration,
+    IntegrationConnection,
+    IntegrationCredential,
+    IntegrationExecution,
+    WebhookConfig,
+)
 from app.database.models.billing import (
     Plan,
     PlanFeature,
@@ -58,6 +65,11 @@ __all__ = [
     "MemoryChangeProposal",
     "OwnerAIExecution",
     "Recommendation",
+    "Integration",
+    "IntegrationConnection",
+    "IntegrationCredential",
+    "IntegrationExecution",
+    "WebhookConfig",
     "Plan",
     "PlanFeature",
     "PlanLimit",

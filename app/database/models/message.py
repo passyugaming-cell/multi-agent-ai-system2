@@ -1,6 +1,6 @@
 import uuid
 from typing import Any
-from sqlalchemy import String, Text, ForeignKey, Index
+from sqlalchemy import String, Text, ForeignKey, Index, text as sa_text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,7 @@ class Message(BaseModel):
     )
     direction: Mapped[str] = mapped_column(String(20), nullable=False)  # INBOUND / OUTBOUND
     message_type: Mapped[str] = mapped_column(String(50), default="TEXT", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="CREATED", nullable=False, index=True)  # CREATED, QUEUED, SENDING, SENT, DELIVERED, READ, FAILED, UNKNOWN
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
@@ -34,4 +35,12 @@ class Message(BaseModel):
         Index("idx_messages_tenant_conversation", "tenant_id", "conversation_id"),
         Index("idx_messages_tenant_external_id", "tenant_id", "external_message_id"),
         Index("idx_messages_tenant_created", "tenant_id", "created_at"),
+        Index(
+            "uq_messages_tenant_external_id",
+            "tenant_id",
+            "external_message_id",
+            unique=True,
+            postgresql_where=sa_text("external_message_id IS NOT NULL AND external_message_id != ''"),
+            sqlite_where=sa_text("external_message_id IS NOT NULL AND external_message_id != ''"),
+        ),
     )
