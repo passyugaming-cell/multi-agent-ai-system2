@@ -130,6 +130,14 @@ class IntegrationExecution(BaseModel):
     __table_args__ = (
         Index("ix_integration_executions_tenant_status", "tenant_id", "status"),
         Index("ix_integration_executions_idempotency", "tenant_id", "idempotency_key"),
+        Index(
+            "uq_integration_executions_tenant_idempotency",
+            "tenant_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+            sqlite_where=text("idempotency_key IS NOT NULL AND idempotency_key != ''"),
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(

@@ -708,3 +708,80 @@ async def test_r3_postgres_multi_session_concurrency_matrix(test_session_factory
         stmt = select(IntegrationExecution).where(IntegrationExecution.tenant_id == tenant_id, IntegrationExecution.idempotency_key == idempotency_key)
         execs = (await s_check.execute(stmt)).scalars().all()
         assert len(execs) == 1
+
+
+@pytest.mark.asyncio
+async def test_r3_postgres_multi_session_service_idempotency_race(test_session_factory, monkeypatch):
+    import asyncio
+    from sqlalchemy import select
+    from app.database.models import Tenant
+    from app.database.models.integrations import IntegrationExecution
+    from app.integrations.service import IntegrationService
+    from app.integrations.registry import integration_registry
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Service Concur Tenant", slug=f"sct-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        conn = await _setup_active_whatsapp_integration(tenant, session_setup)
+        tenant_id = tenant.id
+        conn_id = conn.id
+
+    adapter = integration_registry.get_adapter("whatsapp_cloud_api")
+    adapter_calls = 0
+
+    async def mock_adapter_execute(*args, **kwargs):
+        nonlocal adapter_calls
+        adapter_calls += 1
+        await asyncio.sleep(0.05)  # Force execution window open so Worker B hits idempotency reservation race
+        return {"messaging_product": "whatsapp", "message_id": "wamid.service_race_001"}
+
+    monkeypatch.setattr(adapter, "execute", mock_adapter_execute)
+
+    idempotency_key = f"service_race_key_{uuid.uuid4().hex[:8]}"
+
+    async def worker_service_a():
+        async with test_session_factory() as s_a:
+            service_a = IntegrationService(s_a)
+            return await service_a.execute_operation(
+                tenant_id=tenant_id,
+                connection_id=conn_id,
+                operation="send_message",
+                params={"recipient_phone": "62812345678", "text": "Worker A send"},
+                idempotency_key=idempotency_key,
+                allow_internal=True,
+            )
+
+    async def worker_service_b():
+        await asyncio.sleep(0.01)  # Ensure Worker A starts first
+        async with test_session_factory() as s_b:
+            service_b = IntegrationService(s_b)
+            return await service_b.execute_operation(
+                tenant_id=tenant_id,
+                connection_id=conn_id,
+                operation="send_message",
+                params={"recipient_phone": "62812345678", "text": "Worker B send"},
+                idempotency_key=idempotency_key,
+                allow_internal=True,
+            )
+
+    res_a, res_b = await asyncio.gather(worker_service_a(), worker_service_b())
+
+    # PROOF 1: External adapter is called EXACTLY ONCE
+    assert adapter_calls == 1
+
+    # PROOF 2: Exactly ONE IntegrationExecution record exists in DB
+    async with test_session_factory() as s_check:
+        stmt = select(IntegrationExecution).where(
+            IntegrationExecution.tenant_id == tenant_id,
+            IntegrationExecution.idempotency_key == idempotency_key,
+        )
+        execs = (await s_check.execute(stmt)).scalars().all()
+        assert len(execs) == 1
+
+    # PROOF 3: Both workers resolve to the winning execution result
+    assert res_a.execution_id == res_b.execution_id
+    assert res_a.status == "COMPLETED"
+    assert res_b.status == "COMPLETED"

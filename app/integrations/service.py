@@ -330,20 +330,30 @@ class IntegrationService:
         self._check_permission(actor_permissions, EXECUTE_INTEGRATION, allow_internal=allow_internal)
 
         if idempotency_key:
+            import asyncio
             existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
             if existing:
-                return OperationExecutionResult(
-                    execution_id=existing.id,
-                    connection_id=existing.connection_id,
-                    operation=existing.operation,
-                    status=existing.status,
-                    result=existing.response_payload,
-                    error_code=existing.error_code,
-                    safe_error_message=existing.safe_error_message,
-                    started_at=existing.started_at,
-                    completed_at=existing.completed_at,
-                    retry_count=existing.retry_count,
-                )
+                # If execution is currently RUNNING by another worker, await completion briefly
+                poll_count = 0
+                while existing and existing.status == "RUNNING" and poll_count < 50:
+                    await asyncio.sleep(0.05)
+                    poll_count += 1
+                    self.session.expire_all()
+                    existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+
+                if existing and existing.status in ("COMPLETED", "FAILED"):
+                    return OperationExecutionResult(
+                        execution_id=existing.id,
+                        connection_id=existing.connection_id,
+                        operation=existing.operation,
+                        status=existing.status,
+                        result=existing.response_payload,
+                        error_code=existing.error_code,
+                        safe_error_message=existing.safe_error_message,
+                        started_at=existing.started_at,
+                        completed_at=existing.completed_at,
+                        retry_count=existing.retry_count,
+                    )
 
         connection = await self._get_connection(tenant_id, connection_id)
         if connection.status not in ("ACTIVE", "CONNECTED"):
@@ -374,8 +384,44 @@ class IntegrationService:
             started_at=now,
             request_payload=redact_secrets(params),
         )
-        self.session.add(execution)
-        await self.session.flush()
+
+        if idempotency_key:
+            import asyncio
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(execution)
+                    await self.session.flush()
+                await self.session.commit()
+            except IntegrityError:
+                await self.session.rollback()
+                if execution in self.session:
+                    self.session.expunge(execution)
+
+                poll_count = 0
+                existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+                while existing and existing.status == "RUNNING" and poll_count < 50:
+                    await asyncio.sleep(0.05)
+                    poll_count += 1
+                    self.session.expire_all()
+                    existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
+
+                if existing:
+                    return OperationExecutionResult(
+                        execution_id=existing.id,
+                        connection_id=existing.connection_id,
+                        operation=existing.operation,
+                        status=existing.status,
+                        result=existing.response_payload,
+                        error_code=existing.error_code,
+                        safe_error_message=existing.safe_error_message,
+                        started_at=existing.started_at,
+                        completed_at=existing.completed_at,
+                        retry_count=existing.retry_count,
+                    )
+                raise
+        else:
+            self.session.add(execution)
+            await self.session.flush()
 
         try:
             async def _run():
