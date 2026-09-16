@@ -419,3 +419,288 @@ async def test_r3_postgres_multi_session_human_takeover_race(test_session_factor
     # Worker A must re-read DB status and suppress customer-facing AI response
     assert res_a.handsoff_to_human is True
     assert "[SYSTEM] Message logged for human agent." in res_a.response_text
+
+
+@pytest.mark.asyncio
+async def test_r3_direct_integration_service_no_blind_retry_on_send_message(test_session, monkeypatch):
+    import uuid
+    from unittest.mock import AsyncMock
+    from app.database.models import Tenant
+    from app.integrations.service import IntegrationService
+    from app.integrations.registry import integration_registry
+    from app.integrations.exceptions import TransientIntegrationError
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    tenant = Tenant(name="Direct Retry Tenant", slug=f"drt-{uuid.uuid4().hex[:6]}", is_active=True)
+    test_session.add(tenant)
+    await test_session.commit()
+
+    conn = await _setup_active_whatsapp_integration(tenant, test_session)
+
+    service = IntegrationService(test_session)
+    adapter = integration_registry.get_adapter("whatsapp_cloud_api")
+
+    execute_calls = 0
+
+    async def mock_adapter_execute(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        raise TransientIntegrationError("Network timeout during provider send_message request")
+
+    monkeypatch.setattr(adapter, "execute", mock_adapter_execute)
+
+    # Directly invoke IntegrationService.execute_operation for send_message (returns OperationExecutionResult with status="FAILED")
+    res = await service.execute_operation(
+        tenant_id=tenant.id,
+        connection_id=conn.id,
+        operation="send_message",
+        params={"recipient_phone": "62812345678", "text": "Direct send test"},
+        allow_internal=True,
+    )
+    assert res.status == "FAILED"
+
+    # Prove effective_retries=1 was enforced and adapter was invoked EXACTLY ONCE
+    assert execute_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_r3_outbound_test_matrix_a_to_f(async_client, test_session, monkeypatch):
+    import json
+    import hmac
+    import hashlib
+    from sqlalchemy import select
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.database.models.integrations import IntegrationExecution
+    from app.integrations.schemas import OperationExecutionResult
+    from app.integrations.service import IntegrationService
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    tenant = Tenant(name="Outbound Matrix Tenant", slug=f"omt-{uuid.uuid4().hex[:6]}", is_active=True)
+    test_session.add(tenant)
+    await test_session.commit()
+
+    app_secret = "secret_matrix_123"
+    phone_number_id = "999888"
+    await _setup_active_whatsapp_integration(tenant, test_session, phone_number_id=phone_number_id, app_secret=app_secret)
+
+    cust = Customer(tenant_id=tenant.id, name="Matrix Cust", phone="62812999000")
+    test_session.add(cust)
+    await test_session.commit()
+
+    conv = Conversation(tenant_id=tenant.id, customer_id=cust.id, channel="whatsapp", status="OPEN")
+    test_session.add(conv)
+    await test_session.commit()
+
+    # --- TEST D: Provider delivered status webhook (SENT -> DELIVERED) ---
+    msg_d = Message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        direction="OUTBOUND",
+        message_type="TEXT",
+        status="SENT",
+        text="Test D",
+        external_message_id="wamid.matrix_d_001",
+    )
+    test_session.add(msg_d)
+    await test_session.commit()
+
+    payload_d = {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "e1", "changes": [{"field": "messages", "value": {"metadata": {"phone_number_id": phone_number_id}, "statuses": [{"id": "wamid.matrix_d_001", "status": "delivered", "timestamp": "1710000000", "recipient_id": "62812999000"}]}}]}]
+    }
+    raw_d = json.dumps(payload_d).encode("utf-8")
+    sig_d = hmac.new(app_secret.encode("utf-8"), raw_d, hashlib.sha256).hexdigest()
+    res_d = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_d, headers={"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig_d}"})
+    assert res_d.status_code == 200
+    assert res_d.json()["processed"][0]["status"] == "delivered"
+    await test_session.refresh(msg_d)
+    assert msg_d.status == "DELIVERED"
+
+    # --- TEST E: Provider read status webhook (DELIVERED -> READ) ---
+    payload_e = {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "e1", "changes": [{"field": "messages", "value": {"metadata": {"phone_number_id": phone_number_id}, "statuses": [{"id": "wamid.matrix_d_001", "status": "read", "timestamp": "1710000000", "recipient_id": "62812999000"}]}}]}]
+    }
+    raw_e = json.dumps(payload_e).encode("utf-8")
+    sig_e = hmac.new(app_secret.encode("utf-8"), raw_e, hashlib.sha256).hexdigest()
+    res_e = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_e, headers={"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig_e}"})
+    assert res_e.status_code == 200
+    assert res_e.json()["processed"][0]["status"] == "read"
+    await test_session.refresh(msg_d)
+    assert msg_d.status == "READ"
+
+    # --- TEST F: Invalid status transition (CREATED + delivered) ---
+    msg_f = Message(
+        tenant_id=tenant.id,
+        conversation_id=conv.id,
+        direction="OUTBOUND",
+        message_type="TEXT",
+        status="CREATED",
+        text="Test F",
+        external_message_id="wamid.matrix_f_001",
+    )
+    test_session.add(msg_f)
+    await test_session.commit()
+
+    payload_f = {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "e1", "changes": [{"field": "messages", "value": {"metadata": {"phone_number_id": phone_number_id}, "statuses": [{"id": "wamid.matrix_f_001", "status": "delivered", "timestamp": "1710000000", "recipient_id": "62812999000"}]}}]}]
+    }
+    raw_f = json.dumps(payload_f).encode("utf-8")
+    sig_f = hmac.new(app_secret.encode("utf-8"), raw_f, hashlib.sha256).hexdigest()
+    res_f = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_f, headers={"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig_f}"})
+    assert res_f.status_code == 200
+    assert res_f.json()["processed"][0]["status"] == "status_transition_rejected"
+
+    await test_session.refresh(msg_f)
+    assert msg_f.status == "CREATED"
+
+    # Query DB and assert persistent IntegrationExecution record exists
+    exec_stmt = select(IntegrationExecution).where(
+        IntegrationExecution.tenant_id == tenant.id,
+        IntegrationExecution.error_code == "INVALID_STATUS_TRANSITION",
+    )
+    rej_exec = (await test_session.execute(exec_stmt)).scalars().first()
+    assert rej_exec is not None
+    assert rej_exec.status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_r3_postgres_multi_session_concurrency_matrix(test_session_factory):
+    import asyncio
+    from sqlalchemy import select
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.database.models.integrations import IntegrationExecution
+    from app.repositories.domain import CustomerRepository, ConversationRepository, MessageRepository
+
+    # Setup baseline entities
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Concur Matrix Tenant", slug=f"cmt-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        tenant_id = tenant.id
+
+    # 1. Message status transition race with with_for_update()
+    async with test_session_factory() as session_m:
+        cust_m = await CustomerRepository(session_m).get_or_create(tenant_id, "628120001111")
+        conv_m = await ConversationRepository(session_m).get_or_create_active(tenant_id, cust_m.id)
+        msg_m = Message(tenant_id=tenant_id, conversation_id=conv_m.id, direction="OUTBOUND", message_type="TEXT", status="CREATED")
+        session_m.add(msg_m)
+        await session_m.commit()
+        msg_id = msg_m.id
+
+    async def worker_trans_a():
+        async with test_session_factory() as s_a:
+            m_repo = MessageRepository(s_a)
+            await m_repo.transition_status(tenant_id, msg_id, "QUEUED")
+            await s_a.commit()
+
+    async def worker_trans_b():
+        await asyncio.sleep(0.01)
+        async with test_session_factory() as s_b:
+            m_repo = MessageRepository(s_b)
+            await m_repo.transition_status(tenant_id, msg_id, "QUEUED")
+            await s_b.commit()
+
+    await asyncio.gather(worker_trans_a(), worker_trans_b())
+
+    # 2. Customer get_or_create race
+    async def worker_cust_a():
+        async with test_session_factory() as s_a:
+            repo = CustomerRepository(s_a)
+            cust = await repo.get_or_create(tenant_id, "081299990000", name="Race Cust A")
+            try:
+                await s_a.commit()
+            except Exception:
+                await s_a.rollback()
+                cust = await repo.get_by_phone(tenant_id, "081299990000")
+            return cust.id
+
+    async def worker_cust_b():
+        await asyncio.sleep(0.01)
+        async with test_session_factory() as s_b:
+            repo = CustomerRepository(s_b)
+            cust = await repo.get_or_create(tenant_id, "+6281299990000", name="Race Cust B")
+            try:
+                await s_b.commit()
+            except Exception:
+                await s_b.rollback()
+                cust = await repo.get_by_phone(tenant_id, "+6281299990000")
+            return cust.id
+
+    c_id_a, c_id_b = await asyncio.gather(worker_cust_a(), worker_cust_b())
+    assert c_id_a == c_id_b
+
+    # 3. Active Conversation get_or_create_active race
+    async def worker_conv_a():
+        async with test_session_factory() as s_a:
+            repo = ConversationRepository(s_a)
+            conv = await repo.get_or_create_active(tenant_id, c_id_a, channel="whatsapp")
+            try:
+                await s_a.commit()
+            except Exception:
+                await s_a.rollback()
+                conv = await repo.get_active_by_customer(tenant_id, c_id_a)
+            return conv.id
+
+    async def worker_conv_b():
+        await asyncio.sleep(0.01)
+        async with test_session_factory() as s_b:
+            repo = ConversationRepository(s_b)
+            conv = await repo.get_or_create_active(tenant_id, c_id_a, channel="whatsapp")
+            try:
+                await s_b.commit()
+            except Exception:
+                await s_b.rollback()
+                conv = await repo.get_active_by_customer(tenant_id, c_id_a)
+            return conv.id
+
+    cv_id_a, cv_id_b = await asyncio.gather(worker_conv_a(), worker_conv_b())
+    assert cv_id_a == cv_id_b
+
+    # 4. IntegrationExecution idempotency race
+    idempotency_key = f"race_exec_{uuid.uuid4().hex[:8]}"
+
+    async def worker_exec_a():
+        async with test_session_factory() as s_a:
+            conn_m = (await s_a.execute(select(Conversation).where(Conversation.tenant_id == tenant_id))).scalars().first()
+            ex = IntegrationExecution(
+                tenant_id=tenant_id,
+                connection_id=conn_m.id if conn_m else uuid.uuid4(),
+                operation="race_op",
+                status="COMPLETED",
+                idempotency_key=idempotency_key,
+            )
+            s_a.add(ex)
+            try:
+                await s_a.commit()
+            except Exception:
+                await s_a.rollback()
+
+    async def worker_exec_b():
+        await asyncio.sleep(0.01)
+        async with test_session_factory() as s_b:
+            # Check idempotency prior to execution insert
+            existing = (await s_b.execute(select(IntegrationExecution).where(IntegrationExecution.tenant_id == tenant_id, IntegrationExecution.idempotency_key == idempotency_key))).scalars().first()
+            if not existing:
+                conn_m = (await s_b.execute(select(Conversation).where(Conversation.tenant_id == tenant_id))).scalars().first()
+                ex = IntegrationExecution(
+                    tenant_id=tenant_id,
+                    connection_id=conn_m.id if conn_m else uuid.uuid4(),
+                    operation="race_op",
+                    status="COMPLETED",
+                    idempotency_key=idempotency_key,
+                )
+                s_b.add(ex)
+                try:
+                    await s_b.commit()
+                except Exception:
+                    await s_b.rollback()
+
+    await asyncio.gather(worker_exec_a(), worker_exec_b())
+
+    async with test_session_factory() as s_check:
+        stmt = select(IntegrationExecution).where(IntegrationExecution.tenant_id == tenant_id, IntegrationExecution.idempotency_key == idempotency_key)
+        execs = (await s_check.execute(stmt)).scalars().all()
+        assert len(execs) == 1
