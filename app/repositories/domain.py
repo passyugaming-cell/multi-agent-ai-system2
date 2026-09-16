@@ -169,9 +169,13 @@ class CustomerRepository(BaseRepository[Customer]):
             norm_phone = normalize_phone_number(phone)
         except PhoneNormalizationError:
             norm_phone = phone
-        stmt = select(Customer).where(
-            Customer.tenant_id == tenant_id,
-            or_(Customer.phone == norm_phone, Customer.phone == phone),
+        stmt = (
+            select(Customer)
+            .where(
+                Customer.tenant_id == tenant_id,
+                or_(Customer.phone == norm_phone, Customer.phone == phone),
+            )
+            .execution_options(populate_existing=True)
         )
         result = await self.session.execute(stmt)
         return result.scalars().first()
@@ -248,6 +252,7 @@ class ConversationRepository(BaseRepository[Conversation]):
                 Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
             )
             .order_by(Conversation.created_at.desc())
+            .execution_options(populate_existing=True)
         )
         result = await self.session.execute(stmt)
         return result.scalars().first()

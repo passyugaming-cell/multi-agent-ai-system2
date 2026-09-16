@@ -662,12 +662,17 @@ async def test_r3_postgres_multi_session_concurrency_matrix(test_session_factory
     # 4. IntegrationExecution idempotency race
     idempotency_key = f"race_exec_{uuid.uuid4().hex[:8]}"
 
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+    async with test_session_factory() as session_conn_setup:
+        tenant_obj = (await session_conn_setup.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+        conn_obj = await _setup_active_whatsapp_integration(tenant_obj, session_conn_setup)
+        conn_id = conn_obj.id
+
     async def worker_exec_a():
         async with test_session_factory() as s_a:
-            conn_m = (await s_a.execute(select(Conversation).where(Conversation.tenant_id == tenant_id))).scalars().first()
             ex = IntegrationExecution(
                 tenant_id=tenant_id,
-                connection_id=conn_m.id if conn_m else uuid.uuid4(),
+                connection_id=conn_id,
                 operation="race_op",
                 status="COMPLETED",
                 idempotency_key=idempotency_key,
@@ -684,10 +689,9 @@ async def test_r3_postgres_multi_session_concurrency_matrix(test_session_factory
             # Check idempotency prior to execution insert
             existing = (await s_b.execute(select(IntegrationExecution).where(IntegrationExecution.tenant_id == tenant_id, IntegrationExecution.idempotency_key == idempotency_key))).scalars().first()
             if not existing:
-                conn_m = (await s_b.execute(select(Conversation).where(Conversation.tenant_id == tenant_id))).scalars().first()
                 ex = IntegrationExecution(
                     tenant_id=tenant_id,
-                    connection_id=conn_m.id if conn_m else uuid.uuid4(),
+                    connection_id=conn_id,
                     operation="race_op",
                     status="COMPLETED",
                     idempotency_key=idempotency_key,
