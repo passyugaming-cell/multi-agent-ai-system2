@@ -397,7 +397,7 @@ class IntegrationService:
 
                 poll_count = 0
                 existing = await self.idempotency.get_existing_execution(tenant_id, idempotency_key)
-                while existing and existing.status == "RUNNING" and poll_count < 50:
+                while (not existing or existing.status == "RUNNING") and poll_count < 50:
                     await asyncio.sleep(0.05)
                     poll_count += 1
                     self.session.expire_all()
