@@ -495,18 +495,42 @@ async def _process_whatsapp_webhook_body(
                     sender_phone = un_msg.metadata.get("sender_phone")
                     sender_name = un_msg.metadata.get("sender_name") or "WhatsApp Customer"
 
-                    customer = await cust_repo.get_or_create(
+                    customer, customer_created = await cust_repo.get_or_create(
                         tenant_id=tenant_id,
                         phone=sender_phone or "628000000000",
                         name=sender_name,
                         external_id=sender_phone,
                     )
+                    if customer_created:
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type="customer.created",
+                            payload={
+                                "customer_id": str(customer.id),
+                                "phone": customer.phone,
+                                "name": customer.name,
+                                "channel": "whatsapp",
+                            },
+                            source="whatsapp_webhook",
+                        )
 
-                    conversation = await conv_repo.get_or_create_active(
+                    conversation, conversation_created = await conv_repo.get_or_create_active(
                         tenant_id=tenant_id,
                         customer_id=customer.id,
                         channel="whatsapp",
                     )
+                    if conversation_created:
+                        await publish_integration_event(
+                            tenant_id=tenant_id,
+                            event_type="conversation.created",
+                            payload={
+                                "conversation_id": str(conversation.id),
+                                "customer_id": str(customer.id),
+                                "channel": "whatsapp",
+                                "status": "OPEN",
+                            },
+                            source="whatsapp_webhook",
+                        )
 
                     inbound_db_msg = Message(
                         tenant_id=tenant_id,
@@ -527,11 +551,13 @@ async def _process_whatsapp_webhook_body(
                             db.expunge(inbound_db_msg)
                         if un_msg.external_message_id:
                             existing_msg = await msg_repo.get_by_external_id(tenant_id, un_msg.external_message_id)
-                        processed_results.append({
-                            "external_message_id": un_msg.external_message_id,
-                            "status": "duplicate",
-                        })
-                        continue
+                            if existing_msg:
+                                processed_results.append({
+                                    "external_message_id": un_msg.external_message_id,
+                                    "status": "duplicate",
+                                })
+                                continue
+                        raise
 
                     route_result = await message_router.route_message(
                         tenant_id=tenant_id,
@@ -687,8 +713,11 @@ async def _process_whatsapp_webhook_body(
                 except IntegrityError:
                     if exec_rec in db:
                         db.expunge(exec_rec)
-                    processed_results.append({"status_id": status_id, "status": "duplicate_event"})
-                    continue
+                    existing_exec = await service.idempotency.get_existing_execution(tenant_id, idempotency_key)
+                    if existing_exec:
+                        processed_results.append({"status_id": status_id, "status": "duplicate_event"})
+                        continue
+                    raise
 
                 if status_id:
                     existing_msg = await msg_repo.get_by_external_id(tenant_id, status_id)

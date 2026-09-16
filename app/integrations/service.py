@@ -391,7 +391,6 @@ class IntegrationService:
                 async with self.session.begin_nested():
                     self.session.add(execution)
                     await self.session.flush()
-                await self.session.commit()
             except IntegrityError:
                 if execution in self.session:
                     self.session.expunge(execution)
@@ -444,7 +443,7 @@ class IntegrationService:
             connection.last_success_at = datetime.now(timezone.utc)
             connection.error_message = None
 
-            await self.session.commit()
+            await self.session.flush()
 
             await publish_integration_event(
                 tenant_id=tenant_id,
@@ -478,7 +477,7 @@ class IntegrationService:
             connection.last_error_at = datetime.now(timezone.utc)
             connection.error_message = execution.safe_error_message
 
-            await self.session.commit()
+            await self.session.flush()
 
             await publish_integration_event(
                 tenant_id=tenant_id,

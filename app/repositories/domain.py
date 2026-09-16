@@ -193,7 +193,7 @@ class CustomerRepository(BaseRepository[Customer]):
         phone: str | None,
         name: str | None = None,
         external_id: str | None = None,
-    ) -> Customer:
+    ) -> tuple[Customer, bool]:
         norm_phone = None
         if phone:
             try:
@@ -204,7 +204,7 @@ class CustomerRepository(BaseRepository[Customer]):
         if norm_phone:
             existing = await self.get_by_phone(tenant_id, norm_phone)
             if existing:
-                return existing
+                return existing, False
 
         try:
             async with self.session.begin_nested():
@@ -216,14 +216,14 @@ class CustomerRepository(BaseRepository[Customer]):
                 )
                 self.session.add(customer)
                 await self.session.flush()
-                return customer
+                return customer, True
         except IntegrityError:
             if 'customer' in locals() and customer in self.session:
                 self.session.expunge(customer)
             if norm_phone:
                 existing = await self.get_by_phone(tenant_id, norm_phone)
                 if existing:
-                    return existing
+                    return existing, False
             raise
 
 
@@ -262,10 +262,10 @@ class ConversationRepository(BaseRepository[Conversation]):
         tenant_id: uuid.UUID,
         customer_id: uuid.UUID,
         channel: str = "whatsapp",
-    ) -> Conversation:
+    ) -> tuple[Conversation, bool]:
         existing = await self.get_active_by_customer(tenant_id, customer_id)
         if existing:
-            return existing
+            return existing, False
 
         try:
             async with self.session.begin_nested():
@@ -277,13 +277,13 @@ class ConversationRepository(BaseRepository[Conversation]):
                 )
                 self.session.add(conversation)
                 await self.session.flush()
-                return conversation
+                return conversation, True
         except IntegrityError:
             if 'conversation' in locals() and conversation in self.session:
                 self.session.expunge(conversation)
             existing = await self.get_active_by_customer(tenant_id, customer_id)
             if existing:
-                return existing
+                return existing, False
             raise
 
 
