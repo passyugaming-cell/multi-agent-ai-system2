@@ -219,16 +219,16 @@ class ContextAssemblyService:
         final_categories: set[str] = set()
         for cat in allowed_set:
             if cat == "analytics":
-                if is_platform_owner or bool({"business.read", "analytics.read", "*"}.intersection(actor_perms)):
+                if is_platform_owner or "analytics.read" in actor_perms or "*" in actor_perms:
                     final_categories.add(cat)
             elif cat == "tasks":
-                if is_platform_owner or bool({"business.read", "business.write", "tasks.read", "*"}.intersection(actor_perms)):
+                if is_platform_owner or "business.read" in actor_perms or "business.write" in actor_perms or "*" in actor_perms:
                     final_categories.add(cat)
             elif cat == "products":
-                if is_platform_owner or bool({"business.read", "products.read", "*"}.intersection(actor_perms)):
+                if is_platform_owner or "business.read" in actor_perms or "products.read" in actor_perms or "*" in actor_perms:
                     final_categories.add(cat)
             elif cat == "knowledge":
-                if is_platform_owner or bool({"business.read", "knowledge.read", "*"}.intersection(actor_perms)):
+                if is_platform_owner or "business.read" in actor_perms or "knowledge.read" in actor_perms or "*" in actor_perms:
                     final_categories.add(cat)
             else:
                 final_categories.add(cat)
@@ -391,6 +391,12 @@ class ContextAssemblyService:
         # Enforce Context Budget Limit (Trimming lower-priority context if size exceeds budget)
         def _get_bytes_len() -> int:
             payload = {
+                "tenant_id": str(request.tenant_id),
+                "agent_name": request.agent_name,
+                "task_type": request.task_type,
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+                "actor_permissions": actor_permissions,
                 "facts": facts,
                 "business_profile": business_profile_data,
                 "knowledge": knowledge_data,
@@ -400,19 +406,47 @@ class ContextAssemblyService:
                 "business_memory": business_memory_data,
                 "client_memory": client_memory_data,
                 "task_context": task_context_data,
+                "assembled_categories": categories,
             }
-            return len(json.dumps(payload, default=str).encode("utf-8"))
+            return len(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
 
         if _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
-            logger.warning("Context byte size exceeds budget limit (%d > %d). Trimming low-priority context.", _get_bytes_len(), MAX_TOTAL_CONTEXT_BYTES)
+            logger.warning(
+                "Context byte size exceeds budget limit (%d > %d). Trimming low-priority context.",
+                _get_bytes_len(),
+                MAX_TOTAL_CONTEXT_BYTES,
+            )
+            # 1. Trim client memory first
             while client_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
                 client_memory_data.pop()
+
+            # 2. Trim business memory next
             while business_memory_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
                 business_memory_data.pop()
-            while len(conversation_history_data) > 2 and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+
+            # 3. Trim conversation history next (older messages removed first)
+            while conversation_history_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
                 conversation_history_data.pop(0)
-            while len(knowledge_data) > 1 and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+
+            # 4. Trim conversation summary next
+            if conversation_summary_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                conversation_summary_data = None
+
+            # 5. Trim knowledge items next
+            while knowledge_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
                 knowledge_data.pop()
+
+            # 6. Trim task context next
+            if task_context_data and _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                task_context_data = None
+
+            # 7. Fail closed if authoritative DB facts + business profile alone exceed budget
+            if _get_bytes_len() > MAX_TOTAL_CONTEXT_BYTES:
+                raise AppException(
+                    code="CONTEXT_BUDGET_EXCEEDED",
+                    message=f"Authoritative system facts and business profile exceed maximum allowed context budget of {MAX_TOTAL_CONTEXT_BYTES} bytes.",
+                    status_code=400,
+                )
 
         # Sanitize assembled data to prevent secret leakage
         sanitized_facts = sanitize_data(facts)

@@ -355,7 +355,7 @@ async def test_06_customer_a_vs_b_client_memory_isolation(test_engine, setup_ten
 async def test_07_server_context_policy_escalation_rejection(test_engine, setup_tenants):
     t1_id, _ = setup_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
-        actor_t1 = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=t1_id, role="owner", permissions={"business.read"})
+        actor_t1 = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=t1_id, role="owner", permissions={"analytics.read"})
         token = set_actor_context(actor_t1)
         try:
             service = ContextAssemblyService(session)

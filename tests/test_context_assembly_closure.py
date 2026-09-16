@@ -1,3 +1,4 @@
+import json
 import uuid
 from decimal import Decimal
 import pytest
@@ -9,6 +10,7 @@ from app.core.context_assembly import (
     ContextAssemblyService,
     ContextAssemblyRequest,
 )
+from app.core.context_assembly.service import MAX_TOTAL_CONTEXT_BYTES
 from app.core.exceptions import AppException
 from app.database.models import Tenant, Product, BusinessProfile, KnowledgeItem, Conversation, Message, Customer
 from app.database.models.workflow import Task
@@ -119,7 +121,6 @@ async def test_owner_ai_platform_owner_boundary_closure(test_engine, setup_closu
         assert exc_info.value.code == "PERMISSION_DENIED"
 
         # 6. Privilege escalation via requested_categories -> REJECTED / FILTERED
-        # Tenant sales agent requesting Owner AI categories (analytics, tasks) without permissions
         req_sales_escalation = ContextAssemblyRequest(
             tenant_id=t1_id,
             agent_name="ai_sales",
@@ -135,10 +136,66 @@ async def test_owner_ai_platform_owner_boundary_closure(test_engine, setup_closu
         token = set_actor_context(restricted_sales_actor)
         try:
             ctx_sales = await service.assemble_context(req_sales_escalation)
-            # "analytics" and "tasks" must be filtered out because agent policy & actor perms prohibit them
             assert "analytics" not in ctx_sales.assembled_categories
             assert "tasks" not in ctx_sales.assembled_categories
             assert ctx_sales.assembled_categories == ["products"]
+        finally:
+            reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_exact_category_authorization_analytics_and_tasks_closure(test_engine, setup_closure_tenants):
+    """Verifies exact category authorization rules for analytics and tasks categories."""
+    t1_id, _ = setup_closure_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        service = ContextAssemblyService(session)
+
+        # 1. Analyst agent + analytics.read permission -> ALLOWED
+        actor_analytics = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="analyst",
+            permissions={"analytics.read"},
+            is_platform_owner=False,
+        )
+        token = set_actor_context(actor_analytics)
+        try:
+            req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_analyst")
+            ctx = await service.assemble_context(req)
+            assert "analytics" in ctx.assembled_categories
+        finally:
+            reset_actor_context(token)
+
+        # 2. Analyst agent WITHOUT analytics.read permission (e.g. only business.read) -> DENIED / Filtered
+        actor_no_analytics = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="analyst",
+            permissions={"business.read"},
+            is_platform_owner=False,
+        )
+        token = set_actor_context(actor_no_analytics)
+        try:
+            req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_analyst")
+            ctx = await service.assemble_context(req)
+            assert "analytics" not in ctx.assembled_categories
+            assert ctx.assembled_categories == ["business_memory", "business_profile"]
+        finally:
+            reset_actor_context(token)
+
+        # 3. Tasks category WITH business.read -> ALLOWED
+        actor_biz_read = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="owner",
+            permissions={"*"},
+            is_platform_owner=True,
+        )
+        token = set_actor_context(actor_biz_read)
+        try:
+            req_tasks = ContextAssemblyRequest(tenant_id=t1_id, agent_name="owner_ai")
+            ctx_tasks = await service.assemble_context(req_tasks)
+            assert "tasks" in ctx_tasks.assembled_categories
         finally:
             reset_actor_context(token)
 
@@ -148,16 +205,13 @@ async def test_relevance_and_empty_result_semantics_closure(test_engine, setup_c
     """Verifies that non-matching product/knowledge search queries return EMPTY results instead of arbitrary records."""
     t1_id, t2_id = setup_closure_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
-        # Create products for Tenant 1
         p1 = Product(tenant_id=t1_id, name="Leather Jacket", sku="JKT-LEATHER", price=Decimal("750000.00"), stock=5, is_active=True)
         p2 = Product(tenant_id=t1_id, name="Denim Pants", sku="PNT-DENIM", price=Decimal("350000.00"), stock=12, is_active=True)
         session.add_all([p1, p2])
 
-        # Create product for Tenant 2 (Tenant isolation test)
         p_t2 = Product(tenant_id=t2_id, name="Tenant 2 Secret Product", sku="T2-SECRET", price=Decimal("999999.00"), stock=1, is_active=True)
         session.add(p_t2)
 
-        # Create approved knowledge item
         biz_service = BusinessDataService(session)
         k1 = await biz_service.create_knowledge_item(
             tenant_id=t1_id,
@@ -176,25 +230,21 @@ async def test_relevance_and_empty_result_semantics_closure(test_engine, setup_c
         try:
             service = ContextAssemblyService(session)
 
-            # 1. Matching Product Query -> Returns relevant product only
             req_match = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales", query_text="Leather Jacket")
             ctx_match = await service.assemble_context(req_match)
             prods = ctx_match.facts.get("product_catalog", [])
             assert len(prods) == 1
             assert prods[0]["sku"] == "JKT-LEATHER"
 
-            # 2. Non-matching Product Query -> Returns EMPTY result [] (NOT arbitrary first 10 products!)
             req_no_match = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales", query_text="NonExistentLaptop999")
             ctx_no_match = await service.assemble_context(req_no_match)
             prods_empty = ctx_no_match.facts.get("product_catalog", [])
-            assert prods_empty == []  # Empty result semantics!
+            assert prods_empty == []
 
-            # 3. Non-matching Knowledge Query -> Returns EMPTY result []
             req_know_no_match = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales", query_text="UnrelatedQuantumPhysics")
             ctx_know_empty = await service.assemble_context(req_know_no_match)
             assert ctx_know_empty.knowledge == []
 
-            # 4. Cross-Tenant Product Isolation -> Tenant 1 NEVER receives Tenant 2 product
             req_all = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales")
             ctx_all = await service.assemble_context(req_all)
             all_prods = ctx_all.facts.get("product_catalog", [])
@@ -204,15 +254,13 @@ async def test_relevance_and_empty_result_semantics_closure(test_engine, setup_c
 
 
 @pytest.mark.asyncio
-async def test_deterministic_context_budget_limit_closure(test_engine, setup_closure_tenants):
-    """Verifies max context byte budget limit and retention of authoritative DB facts when trimming context."""
+async def test_actual_16kb_final_assembled_context_budget_invariant(test_engine, setup_closure_tenants):
+    """Verifies max 16 KB context byte budget invariant on serialized AssembledContext model dump."""
     t1_id, _ = setup_closure_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
-        # Create authoritative DB product truth
         p = Product(tenant_id=t1_id, name="Authoritative Product", sku="AUTH-PROD-01", price=Decimal("500000.00"), stock=100, is_active=True)
         session.add(p)
 
-        # Create business profile
         bp_service = BusinessDataService(session)
         await bp_service.create_or_update_business_profile(
             tenant_id=t1_id,
@@ -225,7 +273,6 @@ async def test_deterministic_context_budget_limit_closure(test_engine, setup_clo
             allow_internal=True,
         )
 
-        # Populate large memory entries to exceed context budget
         mem_service = MemoryService(session)
         for i in range(15):
             await mem_service.save_memory_or_propose(
@@ -248,14 +295,53 @@ async def test_deterministic_context_budget_limit_closure(test_engine, setup_clo
             req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales")
             ctx = await service.assemble_context(req)
 
-            # Authoritative System DB Facts MUST survive trimming
+            # Explicitly serialize final AssembledContext model dump and verify <= 16384 bytes
+            serialized_json = json.dumps(ctx.model_dump(mode="json"), sort_keys=True, default=str)
+            final_bytes = len(serialized_json.encode("utf-8"))
+
+            assert final_bytes <= MAX_TOTAL_CONTEXT_BYTES
+
+            # Authoritative System DB Facts and business profile MUST be 100% preserved
             assert ctx.facts.get("product_catalog") is not None
             assert len(ctx.facts["product_catalog"]) > 0
             assert ctx.facts["product_catalog"][0]["sku"] == "AUTH-PROD-01"
             assert ctx.business_profile["business_name"] == "Authoritative Business Corp"
+        finally:
+            reset_actor_context(token)
 
-            # Low-priority memory must be trimmed safely down within budget
-            assert len(ctx.business_memory) <= 10
+
+@pytest.mark.asyncio
+async def test_fail_closed_when_authoritative_facts_exceed_16kb_closure(test_engine, setup_closure_tenants):
+    """Verifies fail-closed CONTEXT_BUDGET_EXCEEDED exception when authoritative DB facts exceed 16 KB."""
+    t1_id, _ = setup_closure_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        # Create massive DB product catalog that alone exceeds 16 KB
+        prods = [
+            Product(
+                tenant_id=t1_id,
+                name=f"Massive Product Fact Item {i} " + ("x" * 2000),
+                sku=f"SKU-MASSIVE-{i}",
+                price=Decimal("100000.00"),
+                stock=50,
+                is_active=True,
+            )
+            for i in range(10)
+        ]
+        session.add_all(prods)
+        await session.commit()
+
+        actor_t1 = AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=t1_id, role="owner", permissions={"business.read"})
+        token = set_actor_context(actor_t1)
+        try:
+            service = ContextAssemblyService(session)
+            req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="ai_sales")
+
+            with pytest.raises(AppException) as exc_info:
+                await service.assemble_context(req)
+
+            assert exc_info.value.code == "CONTEXT_BUDGET_EXCEEDED"
+            assert exc_info.value.status_code == 400
+            assert "Authoritative system facts and business profile exceed maximum allowed context budget" in exc_info.value.message
         finally:
             reset_actor_context(token)
 
@@ -281,7 +367,6 @@ async def test_conversation_summary_and_task_context_closure(test_engine, setup_
         msg = Message(tenant_id=t1_id, conversation_id=conv.id, direction="INBOUND", text="Is there express shipping?")
         session.add(msg)
 
-        # Create active task
         task = Task(
             tenant_id=t1_id,
             title="Follow up bulk quote",
@@ -304,7 +389,6 @@ async def test_conversation_summary_and_task_context_closure(test_engine, setup_
         token = set_actor_context(platform_actor)
         try:
             service = ContextAssemblyService(session)
-            # Test Conversation Summary with sales agent (has conversation category)
             req_sales = ContextAssemblyRequest(
                 tenant_id=t1_id,
                 agent_name="ai_sales",
@@ -314,7 +398,6 @@ async def test_conversation_summary_and_task_context_closure(test_engine, setup_
             ctx_sales = await service.assemble_context(req_sales)
             assert ctx_sales.conversation_summary == "Customer inquired about bulk order discounts and fast delivery options."
 
-            # Test Task Context with owner_ai agent (has tasks category)
             req_owner = ContextAssemblyRequest(
                 tenant_id=t1_id,
                 agent_name="owner_ai",
@@ -323,13 +406,11 @@ async def test_conversation_summary_and_task_context_closure(test_engine, setup_
             )
             ctx = await service.assemble_context(req_owner)
 
-            # Task Context Assembly
             assert ctx.task_context is not None
             assert ctx.task_context["active_tasks_count"] >= 1
             assert ctx.task_context["tasks"][0]["title"] == "Follow up bulk quote"
             ctx.conversation_summary = ctx_sales.conversation_summary
 
-            # 3. Prompt Formatting verification
             formatted = ContextAssemblyService.format_prompt(
                 assembled=ctx,
                 user_message="Status update request",
