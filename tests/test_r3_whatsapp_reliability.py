@@ -837,6 +837,105 @@ async def test_r3_gap_a_caller_owned_transaction_commit(db_session, test_session
 
 
 @pytest.mark.asyncio
+async def test_r3_gap_a_concurrency_polling_preserves_caller_uncommitted_entity(test_session_factory, monkeypatch):
+    import asyncio
+    from sqlalchemy import select
+    from app.database.models import Tenant, Customer
+    from app.database.models.integrations import IntegrationExecution
+    from app.integrations.service import IntegrationService
+    from app.integrations.registry import integration_registry
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Polling Race Tenant", slug=f"prt-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        conn = await _setup_active_whatsapp_integration(tenant, session_setup)
+        tenant_id = tenant.id
+        conn_id = conn.id
+
+    adapter = integration_registry.get_adapter("whatsapp_cloud_api")
+    adapter_calls = 0
+
+    async def mock_adapter_execute(*args, **kwargs):
+        nonlocal adapter_calls
+        adapter_calls += 1
+        await asyncio.sleep(0.1)  # Force execution window open so Worker B hits idempotency polling loop
+        return {"messaging_product": "whatsapp", "message_id": "wamid.polling_race_001"}
+
+    monkeypatch.setattr(adapter, "execute", mock_adapter_execute)
+
+    idempotency_key = f"polling_race_key_{uuid.uuid4().hex[:8]}"
+
+    # Worker A: Winner
+    async def worker_a_winner():
+        async with test_session_factory() as session_a:
+            service_a = IntegrationService(session_a)
+            res = await service_a.execute_operation(
+                tenant_id=tenant_id,
+                connection_id=conn_id,
+                operation="send_message",
+                params={"recipient_phone": "62812345678", "text": "Worker A send"},
+                idempotency_key=idempotency_key,
+                allow_internal=True,
+            )
+            await session_a.commit()
+            return res
+
+    # Worker B: Loser, opens outer transaction, creates uncommitted Customer entity, calls execute_operation and enters polling loop
+    async def worker_b_polling_loser():
+        await asyncio.sleep(0.01)  # Ensure Worker A starts first and inserts RUNNING row
+        async with test_session_factory() as session_b:
+            # Create uncommitted caller entity before calling execute_operation
+            uncommitted_cust = Customer(tenant_id=tenant_id, name="Uncommitted Polling Cust", phone="628199990000")
+            session_b.add(uncommitted_cust)
+            await session_b.flush()
+
+            service_b = IntegrationService(session_b)
+            res = await service_b.execute_operation(
+                tenant_id=tenant_id,
+                connection_id=conn_id,
+                operation="send_message",
+                params={"recipient_phone": "62812345678", "text": "Worker B send"},
+                idempotency_key=idempotency_key,
+                allow_internal=True,
+            )
+
+            # PROOF: Worker B's uncommitted entity MUST remain intact after execute_operation returns from polling loop
+            assert uncommitted_cust in session_b
+            assert uncommitted_cust.phone == "628199990000"
+
+            # Worker B now commits its caller transaction normally
+            await session_b.commit()
+            cust_id = uncommitted_cust.id
+            return res, cust_id
+
+    res_a, (res_b, cust_id_b) = await asyncio.gather(worker_a_winner(), worker_b_polling_loser())
+
+    # PROOF 1: External adapter is called EXACTLY ONCE
+    assert adapter_calls == 1
+
+    # PROOF 2: Exactly ONE IntegrationExecution record exists in DB
+    async with test_session_factory() as s_check:
+        stmt = select(IntegrationExecution).where(
+            IntegrationExecution.tenant_id == tenant_id,
+            IntegrationExecution.idempotency_key == idempotency_key,
+        )
+        execs = (await s_check.execute(stmt)).scalars().all()
+        assert len(execs) == 1
+
+        # PROOF 3: Worker B's uncommitted customer entity was successfully committed after polling
+        committed_cust = (await s_check.execute(select(Customer).where(Customer.id == cust_id_b))).scalar_one_or_none()
+        assert committed_cust is not None
+
+    # PROOF 4: Both workers resolve to the same winning execution result
+    assert res_a.execution_id == res_b.execution_id
+    assert res_a.status == "COMPLETED"
+    assert res_b.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
 async def test_r3_postgres_multi_session_service_idempotency_race(test_session_factory, monkeypatch):
     import asyncio
     from sqlalchemy import select

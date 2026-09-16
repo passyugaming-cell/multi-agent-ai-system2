@@ -17,10 +17,14 @@ class IntegrationIdempotencyChecker:
     async def get_existing_execution(
         self, tenant_id: uuid.UUID, idempotency_key: str
     ) -> IntegrationExecution | None:
-        stmt = select(IntegrationExecution).where(
-            and_(
-                IntegrationExecution.tenant_id == tenant_id,
-                IntegrationExecution.idempotency_key == idempotency_key,
+        stmt = (
+            select(IntegrationExecution)
+            .where(
+                and_(
+                    IntegrationExecution.tenant_id == tenant_id,
+                    IntegrationExecution.idempotency_key == idempotency_key,
+                )
             )
+            .execution_options(populate_existing=True)
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
