@@ -214,6 +214,8 @@ class CustomerRepository(BaseRepository[Customer]):
                 await self.session.flush()
                 return customer
         except IntegrityError:
+            if 'customer' in locals() and customer in self.session:
+                self.session.expunge(customer)
             if norm_phone:
                 existing = await self.get_by_phone(tenant_id, norm_phone)
                 if existing:
@@ -272,6 +274,8 @@ class ConversationRepository(BaseRepository[Conversation]):
                 await self.session.flush()
                 return conversation
         except IntegrityError:
+            if 'conversation' in locals() and conversation in self.session:
+                self.session.expunge(conversation)
             existing = await self.get_active_by_customer(tenant_id, customer_id)
             if existing:
                 return existing
