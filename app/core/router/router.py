@@ -49,6 +49,17 @@ class MessageRouter:
     ) -> RouterResult:
         # 1. Re-verify conversation status & ownership from DB state
         # (Prevents race conditions where a human claimed the conversation while worker was queued)
+        if conversation.id:
+            from sqlalchemy import select
+            stmt = select(Conversation).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.id == conversation.id,
+            ).execution_options(populate_existing=True)
+            res = await session.execute(stmt)
+            fresh_conv = res.scalar_one_or_none()
+            if fresh_conv:
+                conversation = fresh_conv
+
         if (
             conversation.human_handoff
             or not conversation.ai_enabled

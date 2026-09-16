@@ -723,6 +723,19 @@ async def _process_whatsapp_webhook_body(
 
                             processed_results.append({"status_id": status_id, "status": raw_status_val})
                         else:
+                            exec_rec = IntegrationExecution(
+                                tenant_id=tenant_id,
+                                connection_id=target_connection.id,
+                                operation=f"status_{raw_status_val}",
+                                status="FAILED",
+                                error_code="INVALID_STATUS_TRANSITION",
+                                safe_error_message=f"Could not transition message status to {target_status}",
+                                idempotency_key=idempotency_key,
+                                started_at=datetime.now(timezone.utc),
+                                completed_at=datetime.now(timezone.utc),
+                                response_payload={"status": raw_status_val, "status_id": status_id, "rejected": True},
+                            )
+                            db.add(exec_rec)
                             processed_results.append({"status_id": status_id, "status": "status_transition_rejected"})
                     else:
                         exec_rec = IntegrationExecution(

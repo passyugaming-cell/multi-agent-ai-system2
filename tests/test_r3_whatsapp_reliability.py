@@ -220,3 +220,202 @@ async def test_r3_webhook_status_event_invalid_transition_rejection(async_client
     # Verify DB status remains CREATED and was not corrupted
     await test_session.refresh(msg)
     assert msg.status == "CREATED"
+
+
+@pytest.mark.asyncio
+async def test_r3_outbound_webhook_path_success_and_events(async_client, test_session, monkeypatch):
+    import json
+    import hmac
+    import hashlib
+    from unittest.mock import AsyncMock
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.integrations.schemas import OperationExecutionResult
+    from app.integrations.service import IntegrationService
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    tenant = Tenant(name="Outbound Success Tenant", slug=f"ost-{uuid.uuid4().hex[:6]}", is_active=True)
+    test_session.add(tenant)
+    await test_session.commit()
+
+    app_secret = "secret_outbound_success_123"
+    phone_number_id = "888333"
+    await _setup_active_whatsapp_integration(tenant, test_session, phone_number_id=phone_number_id, app_secret=app_secret)
+
+    provider_calls = 0
+
+    async def mock_execute_op(*args, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return OperationExecutionResult(
+            execution_id=uuid.uuid4(),
+            connection_id=uuid.uuid4(),
+            operation="send_message",
+            status="COMPLETED",
+            result={"provider_message_id": "wamid.outbound_success_999"},
+        )
+
+    monkeypatch.setattr(IntegrationService, "execute_operation", mock_execute_op)
+
+    webhook_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": phone_number_id},
+                            "messages": [
+                                {
+                                    "from": "62812345678",
+                                    "id": f"wamid.inbound_{uuid.uuid4().hex[:6]}",
+                                    "timestamp": "1710000000",
+                                    "type": "text",
+                                    "text": {"body": "Halo, tes outbound"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    res = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
+    assert res.status_code == 200
+    assert provider_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_r3_outbound_webhook_path_timeout_unknown_no_retry(async_client, test_session, monkeypatch):
+    import json
+    import hmac
+    import hashlib
+    from app.database.models import Tenant, Message
+    from app.integrations.service import IntegrationService
+    from tests.test_whatsapp_and_handoff import _setup_active_whatsapp_integration
+
+    tenant = Tenant(name="Outbound Timeout Tenant", slug=f"ott-{uuid.uuid4().hex[:6]}", is_active=True)
+    test_session.add(tenant)
+    await test_session.commit()
+
+    app_secret = "secret_outbound_timeout_123"
+    phone_number_id = "888444"
+    await _setup_active_whatsapp_integration(tenant, test_session, phone_number_id=phone_number_id, app_secret=app_secret)
+
+    provider_calls = 0
+
+    async def mock_execute_op_timeout(*args, **kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise TimeoutError("WhatsApp API gateway connection timed out")
+
+    monkeypatch.setattr(IntegrationService, "execute_operation", mock_execute_op_timeout)
+
+    webhook_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_1",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": phone_number_id},
+                            "messages": [
+                                {
+                                    "from": "62812345679",
+                                    "id": f"wamid.inbound_to_{uuid.uuid4().hex[:6]}",
+                                    "timestamp": "1710000000",
+                                    "type": "text",
+                                    "text": {"body": "Tes timeout"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_bytes = json.dumps(webhook_payload).encode("utf-8")
+    sig = hmac.new(app_secret.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"}
+
+    res = await async_client.post("/api/v1/webhooks/whatsapp", content=raw_bytes, headers=headers)
+    assert res.status_code == 200
+    assert provider_calls == 1  # Verify NO blind retries took place
+
+    # Verify outbound message transitioned to UNKNOWN
+    from sqlalchemy import select
+    outbound_msg = (await test_session.execute(select(Message).where(Message.tenant_id == tenant.id, Message.direction == "OUTBOUND"))).scalars().first()
+    assert outbound_msg is not None
+    assert outbound_msg.status == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_r3_postgres_multi_session_human_takeover_race(test_session_factory):
+    import asyncio
+    from app.database.models import Tenant, Customer, Conversation, Message
+    from app.repositories.domain import ConversationRepository, CustomerRepository, MessageRepository
+    from app.core.router.router import MessageRouter
+
+    async with test_session_factory() as session_setup:
+        tenant = Tenant(name="Takeover Race Tenant", slug=f"trt-{uuid.uuid4().hex[:6]}", is_active=True)
+        session_setup.add(tenant)
+        await session_setup.commit()
+
+        cust = await CustomerRepository(session_setup).get_or_create(tenant.id, "628123334444", name="Race Cust")
+        conv = await ConversationRepository(session_setup).get_or_create_active(tenant.id, cust.id)
+        msg = Message(
+            tenant_id=tenant.id,
+            conversation_id=conv.id,
+            direction="INBOUND",
+            message_type="TEXT",
+            text="Berapa harga kemeja?",
+        )
+        session_setup.add(msg)
+        await session_setup.commit()
+
+        tenant_id = tenant.id
+        conv_id = conv.id
+        msg_id = msg.id
+
+    # Session A: Worker A starts routing message
+    async def worker_a_llm_generation():
+        async with test_session_factory() as session_a:
+            c_repo = ConversationRepository(session_a)
+            m_repo = MessageRepository(session_a)
+
+            conv_a = await c_repo.get_by_id(tenant_id, conv_id)
+            msg_a = await m_repo.get_by_id(tenant_id, msg_id)
+
+            router = MessageRouter()
+            # Simulate async LLM generation pause
+            await asyncio.sleep(0.1)
+
+            res = await router.route_message(tenant_id, conv_a, msg_a, session_a)
+            return res
+
+    # Session B: Worker B concurrently claims human ownership
+    async def worker_b_human_takeover():
+        await asyncio.sleep(0.02)  # Ensure Worker A starts first
+        async with test_session_factory() as session_b:
+            c_repo = ConversationRepository(session_b)
+            conv_b = await c_repo.get_by_id(tenant_id, conv_id)
+            conv_b.human_handoff = True
+            conv_b.status = "HUMAN_ACTIVE"
+            await session_b.commit()
+
+    res_a, _ = await asyncio.gather(worker_a_llm_generation(), worker_b_human_takeover())
+
+    # Worker A must re-read DB status and suppress customer-facing AI response
+    assert res_a.handsoff_to_human is True
+    assert "[SYSTEM] Message logged for human agent." in res_a.response_text

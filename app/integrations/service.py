@@ -388,7 +388,9 @@ class IntegrationService:
                     session=self.session,
                 )
 
-            res = await execute_with_retry(_run, max_retries=3)
+            # Non-idempotent operations like outbound message sends must NOT be retried blindly upon ambiguous failure/timeout
+            effective_retries = 1 if operation in ("send_message", "send_whatsapp", "send_email", "send_sms") else 3
+            res = await execute_with_retry(_run, max_retries=effective_retries)
 
             execution.status = "COMPLETED"
             execution.completed_at = datetime.now(timezone.utc)
