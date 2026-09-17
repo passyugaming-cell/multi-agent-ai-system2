@@ -279,10 +279,16 @@ async def test_active_tasks_limit_ordering_and_isolation_closure(test_engine, se
             # 1. Max task items cap (<= 10)
             assert len(task_list) == 10
 
-            # 2. Tenant isolation (no Tenant 2 tasks)
+            # 2. Created_at DESC ordering assertion (newest task first)
+            titles = [t["title"] for t in task_list]
+            assert titles[0] == "Task Item 14"
+            assert titles[1] == "Task Item 13"
+            assert titles[9] == "Task Item 05"
+
+            # 3. Tenant isolation (no Tenant 2 tasks)
             assert not any("Tenant 2 Task" in task["title"] for task in task_list)
 
-            # 3. Safe field allowlist projection
+            # 4. Safe field allowlist projection
             allowed_fields = {"id", "title", "description", "status", "priority", "task_type", "assigned_agent"}
             for task_dict in task_list:
                 assert set(task_dict.keys()).issubset(allowed_fields)
