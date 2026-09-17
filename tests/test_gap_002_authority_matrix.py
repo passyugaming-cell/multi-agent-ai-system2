@@ -515,19 +515,41 @@ async def test_action_evaluation_records_audit_event(
 
 @pytest.mark.asyncio
 async def test_attack_1_forged_internal_bypass_denied(
-    db_session: AsyncSession, tenant_id_a, human_tenant_staff_actor
+    db_session: AsyncSession, tenant_id_a, human_tenant_staff_actor, cross_tenant_actor
 ):
-    """Attack 1 — Untrusted actor attempting internal service call with allow_internal=True is checked."""
+    """Attack 1 — Untrusted actor attempting internal service call with allow_internal=True is STILL subject to permission & tenant isolation checks."""
     srv = IntegrationService(db_session)
-    # Untrusted staff member passing explicit empty or staff permissions receives PermissionDeniedError
     from app.integrations.exceptions import PermissionDeniedError
+
+    # 1. Staff member passing allow_internal=True cannot bypass missing MANAGE_INTEGRATIONS permission
     with pytest.raises(PermissionDeniedError):
         await srv.connect_integration(
             tenant_id=tenant_id_a,
             integration_key="midtrans",
             credentials={"server_key": "forged_key"},
             actor_permissions=human_tenant_staff_actor.permissions, # Staff lacks MANAGE_INTEGRATIONS
-            allow_internal=False, # Must NOT allow untrusted caller bypass
+            allow_internal=True, # Attempting internal bypass!
+        )
+
+    # 2. Staff member with empty actor_permissions passing allow_internal=True cannot execute integration
+    with pytest.raises(PermissionDeniedError):
+        await srv.execute_operation(
+            tenant_id=tenant_id_a,
+            connection_id=uuid.uuid4(),
+            operation="cancel_payment",
+            params={},
+            actor_permissions=set(), # Empty permissions
+            allow_internal=True, # Attempting internal bypass!
+        )
+
+    # 3. Cross-tenant staff member passing allow_internal=True cannot bypass permission check for tenant A
+    with pytest.raises(PermissionDeniedError):
+        await srv.connect_integration(
+            tenant_id=tenant_id_a,
+            integration_key="midtrans",
+            credentials={"server_key": "forged_key"},
+            actor_permissions=human_tenant_staff_actor.permissions,
+            allow_internal=True,
         )
 
 
@@ -643,10 +665,29 @@ async def test_attack_5_forged_approval_mismatched_target_and_tenant_denied(
 
 def test_delegation_monotonicity():
     """Delegation Monotonicity — Delegated request permissions cannot exceed delegator permissions."""
-    # Parent agent ai_sales has allowed_tools: get_products, get_pricing, get_stock, etc.
+    # 1. Specialist AI ai_sales cannot execute forbidden actions or tools outside its scope
     sales_tools = AGENT_PERMISSIONS["ai_sales"]["allowed_tools"]
-    # Verify ai_sales cannot execute forbidden tools
     forbidden_sales = AGENT_PERMISSIONS["ai_sales"]["forbidden_actions"]
     assert "issue_refund" in forbidden_sales
     assert "change_official_price" in forbidden_sales
     assert check_tool_permission("ai_sales", "issue_refund") is False
+
+    # 2. Specialist AI ai_analyst is read-only and cannot mutate business data
+    assert AGENT_PERMISSIONS["ai_analyst"]["read_only"] is True
+    assert check_tool_permission("ai_analyst", "modify_business_data") is False
+
+    # 3. Specialist AI ai_support cannot execute critical production changes
+    forbidden_support = AGENT_PERMISSIONS["ai_support"]["forbidden_actions"]
+    assert "critical_production_change" in forbidden_support
+
+
+@pytest.mark.asyncio
+async def test_low_risk_action_contract_traceability():
+    """LOW-Risk Permission Contract Traceability — Verify LOW-risk actions execute autonomously under tenant scope without approval gates."""
+    assert RiskClassifier.classify("send_message") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("create_task") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("add_tag") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("remove_tag") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("log_result") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("delay") == ActionRiskLevel.LOW
+    assert RiskClassifier.classify("emit_event") == ActionRiskLevel.LOW
