@@ -47,6 +47,7 @@ class AssembledContext(BaseModel):
 
     # 4. Customer Profile & Conversation Context
     customer: Optional[Dict[str, Any]] = None
+    conversation_summary: Optional[str] = None
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
 
     # 5. Memory (Selective enrichment context)
@@ -68,6 +69,8 @@ class FormattedPromptContext(BaseModel):
     approved_knowledge_block: str
     business_memory_block: str
     client_memory_block: str
+    conversation_summary_block: str = ""
     conversation_history_block: str
+    task_context_block: str = ""
     untrusted_user_input: str
     full_prompt: str
