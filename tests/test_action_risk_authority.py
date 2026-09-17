@@ -26,7 +26,8 @@ async def test_risk_classification():
     assert RiskClassifier.classify("update_customer") == ActionRiskLevel.MEDIUM
     assert RiskClassifier.classify("call_agent") == ActionRiskLevel.MEDIUM
     assert RiskClassifier.classify("midtrans_cancel_payment") == ActionRiskLevel.HIGH
-    assert RiskClassifier.classify("issue_refund") == ActionRiskLevel.HIGH
+    assert RiskClassifier.classify("request_refund") == ActionRiskLevel.HIGH
+    assert RiskClassifier.classify("issue_refund") == ActionRiskLevel.CRITICAL
     assert RiskClassifier.classify("delete_customer") == ActionRiskLevel.CRITICAL
     assert RiskClassifier.classify("delete_data") == ActionRiskLevel.CRITICAL
     # Unknown actions fail-safe to HIGH risk

@@ -34,14 +34,15 @@ ACTION_RISK_POLICY_MAP: dict[str, ActionRiskLevel] = {
     # HIGH Risk - Financial operations, cancellation, pricing changes, workflow route approval
     "midtrans_cancel_payment": ActionRiskLevel.HIGH,
     "midtrans_request_refund": ActionRiskLevel.HIGH,
+    "request_refund": ActionRiskLevel.HIGH,
     "change_product_price": ActionRiskLevel.HIGH,
     "change_official_price": ActionRiskLevel.HIGH,
-    "issue_refund": ActionRiskLevel.HIGH,
     "request_approval": ActionRiskLevel.HIGH,
     "route_approval_request": ActionRiskLevel.HIGH,
     "create_orchestration_task": ActionRiskLevel.HIGH,
 
-    # CRITICAL Risk - Data deletion, security policy modifications, tenant lifecycle alteration
+    # CRITICAL Risk - Data deletion, security policy modifications, tenant lifecycle alteration, refund execution
+    "issue_refund": ActionRiskLevel.CRITICAL,
     "delete_customer": ActionRiskLevel.CRITICAL,
     "delete_data": ActionRiskLevel.CRITICAL,
     "delete_critical_data": ActionRiskLevel.CRITICAL,
