@@ -74,11 +74,12 @@ class ApprovalService:
         approval.decided_at = datetime.now(timezone.utc)
         approval.decided_by = decided_by
         approval.decision_reason = reason
-        approval.meta_data = approval.meta_data or {}
+        new_meta = dict(approval.meta_data or {})
 
         if active_actor and active_actor.is_platform_owner:
-            approval.meta_data["decided_by_is_platform_owner"] = True
-            approval.meta_data["decided_by_user_id"] = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
+            new_meta["decided_by_is_platform_owner"] = True
+            new_meta["decided_by_user_id"] = str(active_actor.user_id) if active_actor.user_id else "platform_owner"
+        approval.meta_data = new_meta
 
         # Resume workflow execution if associated
         if approval.workflow_execution_id:
