@@ -232,7 +232,10 @@ async def test_active_tasks_limit_ordering_and_isolation_closure(test_engine, se
     """Verifies max 10 tasks limit, created_at.desc ordering, tenant isolation, and SAFE_TASK_FIELDS projection."""
     t1_id, t2_id = setup_closure_tenants
     async with AsyncSession(test_engine, expire_on_commit=False) as session:
-        # Create 15 active tasks for Tenant 1
+        from datetime import datetime, timezone, timedelta
+        base_time = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        # Create 15 active tasks for Tenant 1 with explicit, deterministic created_at timestamps
         for i in range(15):
             t = Task(
                 tenant_id=t1_id,
@@ -242,6 +245,7 @@ async def test_active_tasks_limit_ordering_and_isolation_closure(test_engine, se
                 status="IN_PROGRESS",
                 priority="NORMAL",
                 assigned_agent="ai_sales",
+                created_at=base_time + timedelta(minutes=i),
             )
             session.add(t)
 
@@ -255,6 +259,7 @@ async def test_active_tasks_limit_ordering_and_isolation_closure(test_engine, se
                 status="IN_PROGRESS",
                 priority="HIGH",
                 assigned_agent="ai_sales",
+                created_at=base_time + timedelta(minutes=i),
             )
             session.add(t_other)
 
