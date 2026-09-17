@@ -72,10 +72,24 @@ class UsageService:
         current_usage = await self.get_current_usage(tenant_id, metric)
         projected_usage = current_usage + quantity
 
+        # Evaluate overage / limit policies
         if limit != -1:  # Limited metric
             if projected_usage > limit:
                 if policy == "BLOCK":
                     raise LimitExceededError(metric, projected_usage, limit)
+                elif policy in ("WARN", "ALLOW", "DEGRADE", "APPROVED_OVERAGE"):
+                    await publish_billing_event(
+                        event_type="usage.overage_allowed",
+                        tenant_id=tenant_id,
+                        payload={
+                            "metric": metric,
+                            "policy": policy,
+                            "current_usage": current_usage,
+                            "projected_usage": projected_usage,
+                            "limit": limit,
+                        },
+                        source="usage_service",
+                    )
 
         # Record usage
         rec = UsageRecord(

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Sequence, Any
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -230,10 +230,22 @@ class SubscriptionService:
         prev_plan_id = sub.plan_id
         prev_status = sub.status
 
+        # Evaluate downgrade / plan change conflicts (Non-destructive)
+        impact = await self.evaluate_plan_change_impact(tenant_id, new_plan_code)
+
         sub.plan_id = new_plan.id
         sub.plan = new_plan
         sub.billing_cycle = cycle
         sub.amount = billed_amount
+
+        meta = sub.metadata_ or {}
+        if impact["has_conflicts"]:
+            meta["downgrade_conflicts"] = impact["conflicts"]
+            meta["restricted_mode"] = True
+        else:
+            meta.pop("downgrade_conflicts", None)
+            meta.pop("restricted_mode", None)
+        sub.metadata_ = meta
 
         history = SubscriptionHistory(
             subscription_id=sub.id,
@@ -256,11 +268,88 @@ class SubscriptionService:
                 "new_plan_code": new_plan.code,
                 "billing_cycle": cycle,
                 "amount": str(sub.amount),
+                "has_conflicts": impact["has_conflicts"],
+                "conflicts": impact["conflicts"],
             },
             source="subscription_service",
         )
 
         return sub
+
+    async def evaluate_plan_change_impact(
+        self,
+        tenant_id: uuid.UUID,
+        target_plan_code: str,
+    ) -> dict[str, Any]:
+        """Evaluates plan change impact against tenant resources without modifying or deleting data."""
+        from sqlalchemy import func
+        from app.database.models.user import User
+        from app.database.models.customer import Customer
+        from app.database.models.integrations import IntegrationConnection
+        from app.database.models.workflow import WorkflowConfiguration
+
+        target_plan = await self.plan_service.get_plan_by_code(target_plan_code)
+        target_limits = {l.metric: l.limit_value for l in target_plan.limits}
+        target_features = {f.feature_key for f in target_plan.features if f.is_enabled}
+
+        conflicts: list[dict[str, Any]] = []
+
+        # 1. Admin count check
+        admin_stmt = select(func.count(User.id)).where(and_(User.tenant_id == tenant_id, User.is_active == True))
+        active_admins = (await self.session.execute(admin_stmt)).scalar() or 0
+        admin_lim = target_limits.get("admins", -1)
+        if admin_lim != -1 and active_admins > admin_lim:
+            conflicts.append({
+                "metric": "admins",
+                "current": active_admins,
+                "limit": admin_lim,
+                "reason": f"Active admin count ({active_admins}) exceeds target plan limit ({admin_lim}). Data preserved, excess admins must be managed manually.",
+            })
+
+        # 2. WhatsApp connections check
+        wa_stmt = select(func.count(IntegrationConnection.id)).where(
+            and_(IntegrationConnection.tenant_id == tenant_id, IntegrationConnection.status == "ACTIVE")
+        )
+        active_wa = (await self.session.execute(wa_stmt)).scalar() or 0
+        wa_lim = target_limits.get("whatsapp_connections", -1)
+        if wa_lim != -1 and active_wa > wa_lim:
+            conflicts.append({
+                "metric": "whatsapp_connections",
+                "current": active_wa,
+                "limit": wa_lim,
+                "reason": f"Active connections ({active_wa}) exceed target plan limit ({wa_lim}). Data preserved, excess connections restricted.",
+            })
+
+        # 3. Active customers count check
+        cust_stmt = select(func.count(Customer.id)).where(Customer.tenant_id == tenant_id)
+        total_customers = (await self.session.execute(cust_stmt)).scalar() or 0
+        cust_lim = target_limits.get("active_customers", -1)
+        if cust_lim != -1 and total_customers > cust_lim:
+            conflicts.append({
+                "metric": "active_customers",
+                "current": total_customers,
+                "limit": cust_lim,
+                "reason": f"Customer count ({total_customers}) exceeds target plan limit ({cust_lim}). Customer records preserved, new additions limited.",
+            })
+
+        # 4. Active workflows feature dependency check
+        wf_stmt = select(WorkflowConfiguration).where(
+            and_(WorkflowConfiguration.tenant_id == tenant_id, WorkflowConfiguration.is_active == True)
+        )
+        active_wfs = (await self.session.execute(wf_stmt)).scalars().all()
+        if active_wfs and "workflow_builder" not in target_features:
+            conflicts.append({
+                "metric": "active_workflows",
+                "current": len(active_wfs),
+                "limit": 0,
+                "reason": f"Target plan '{target_plan_code}' does not support active custom workflows. Workflows preserved, execution restricted.",
+            })
+
+        return {
+            "target_plan": target_plan_code,
+            "has_conflicts": len(conflicts) > 0,
+            "conflicts": conflicts,
+        }
 
     async def cancel_subscription(
         self,
