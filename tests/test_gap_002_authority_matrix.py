@@ -517,11 +517,43 @@ async def test_action_evaluation_records_audit_event(
 async def test_attack_1_forged_internal_bypass_denied(
     db_session: AsyncSession, tenant_id_a, tenant_id_b, human_tenant_staff_actor, cross_tenant_actor
 ):
-    """Attack 1 — Real Service-Layer Cross-Tenant Internal Path Denial with allow_internal=True."""
+    """Attack 1 — Real Resource Service-Layer Cross-Tenant Isolation & Internal Path Security Boundary."""
     srv = IntegrationService(db_session)
     from app.integrations.exceptions import PermissionDeniedError, ConnectionNotFoundError
+    from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential
+    from app.integrations.credentials import CredentialVault
 
-    # 1. Staff member passing allow_internal=True on IntegrationService cannot bypass missing permission
+    # 1. Create a REAL Integration & IntegrationConnection owned by Tenant A in the database
+    integration_a = Integration(
+        integration_key=f"midtrans_{uuid.uuid4().hex[:6]}",
+        provider_key="midtrans",
+        display_name="Tenant A Midtrans",
+        category="payment",
+        is_enabled=True,
+    )
+    db_session.add(integration_a)
+    await db_session.flush()
+
+    conn_a = IntegrationConnection(
+        tenant_id=tenant_id_a, # Owned by Tenant A!
+        integration_id=integration_a.id,
+        provider_key="midtrans",
+        status="ACTIVE",
+    )
+    db_session.add(conn_a)
+    await db_session.flush()
+
+    vault = CredentialVault()
+    cred_a = IntegrationCredential(
+        tenant_id=tenant_id_a,
+        connection_id=conn_a.id,
+        credential_type="api_key",
+        encrypted_secret=vault.encrypt_credentials({"server_key": "real_server_key"}),
+    )
+    db_session.add(cred_a)
+    await db_session.commit()
+
+    # 2. Staff member with allow_internal=True cannot bypass missing MANAGE_INTEGRATIONS permission
     with pytest.raises(PermissionDeniedError):
         await srv.connect_integration(
             tenant_id=tenant_id_a,
@@ -531,18 +563,32 @@ async def test_attack_1_forged_internal_bypass_denied(
             allow_internal=True, # Attempting internal bypass!
         )
 
-    # 2. Real Service-Layer Cross-Tenant Internal Path: Tenant B actor targeting Tenant A resource on IntegrationService
-    # Attempting to get non-existent or Tenant A connection using Tenant B actor permissions yields ConnectionNotFoundError or PermissionDeniedError
-    fake_conn_id = uuid.uuid4()
-    with pytest.raises((ConnectionNotFoundError, PermissionDeniedError)):
+    # 3. REAL RESOURCE CROSS-TENANT ISOLATION:
+    # Tenant B caller invokes execute_operation for Tenant A's REAL connection_id passing tenant_id_b (Tenant B context)
+    # Service layer filters by `IntegrationConnection.tenant_id == tenant_id_b` and raises ConnectionNotFoundError (scoping defense)
+    with pytest.raises(ConnectionNotFoundError):
         await srv.execute_operation(
-            tenant_id=tenant_id_a, # Tenant A target
-            connection_id=fake_conn_id,
+            tenant_id=tenant_id_b, # Tenant B context
+            connection_id=conn_a.id, # REAL Tenant A connection_id!
             operation="cancel_payment",
             params={},
             actor_permissions=cross_tenant_actor.permissions, # Tenant B actor
             allow_internal=True, # Internal path attempt!
         )
+
+    # 4. AUTHORIZATION LAYER ACTOR TENANT DEFENSE:
+    # ActionAuthorizationService evaluates request where actor.tenant_id (Tenant B) != request.tenant_id (Tenant A)
+    auth_srv = ActionAuthorizationService(db_session)
+    req_cross = ActionRequest(
+        action_type="execute_integration",
+        target=str(conn_a.id),
+        tenant_id=tenant_id_a, # Target Tenant A
+        actor=cross_tenant_actor, # Actor belongs to Tenant B
+        params={},
+    )
+    dec_cross = await auth_srv.evaluate_action(req_cross)
+    assert dec_cross.decision == ExecutionDecision.DENY
+    assert "FORBIDDEN_CROSS_TENANT_ACCESS" in dec_cross.reason
 
 
 @pytest.mark.asyncio

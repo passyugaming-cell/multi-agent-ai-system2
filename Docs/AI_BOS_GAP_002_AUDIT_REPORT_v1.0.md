@@ -7,7 +7,7 @@
 **PR Branch**: `repair/gap-002-authority-permission-matrix`
 **Base Branch**: `main`
 **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-**Observed Remote PR HEAD SHA**: `30970716b06fdb28fce4390ad0dcf0d5e5206b6c`
+**Observed Remote PR HEAD SHA**: `f23f685a32a68e9d3ec3d4bf4694e88361b20fbf`
 **GitHub Actions CI Merge Ref SHA**: `33853d04534a817acc7e4040f71dff831b807e59` (Temporary CI merge commit combining PR HEAD with target `main`)
 
 ---
@@ -18,9 +18,9 @@ Task **GAP-002 Authority & Permission Matrix** has been repaired, audited, and v
 The audit confirmed that the existing codebase possesses a complete, solid, and unified authority control plane across all layers (`app/core/authority/`, `app/core/context.py`, `app/core/auth.py`, `app/core/approvals/`, `app/agents/`, `app/integrations/`, `app/tenants/`, `app/billing/`).
 
 No architectural modifications or duplicate authorization subsystems were created. Key repairs and verifications performed:
-1. **`allow_internal=True` Security Boundary Audit**: Repository inventory identified exactly 14 production occurrences under `app/` (3 in `owner_ai/tools.py`, 2 in `api/v1/integrations.py`, 2 in `api/v1/webhooks.py`, 7 in `workflows/actions.py`) and 45 test/doc occurrences. Confirmed that zero untrusted client HTTP inputs or AI payload manipulations can pass `allow_internal=True` to bypass authorization or tenant isolation.
-2. **Repaired Attack #1 & Untrusted Actor Matrix**: Updated `test_attack_1_forged_internal_bypass_denied` and `test_untrusted_actor_matrix_allow_internal_denials` in `tests/test_gap_002_authority_matrix.py` directly on `IntegrationService` using Tenant B cross-tenant actor targeting Tenant A resource with `allow_internal=True`, asserting denial (`PermissionDeniedError` / `ConnectionNotFoundError`). Verified staff, admin, owner, cross-tenant, empty permission payload `set()`, and `actor_permissions=None` boundary proof (proving API routers always resolve permissions via `resolve_actor_permissions`, preventing untrusted clients from supplying `None`).
-3. **Delegation Monotonicity & Depth Operator Semantics**: Verified existing delegation boundary enforcement (`AgentRegistry`, depth operator `request.delegation_depth >= MAX_DELEGATION_DEPTH` with `MAX_DELEGATION_DEPTH = 3`, meaning depth 0, 1, 2 allowed; depth >= 3 blocked). Explicitly documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
+1. **Real Resource Cross-Tenant Isolation Proof (Attack #1)**: Created a real database `IntegrationConnection` owned by Tenant A in `test_attack_1_forged_internal_bypass_denied`. Invoked `IntegrationService.execute_operation` with Tenant B's tenant context (`tenant_id_b`) and `allow_internal=True` on Tenant A's real `connection_id`, proving that `_get_connection` filters by `tenant_id` and raises `ConnectionNotFoundError` (service-level scoping). Also verified `ActionAuthorizationService.evaluate_action` with `cross_tenant_actor` targeting Tenant A resource with `allow_internal=True`, proving `FORBIDDEN_CROSS_TENANT_ACCESS` DENY decision.
+2. **`actor_permissions=None` + `allow_internal=True` Service & API Boundary Proof**: Tested `IntegrationService` with `actor_permissions=None` + `allow_internal=True` directly, demonstrating that the service branch permits internal calls when `allow_internal=True`. Added proof that HTTP API endpoints always resolve permissions via `Depends(resolve_actor_permissions)`, which raises 403 `PERMISSION_DENIED` if no trusted server actor context exists, ensuring untrusted HTTP callers can never supply `actor_permissions=None` or manipulate permissions.
+3. **Delegation Depth Operator & Architecture Limitations**: Verified delegation depth operator semantics in `AgentRegistry` (`request.delegation_depth >= MAX_DELEGATION_DEPTH` with `MAX_DELEGATION_DEPTH = 3`: depth 0, 1, 2 allowed; depth >= 3 blocked). Explicitly documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
 4. **LOW-Risk Action Policy Contract Traceability**: Traced LOW-risk action policy (`send_message`, `create_task`, `add_tag`, `remove_tag`, `log_result`, `delay`, `emit_event`) against Master Blueprint Section 6. Confirmed these non-destructive logging/messaging actions execute autonomously under verified tenant scope, while mutation or financial operations require MEDIUM/HIGH/CRITICAL permissions and approvals.
 5. **Updated Risk Mapping**: Confirmed explicit policy mappings in `app/core/authority/risk.py` for `"issue_refund": ActionRiskLevel.CRITICAL` and `"request_refund": ActionRiskLevel.HIGH`.
 
@@ -28,16 +28,16 @@ No architectural modifications or duplicate authorization subsystems were create
 
 ## `allow_internal=True` Verified Production Inventory (14 Occurrences)
 
-| # | File | Function | Caller Type | Trusted Context Source | Tenant Check | Permission Check | Client Influence | Side Effect |
-|---|------|----------|-------------|------------------------|--------------|------------------|------------------|-------------|
-| 1 | `app/agents/owner_ai/tools.py` | `tool_execute_integration_operation` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (Blocked for non-platform owner) | Integration execution |
-| 2 | `app/agents/owner_ai/tools.py` | `tool_get_whatsapp_connection_status` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (Read-only status) | None (Read-only) |
-| 3 | `app/agents/owner_ai/tools.py` | `tool_get_sheets_connection_status` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (Read-only status) | None (Read-only) |
-| 4 | `app/api/v1/integrations.py` | `midtrans_cancel_payment` | Router Endpoint | JWT Bearer (`resolve_actor_permissions`) | Request Header | `EXECUTE_INTEGRATION` | NO (Requires JWT + Permission) | Payment cancellation |
-| 5 | `app/api/v1/integrations.py` | `midtrans_request_refund` | Router Endpoint | JWT Bearer (`resolve_actor_permissions`) | Request Header | `EXECUTE_INTEGRATION` | NO (Requires JWT + Permission) | Refund request |
-| 6 | `app/api/v1/webhooks.py` | `receive_whatsapp_webhook` | Webhook Handler | HMAC Signature (`X-Hub-Signature-256`) | Phone DB Lookup | Inbound Webhook | NO (Requires HMAC secret) | Inbound message |
-| 7 | `app/api/v1/webhooks.py` | `midtrans_payment_notification` | Webhook Handler | Midtrans Signature | DB Payment Record | Inbound Webhook | NO (Requires Provider Hash) | Payment status update |
-| 8-14 | `app/core/workflows/actions.py` | `ActionExecutor` (7 actions) | Workflow Engine | System Workflow Actor (`system_workflow`) | Workflow Record | `ActionAuthorizationService` | NO (Evaluated via RiskClassifier) | Workflow step execution |
+| # | File | Function | Caller Type | Actor Source | Actor Tenant Source | Permission Source | `actor_permissions` Can Be None? | `allow_internal` Client Controlled? | Tenant Check | Authorization Check | Side Effect | Security Conclusion |
+|---|------|----------|-------------|--------------|---------------------|-------------------|-----------------------------------|-------------------------------------|--------------|---------------------|-------------|---------------------|
+| 1 | `app/agents/owner_ai/tools.py` | `tool_execute_integration_operation` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (System tool call) | NO (Server logic) | Active Tenant | Platform Owner required | Integration execution | TRUSTED / SAFE |
+| 2 | `app/agents/owner_ai/tools.py` | `tool_get_whatsapp_connection_status` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (System tool call) | NO (Server logic) | Active Tenant | Platform Owner required | None (Read-only) | TRUSTED / SAFE |
+| 3 | `app/agents/owner_ai/tools.py` | `tool_get_sheets_connection_status` | Owner AI Tool | Server Context (`enforce_owner_actor`) | Active Tenant | Platform Owner | NO (System tool call) | NO (Server logic) | Active Tenant | Platform Owner required | None (Read-only) | TRUSTED / SAFE |
+| 4 | `app/api/v1/integrations.py` | `midtrans_cancel_payment` | Router Endpoint | JWT Bearer (`resolve_actor_permissions`) | Request Header | JWT / DB User | NO (Resolved via `Depends`) | NO (Hardcoded in router) | DB Connection lookup | `EXECUTE_INTEGRATION` required | Payment cancellation | TRUSTED / SAFE |
+| 5 | `app/api/v1/integrations.py` | `midtrans_request_refund` | Router Endpoint | JWT Bearer (`resolve_actor_permissions`) | Request Header | JWT / DB User | NO (Resolved via `Depends`) | NO (Hardcoded in router) | DB Connection lookup | `EXECUTE_INTEGRATION` required | Refund request | TRUSTED / SAFE |
+| 6 | `app/api/v1/webhooks.py` | `receive_whatsapp_webhook` | Webhook Handler | HMAC Signature (`X-Hub-Signature-256`) | Phone DB Lookup | Inbound Webhook | YES (`None` passed internally) | NO (Hardcoded in handler) | Phone DB Tenant lookup | Webhook secret HMAC | Inbound message | TRUSTED / SAFE |
+| 7 | `app/api/v1/webhooks.py` | `midtrans_payment_notification` | Webhook Handler | Midtrans Signature | DB Payment Record | Inbound Webhook | YES (`None` passed internally) | NO (Hardcoded in handler) | Payment DB Tenant lookup | Provider Hash verification | Payment status update | TRUSTED / SAFE |
+| 8-14 | `app/core/workflows/actions.py` | `ActionExecutor` (7 actions) | Workflow Engine | System Workflow Actor (`system_workflow`) | Workflow Record | `ActionAuthorizationService` | YES (`None` passed internally) | NO (Hardcoded in engine) | Execution Record Tenant | Evaluated via `RiskClassifier` | Workflow step execution | TRUSTED / SAFE |
 
 ---
 
@@ -94,7 +94,6 @@ tests/test_r1_real_jwt_security.py ......                                [100%] 
 ## CI & Pre-Commit Status
 - **Pre-Commit / Lint**: NOT CONFIGURED (No `.pre-commit-config.yaml` in repo root; verified via `poetry run pytest`).
 - **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-- **Pushed Remote PR HEAD SHA**: `30970716b06fdb28fce4390ad0dcf0d5e5206b6c` (PR #47)
 - **CI Merge Ref SHA**: `33853d04534a817acc7e4040f71dff831b807e59` (GitHub Actions temporary merge commit combining PR HEAD with target `main`).
 
 ---
