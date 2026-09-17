@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,14 @@ from app.database.models.billing import (
 )
 from app.billing.plans import TRIAL_FEATURES, TRIAL_LIMITS
 from app.billing.state_machine import SubscriptionStatus
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class AccessState:
@@ -44,9 +53,36 @@ class EntitlementResolver:
         stmt = select(Subscription).where(Subscription.tenant_id == tenant_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    def check_subscription_temporal_validity(self, sub: Subscription) -> tuple[bool, str | None]:
+        """Validates status and period start/end timestamps deterministically."""
+        now = datetime.now(timezone.utc)
+
+        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.ARCHIVED, SubscriptionStatus.SUSPENDED):
+            return False, f"Subscription status is {sub.status}."
+
+        if sub.status == SubscriptionStatus.TRIALING:
+            trial_end = _ensure_utc(sub.trial_end) or _ensure_utc(sub.current_period_end)
+            if trial_end and now >= trial_end:
+                return False, "Trial period has expired."
+            return True, None
+
+        if sub.status == SubscriptionStatus.CANCELLED_PENDING_EXPIRY:
+            period_end = _ensure_utc(sub.current_period_end)
+            if period_end and now >= period_end:
+                return False, "Cancelled subscription effective period has expired."
+            return True, None
+
+        # ACTIVE, PAST_DUE, GRACE_PERIOD, RESTRICTED
+        period_end = _ensure_utc(sub.current_period_end)
+        if period_end and now >= period_end:
+            return False, f"Subscription period ended on {period_end.isoformat()}."
+
+        return True, None
+
     async def get_active_tenant_addons(self, tenant_id: uuid.UUID) -> list[Addon]:
+        """Returns add-ons that are active, provider-enabled, and within valid temporal periods."""
         stmt = (
-            select(Addon)
+            select(Addon, TenantAddon)
             .join(TenantAddon, TenantAddon.addon_id == Addon.id)
             .where(
                 and_(
@@ -56,16 +92,35 @@ class EntitlementResolver:
                 )
             )
         )
-        return list((await self.session.execute(stmt)).scalars().all())
+        res = await self.session.execute(stmt)
+        now = datetime.now(timezone.utc)
+        valid_addons: list[Addon] = []
+
+        for addon, tenant_addon in res.all():
+            start = _ensure_utc(tenant_addon.current_period_start)
+            end = _ensure_utc(tenant_addon.current_period_end)
+
+            if start and now < start:
+                continue
+            if end and now >= end:
+                continue
+
+            valid_addons.append(addon)
+
+        return valid_addons
 
     async def has_feature(self, tenant_id: uuid.UUID, feature_key: str) -> bool:
         res = await self.can_use(tenant_id, feature_key)
         return res.allowed
 
     async def get_limit(self, tenant_id: uuid.UUID, metric: str) -> int:
-        """Returns effective limit for a metric considering plan + trial + add-ons."""
+        """Returns effective limit for a metric considering plan + trial + add-ons + temporal validity."""
         sub = await self.get_tenant_subscription(tenant_id)
-        if not sub or sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.ARCHIVED, SubscriptionStatus.SUSPENDED):
+        if not sub:
+            return 0
+
+        is_valid, _ = self.check_subscription_temporal_validity(sub)
+        if not is_valid:
             return 0
 
         # Base limit from plan or trial
@@ -103,12 +158,13 @@ class EntitlementResolver:
                 reason="No active subscription or trial found.",
             )
 
-        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.ARCHIVED, SubscriptionStatus.SUSPENDED):
+        is_valid, invalid_reason = self.check_subscription_temporal_validity(sub)
+        if not is_valid:
             return FeatureAccessResult(
                 allowed=False,
                 state=AccessState.BLOCKED,
                 feature_key=feature_key,
-                reason=f"Subscription status is {sub.status}.",
+                reason=invalid_reason,
             )
 
         if sub.status == SubscriptionStatus.RESTRICTED:
@@ -155,4 +211,47 @@ class EntitlementResolver:
             state=AccessState.ENABLED,
             feature_key=feature_key,
             reason="Feature is available.",
+        )
+
+    async def evaluate_metric_access(self, tenant_id: uuid.UUID, metric: str, current_usage: int) -> FeatureAccessResult:
+        """Evaluates access state for a resource metric based on current usage vs limit."""
+        limit = await self.get_limit(tenant_id, metric)
+
+        if limit == -1:
+            return FeatureAccessResult(
+                allowed=True,
+                state=AccessState.AVAILABLE,
+                feature_key=metric,
+                reason="Metric usage is unlimited.",
+                limit=-1,
+                current_usage=current_usage,
+            )
+
+        if limit == 0:
+            return FeatureAccessResult(
+                allowed=False,
+                state=AccessState.BLOCKED,
+                feature_key=metric,
+                reason=f"Metric '{metric}' limit is 0 for current entitlement.",
+                limit=0,
+                current_usage=current_usage,
+            )
+
+        if current_usage >= limit:
+            return FeatureAccessResult(
+                allowed=False,
+                state=AccessState.LIMITED,
+                feature_key=metric,
+                reason=f"Metric '{metric}' usage ({current_usage}) has reached or exceeded limit ({limit}).",
+                limit=limit,
+                current_usage=current_usage,
+            )
+
+        return FeatureAccessResult(
+            allowed=True,
+            state=AccessState.AVAILABLE,
+            feature_key=metric,
+            reason="Metric usage is within allowed limit.",
+            limit=limit,
+            current_usage=current_usage,
         )

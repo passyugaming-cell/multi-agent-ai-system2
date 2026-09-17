@@ -110,7 +110,12 @@ class WorkflowEngine:
                 matched_executions.append(existing_exec)
                 continue
 
-            # Create new WorkflowExecution
+            # Create new WorkflowExecution with plan boundary snapshot
+            from app.billing.subscription import SubscriptionService
+            sub_svc = SubscriptionService(self.session)
+            sub = await sub_svc.get_subscription_or_none(tenant_uuid)
+            execution_plan_code = sub.plan.code if (sub and sub.plan) else "starter"
+
             execution = WorkflowExecution(
                 tenant_id=tenant_uuid,
                 workflow_id=wf.id,
@@ -119,7 +124,11 @@ class WorkflowEngine:
                 status="PENDING",
                 current_step=0,
                 max_retries=wf.max_retries or settings.WORKFLOW_MAX_RETRIES,
-                context={"event": event.model_dump(mode="json"), "payload": event.payload},
+                context={
+                    "event": event.model_dump(mode="json"),
+                    "payload": event.payload,
+                    "execution_plan_code": execution_plan_code,
+                },
             )
             self.session.add(execution)
             await self.session.flush()

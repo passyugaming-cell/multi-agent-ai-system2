@@ -72,10 +72,54 @@ class UsageService:
         current_usage = await self.get_current_usage(tenant_id, metric)
         projected_usage = current_usage + quantity
 
+        # Evaluate overage / limit policies
         if limit != -1:  # Limited metric
             if projected_usage > limit:
                 if policy == "BLOCK":
                     raise LimitExceededError(metric, projected_usage, limit)
+                elif policy == "WARN":
+                    await publish_billing_event(
+                        event_type="usage.warning",
+                        tenant_id=tenant_id,
+                        payload={
+                            "metric": metric,
+                            "policy": policy,
+                            "current_usage": current_usage,
+                            "projected_usage": projected_usage,
+                            "limit": limit,
+                            "threshold_percentage": 100,
+                        },
+                        source="usage_service",
+                    )
+                elif policy in ("ALLOW", "APPROVED_OVERAGE"):
+                    await publish_billing_event(
+                        event_type="usage.overage_allowed",
+                        tenant_id=tenant_id,
+                        payload={
+                            "metric": metric,
+                            "policy": policy,
+                            "current_usage": current_usage,
+                            "projected_usage": projected_usage,
+                            "limit": limit,
+                        },
+                        source="usage_service",
+                    )
+                elif policy == "DEGRADE":
+                    await publish_billing_event(
+                        event_type="usage.degraded",
+                        tenant_id=tenant_id,
+                        payload={
+                            "metric": metric,
+                            "policy": policy,
+                            "current_usage": current_usage,
+                            "projected_usage": projected_usage,
+                            "limit": limit,
+                            "degraded_mode": True,
+                        },
+                        source="usage_service",
+                    )
+                else:
+                    raise ValueError(f"Unsupported usage policy: {policy}")
 
         # Record usage
         rec = UsageRecord(
