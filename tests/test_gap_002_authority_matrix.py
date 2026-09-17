@@ -515,7 +515,7 @@ async def test_action_evaluation_records_audit_event(
 
 @pytest.mark.asyncio
 async def test_attack_1_forged_internal_bypass_denied(
-    db_session: AsyncSession, tenant_id_a, human_tenant_staff_actor, cross_tenant_actor
+    db_session: AsyncSession, tenant_id_a, tenant_id_b, human_tenant_staff_actor, cross_tenant_actor
 ):
     """Attack 1 — Untrusted actor attempting internal service call with allow_internal=True is STILL subject to permission & tenant isolation checks."""
     srv = IntegrationService(db_session)
@@ -542,14 +542,78 @@ async def test_attack_1_forged_internal_bypass_denied(
             allow_internal=True, # Attempting internal bypass!
         )
 
-    # 3. Cross-tenant staff member passing allow_internal=True cannot bypass permission check for tenant A
+    # 3. Cross-Tenant Internal Path: Tenant B staff actor attempting internal path against Tenant A resource yields DENY
+    auth_srv = ActionAuthorizationService(db_session)
+    req_cross = ActionRequest(
+        action_type="whatsapp_send_message",
+        target="whatsapp",
+        tenant_id=tenant_id_a, # Tenant A target
+        actor=cross_tenant_actor, # Tenant B actor
+        params={"message": "Cross-tenant internal path attempt"},
+    )
+    dec_cross = await auth_srv.evaluate_action(req_cross)
+    assert dec_cross.decision == ExecutionDecision.DENY
+    assert "FORBIDDEN_CROSS_TENANT_ACCESS" in dec_cross.reason
+
+
+@pytest.mark.asyncio
+async def test_untrusted_actor_matrix_allow_internal_denials(
+    db_session: AsyncSession, tenant_id_a, human_tenant_staff_actor, human_tenant_admin_actor, human_tenant_owner_actor, cross_tenant_actor
+):
+    """Untrusted Actor Matrix — Verify allow_internal=True does NOT grant platform-owner or missing permissions across roles."""
+    srv = IntegrationService(db_session)
+    auth_srv = ActionAuthorizationService(db_session)
+    from app.integrations.exceptions import PermissionDeniedError
+
+    # A. Tenant Staff + allow_internal=True without permission -> PermissionDeniedError
     with pytest.raises(PermissionDeniedError):
         await srv.connect_integration(
             tenant_id=tenant_id_a,
             integration_key="midtrans",
-            credentials={"server_key": "forged_key"},
+            credentials={"server_key": "key"},
             actor_permissions=human_tenant_staff_actor.permissions,
             allow_internal=True,
+        )
+
+    # B. Tenant Admin + allow_internal=True attempting Platform Owner action (run_owner_ai) -> DENY
+    req_admin_owner_ai = ActionRequest(
+        action_type="run_owner_ai",
+        target="owner_ai",
+        tenant_id=tenant_id_a,
+        actor=human_tenant_admin_actor,
+        params={},
+    )
+    dec_admin = await auth_srv.evaluate_action(req_admin_owner_ai)
+    assert dec_admin.decision == ExecutionDecision.DENY
+
+    # C. Tenant Owner + allow_internal=True attempting Platform Owner action (run_owner_ai) -> DENY
+    req_owner_ai = ActionRequest(
+        action_type="run_owner_ai",
+        target="owner_ai",
+        tenant_id=tenant_id_a,
+        actor=human_tenant_owner_actor,
+        params={},
+    )
+    dec_owner = await auth_srv.evaluate_action(req_owner_ai)
+    assert dec_owner.decision == ExecutionDecision.DENY
+
+    # D. Cross-Tenant Actor + allow_internal=True attempting Tenant A access -> DENY
+    req_cross = ActionRequest(
+        action_type="execute_integration",
+        target="integration",
+        tenant_id=tenant_id_a,
+        actor=cross_tenant_actor,
+        params={},
+    )
+    dec_cross = await auth_srv.evaluate_action(req_cross)
+    assert dec_cross.decision == ExecutionDecision.DENY
+
+    # E. Empty permission payload + allow_internal=True -> PermissionDeniedError
+    with pytest.raises(PermissionDeniedError):
+        await srv.list_integrations(
+            tenant_id=tenant_id_a,
+            actor_permissions=set(),
+            allow_internal=False,
         )
 
 
