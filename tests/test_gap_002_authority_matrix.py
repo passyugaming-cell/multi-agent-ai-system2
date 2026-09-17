@@ -20,6 +20,7 @@ from app.core.authority.risk import RiskClassifier
 from app.core.authority.service import ActionAuthorizationService
 from app.core.approvals.service import ApprovalService
 from app.agents import agent_registry, AgentRequest, AgentRequestStatus
+from app.agents.base.registry import MAX_DELEGATION_DEPTH
 from app.agents.base.permissions import check_tool_permission, AGENT_PERMISSIONS
 from app.integrations import IntegrationService
 from app.tenants.business_service import BusinessDataService
@@ -275,19 +276,43 @@ async def test_agent_delegation_owner_ai_guard(db_session: AsyncSession, tenant_
 
 
 @pytest.mark.asyncio
-async def test_agent_delegation_depth_limit(db_session: AsyncSession, tenant_id_a):
-    req = AgentRequest(
-        tenant_id=tenant_id_a,
-        source="agent_delegation",
-        source_agent="ai_sales",
-        target_agent="ai_support",
-        task_type="test",
-        objective="Recursion test",
-        delegation_depth=3,  # Exceeds MAX_DELEGATION_DEPTH=3
-    )
-    res = await agent_registry.delegate_task(req, db_session)
-    assert res.status == AgentRequestStatus.BLOCKED
-    assert "Delegation depth limit exceeded" in res.error
+async def test_agent_delegation_depth_boundary_limits(db_session: AsyncSession, tenant_id_a):
+    """Verify delegation depth boundary operator: request.delegation_depth >= MAX_DELEGATION_DEPTH with MAX_DELEGATION_DEPTH = 3.
+
+    Depths 0, 1, 2 pass depth check and attempt agent resolution.
+    Depths 3, 4, 10 fail depth check immediately and return AgentRequestStatus.BLOCKED.
+    """
+    # Depths >= 3: BLOCKED by depth check
+    for depth in (3, 4, 10):
+        req_blocked = AgentRequest(
+            tenant_id=tenant_id_a,
+            source="agent_delegation",
+            source_agent="ai_sales",
+            target_agent="ai_support",
+            task_type="test",
+            objective=f"Depth {depth} test",
+            delegation_depth=depth,
+        )
+        res_blocked = await agent_registry.delegate_task(req_blocked, db_session)
+        assert res_blocked.status == AgentRequestStatus.BLOCKED
+        assert f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH})." in res_blocked.error
+
+    # Depths < 3: Pass depth check (depth 0, 1, 2)
+    # Using registered agent 'ai_support'
+    for depth in (0, 1, 2):
+        req_pass = AgentRequest(
+            tenant_id=tenant_id_a,
+            source="agent_delegation",
+            source_agent="ai_sales",
+            target_agent="ai_support",
+            task_type="test",
+            objective=f"Depth {depth} pass test",
+            delegation_depth=depth,
+        )
+        res_pass = await agent_registry.delegate_task(req_pass, db_session)
+        # Depth check passed because status error is not depth limit exceeded
+        error_msg = str(res_pass.error or "")
+        assert f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH})." not in error_msg
 
 
 def test_specialist_agent_tool_permissions():
@@ -651,14 +676,58 @@ async def test_untrusted_actor_matrix_allow_internal_denials(
             allow_internal=True, # allow_internal=True with empty set still checks permission and fails
         )
 
-    # F. CRITICAL ADDITION: actor_permissions=None + allow_internal=True scenario
-    # IntegrationService._check_permission permits actor_permissions=None ONLY when allow_internal=True
-    # Prove that HTTP API routers always resolve actor_permissions via Depends(resolve_actor_permissions),
-    # which raises 403 PERMISSION_DENIED if no trusted actor context is set, so untrusted API callers can NEVER supply actor_permissions=None.
+    # F. actor_permissions=None + allow_internal=True Direct Service Test:
+    # Verify that IntegrationService._check_permission permits actor_permissions=None ONLY when allow_internal=True for trusted internal callers
+    integrations_list = await srv.list_integrations(
+        tenant_id=tenant_id_a,
+        actor_permissions=None,
+        allow_internal=True, # Trusted internal caller path!
+    )
+    assert isinstance(integrations_list, list)
+
+    # When allow_internal=False and actor_permissions=None, it fails closed with PermissionDeniedError
+    with pytest.raises(PermissionDeniedError):
+        await srv.list_integrations(
+            tenant_id=tenant_id_a,
+            actor_permissions=None,
+            allow_internal=False, # Untrusted path!
+        )
+
+
+@pytest.mark.asyncio
+async def test_api_dependency_isolation_and_tenant_identity_proof(tenant_id_a):
+    """API Dependency Isolation & Tenant Identity Proof.
+
+    Demonstrates:
+    A. X-Tenant-ID is ONLY a request tenant selector context.
+    B. AuthenticatedActor.tenant_id is the server-verified authorization identity.
+    C. Client-controlled tenant selector MUST NOT establish authority.
+    D. API middleware/dependencies establish trusted actor identity from JWT/DB User.
+    E. Missing trusted actor context fails closed with HTTP 403 PERMISSION_DENIED, preventing API callers from supplying actor_permissions=None.
+    """
     set_tenant_context(tenant_id_a)
+
+    # Without server-side AuthenticatedActor context set, resolve_actor_permissions fails closed
+    from app.core.auth import resolve_actor_permissions
     with pytest.raises(AppException) as exc_info:
-        resolve_actor_permissions(x_actor_role=None, x_authenticated_actor_id=None, x_authenticated_tenant_id=None, x_actor_permissions=None)
+        resolve_actor_permissions(
+            x_actor_role=None,
+            x_authenticated_actor_id=None,
+            x_authenticated_tenant_id=None,
+            x_actor_permissions=None,
+        )
     assert exc_info.value.code == "PERMISSION_DENIED"
+    assert exc_info.value.status_code == 403
+
+    # Client forging identity headers without server-side actor context is rejected
+    with pytest.raises(AppException) as exc_info_forged:
+        resolve_actor_permissions(
+            x_actor_role="owner",
+            x_authenticated_actor_id=str(uuid.uuid4()),
+            x_authenticated_tenant_id=str(tenant_id_a),
+            x_actor_permissions="business.read,business.write,MANAGE_INTEGRATIONS",
+        )
+    assert exc_info_forged.value.code == "PERMISSION_DENIED"
 
 
 @pytest.mark.asyncio
