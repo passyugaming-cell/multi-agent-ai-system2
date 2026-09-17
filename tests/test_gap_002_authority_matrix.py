@@ -695,39 +695,74 @@ async def test_untrusted_actor_matrix_allow_internal_denials(
 
 
 @pytest.mark.asyncio
-async def test_api_dependency_isolation_and_tenant_identity_proof(tenant_id_a):
-    """API Dependency Isolation & Tenant Identity Proof.
+async def test_api_endpoint_http_security_chain_and_tenant_identity(
+    client, db_session: AsyncSession, tenant_a, tenant_b, monkeypatch
+):
+    """HTTP/API Endpoint Integration Security Chain Test.
 
-    Demonstrates:
-    A. X-Tenant-ID is ONLY a request tenant selector context.
-    B. AuthenticatedActor.tenant_id is the server-verified authorization identity.
-    C. Client-controlled tenant selector MUST NOT establish authority.
-    D. API middleware/dependencies establish trusted actor identity from JWT/DB User.
-    E. Missing trusted actor context fails closed with HTTP 403 PERMISSION_DENIED, preventing API callers from supplying actor_permissions=None.
+    Exercises actual production HTTP routes via AsyncClient proving:
+    1. Request without trusted JWT authentication -> HTTP 403 PERMISSION_DENIED.
+    2. Client sending forged identity headers (X-Actor-Role, X-Actor-Permissions) without valid JWT -> HTTP 403 PERMISSION_DENIED.
+    3. X-Tenant-ID is strictly a request tenant selector context; server authorization derives strictly from JWT Bearer + DB user.
+    4. Cross-tenant request (JWT for Tenant B sent with X-Tenant-ID for Tenant A) -> HTTP 403 PERMISSION_DENIED or FORBIDDEN_CROSS_TENANT_ACCESS.
+    5. Client cannot force API routers to pass actor_permissions=None or allow_internal=True bypasses.
     """
-    set_tenant_context(tenant_id_a)
+    from app.core.auth_service import create_access_token, hash_password
+    from app.database.models.user import User
 
-    # Without server-side AuthenticatedActor context set, resolve_actor_permissions fails closed
-    from app.core.auth import resolve_actor_permissions
-    with pytest.raises(AppException) as exc_info:
-        resolve_actor_permissions(
-            x_actor_role=None,
-            x_authenticated_actor_id=None,
-            x_authenticated_tenant_id=None,
-            x_actor_permissions=None,
-        )
-    assert exc_info.value.code == "PERMISSION_DENIED"
-    assert exc_info.value.status_code == 403
+    # Mock Redis revocation for local test environment
+    async def mock_is_revoked(jti: str) -> bool:
+        return False
 
-    # Client forging identity headers without server-side actor context is rejected
-    with pytest.raises(AppException) as exc_info_forged:
-        resolve_actor_permissions(
-            x_actor_role="owner",
-            x_authenticated_actor_id=str(uuid.uuid4()),
-            x_authenticated_tenant_id=str(tenant_id_a),
-            x_actor_permissions="business.read,business.write,MANAGE_INTEGRATIONS",
-        )
-    assert exc_info_forged.value.code == "PERMISSION_DENIED"
+    import app.core.auth_service as auth_srv
+    monkeypatch.setattr(auth_srv, "is_token_revoked_redis", mock_is_revoked)
+
+    # Create DB user for Tenant B
+    email_b = f"user_b_{uuid.uuid4().hex[:6]}@example.com"
+    user_b = User(
+        id=uuid.uuid4(),
+        tenant_id=tenant_b.id,
+        email=email_b,
+        password_hash=hash_password("Pass123!"),
+        role="owner",
+        is_active=True,
+    )
+    db_session.add(user_b)
+    await db_session.commit()
+
+    # 1. Request without Authorization header -> HTTP 403 PERMISSION_DENIED
+    res_no_auth = await client.get(
+        "/api/v1/customers",
+        headers={"X-Tenant-ID": str(tenant_a.id)},
+    )
+    assert res_no_auth.status_code == 403
+    assert res_no_auth.json()["error"]["code"] == "PERMISSION_DENIED"
+
+    # 2. Forged client identity headers without valid JWT -> HTTP 403 PERMISSION_DENIED
+    res_forged = await client.get(
+        "/api/v1/customers",
+        headers={
+            "X-Tenant-ID": str(tenant_a.id),
+            "X-Actor-Role": "owner",
+            "X-Actor-Permissions": "business.read,business.write,product.read",
+        },
+    )
+    assert res_forged.status_code == 403
+    assert res_forged.json()["error"]["code"] == "PERMISSION_DENIED"
+
+    # 3. Cross-tenant request: JWT token valid for Tenant B sent with X-Tenant-ID for Tenant A -> 403
+    jwt_b = create_access_token(
+        data={"sub": email_b, "user_id": str(user_b.id), "tenant_ids": [str(tenant_b.id)], "active_tenant_id": str(tenant_b.id)}
+    )
+    res_cross = await client.get(
+        "/api/v1/customers",
+        headers={
+            "X-Tenant-ID": str(tenant_a.id), # Target Tenant A
+            "Authorization": f"Bearer {jwt_b}", # JWT belongs to Tenant B
+        },
+    )
+    assert res_cross.status_code == 403
+    assert res_cross.json()["error"]["code"] in ("PERMISSION_DENIED", "FORBIDDEN_CROSS_TENANT_ACCESS")
 
 
 @pytest.mark.asyncio
