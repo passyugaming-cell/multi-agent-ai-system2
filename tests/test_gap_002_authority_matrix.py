@@ -19,7 +19,7 @@ from app.core.authority.schemas import (
 from app.core.authority.risk import RiskClassifier
 from app.core.authority.service import ActionAuthorizationService
 from app.core.approvals.service import ApprovalService
-from app.agents import agent_registry, AgentRequest, AgentRequestStatus
+from app.agents import agent_registry, AgentRequest, AgentRequestStatus, AgentResult
 from app.agents.base.registry import MAX_DELEGATION_DEPTH
 from app.agents.base.permissions import check_tool_permission, AGENT_PERMISSIONS
 from app.integrations import IntegrationService
@@ -276,43 +276,66 @@ async def test_agent_delegation_owner_ai_guard(db_session: AsyncSession, tenant_
 
 
 @pytest.mark.asyncio
-async def test_agent_delegation_depth_boundary_limits(db_session: AsyncSession, tenant_id_a):
-    """Verify delegation depth boundary operator: request.delegation_depth >= MAX_DELEGATION_DEPTH with MAX_DELEGATION_DEPTH = 3.
+async def test_agent_delegation_depth_propagation_and_boundary(db_session: AsyncSession, tenant_id_a, monkeypatch):
+    """Verify delegation depth propagation chain and boundary enforcement.
 
-    Depths 0, 1, 2 pass depth check and attempt agent resolution.
-    Depths 3, 4, 10 fail depth check immediately and return AgentRequestStatus.BLOCKED.
+    Proves:
+    1. Input depth 0 -> sub_request created with delegation_depth == 1 passed to target agent.run.
+    2. Input depth 1 -> sub_request created with delegation_depth == 2 passed to target agent.run.
+    3. Input depth 2 -> sub_request created with delegation_depth == 3 passed to target agent.run.
+    4. Input depth 3, 4, 10 -> BLOCKED by depth check (request.delegation_depth >= MAX_DELEGATION_DEPTH with MAX_DELEGATION_DEPTH = 3), returning AgentRequestStatus.BLOCKED, AND target agent.run is NOT called!
     """
-    # Depths >= 3: BLOCKED by depth check
-    for depth in (3, 4, 10):
+    captured_requests = []
+
+    target_agent_obj = agent_registry.get_agent("ai_support")
+
+    async def mock_agent_run(sub_req, session):
+        captured_requests.append(sub_req)
+        return AgentResult(
+            request_id=sub_req.request_id,
+            agent=sub_req.target_agent,
+            status=AgentRequestStatus.COMPLETED,
+            finding=f"Observed depth {sub_req.delegation_depth}",
+        )
+
+    monkeypatch.setattr(target_agent_obj, "run", mock_agent_run)
+
+    # 1. Test propagation for depth 0, 1, 2
+    for input_depth in (0, 1, 2):
+        captured_requests.clear()
+        req = AgentRequest(
+            tenant_id=tenant_id_a,
+            source="agent_delegation",
+            source_agent="ai_sales",
+            target_agent="ai_support",
+            task_type="test",
+            objective=f"Propagation depth {input_depth} test",
+            delegation_depth=input_depth,
+        )
+        res = await agent_registry.delegate_task(req, db_session)
+        assert res.status == AgentRequestStatus.COMPLETED
+        assert len(captured_requests) == 1
+        observed_sub_req = captured_requests[0]
+        # Assert sub_request has delegation_depth == input_depth + 1
+        assert observed_sub_req.delegation_depth == input_depth + 1
+
+    # 2. Test boundary enforcement for depth 3, 4, 10
+    for blocked_depth in (3, 4, 10):
+        captured_requests.clear()
         req_blocked = AgentRequest(
             tenant_id=tenant_id_a,
             source="agent_delegation",
             source_agent="ai_sales",
             target_agent="ai_support",
             task_type="test",
-            objective=f"Depth {depth} test",
-            delegation_depth=depth,
+            objective=f"Blocked depth {blocked_depth} test",
+            delegation_depth=blocked_depth,
         )
         res_blocked = await agent_registry.delegate_task(req_blocked, db_session)
         assert res_blocked.status == AgentRequestStatus.BLOCKED
         assert f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH})." in res_blocked.error
-
-    # Depths < 3: Pass depth check (depth 0, 1, 2)
-    # Using registered agent 'ai_support'
-    for depth in (0, 1, 2):
-        req_pass = AgentRequest(
-            tenant_id=tenant_id_a,
-            source="agent_delegation",
-            source_agent="ai_sales",
-            target_agent="ai_support",
-            task_type="test",
-            objective=f"Depth {depth} pass test",
-            delegation_depth=depth,
-        )
-        res_pass = await agent_registry.delegate_task(req_pass, db_session)
-        # Depth check passed because status error is not depth limit exceeded
-        error_msg = str(res_pass.error or "")
-        assert f"Delegation depth limit exceeded (max depth {MAX_DELEGATION_DEPTH})." not in error_msg
+        # Verify target agent.run was NOT called when blocked
+        assert len(captured_requests) == 0
 
 
 def test_specialist_agent_tool_permissions():

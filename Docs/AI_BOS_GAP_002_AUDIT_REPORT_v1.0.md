@@ -4,10 +4,10 @@
 **Status**: READY FOR INDEPENDENT REVIEW
 **Repository**: `passyugaming-cell/multi-agent-ai-system2`
 **PR Number / URL**: PR #47 (`https://github.com/passyugaming-cell/multi-agent-ai-system2/pull/47`)
-**PR Branch**: `repair/gap-002-authority-permission-matrix`
+**PR Branch**: `repair/gap-002-authority-permission-matrix-6817737319026513721`
 **Base Branch**: `main`
 **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-**Pushed Remote PR HEAD SHA**: `1d42a83168db6e8b37318f3a1fa44d0e495f83e9`
+**Pushed Remote PR HEAD SHA**: `d9980cb8cde72c5f24bea9fcb7f5f47d6ddebf31`
 **CI Merge Ref SHA**: `33853d04534a817acc7e4040f71dff831b807e59` (GitHub Actions temporary merge commit combining PR HEAD with target `main`)
 
 ---
@@ -20,7 +20,7 @@ The audit confirmed that the existing codebase possesses a complete, solid, and 
 No architectural modifications or duplicate authorization subsystems were created. Key repairs and verifications performed:
 1. **Real Resource Cross-Tenant Isolation Proof (Attack #1)**: Created a real database `IntegrationConnection` owned by Tenant A in `test_attack_1_forged_internal_bypass_denied`. Invoked `IntegrationService.execute_operation` with Tenant B's tenant context (`tenant_id_b`) and `allow_internal=True` on Tenant A's real `connection_id`, proving that `_get_connection` filters by `tenant_id` and raises `ConnectionNotFoundError` (service-level scoping). Also verified `ActionAuthorizationService.evaluate_action` with `cross_tenant_actor` targeting Tenant A resource with `allow_internal=True`, proving `FORBIDDEN_CROSS_TENANT_ACCESS` DENY decision.
 2. **`actor_permissions=None` + `allow_internal=True` Service & API Boundary Proof**: Tested `IntegrationService.list_integrations` directly with `actor_permissions=None` + `allow_internal=True`, demonstrating that the service branch permits trusted internal calls without permissions. Added `test_api_endpoint_http_security_chain_and_tenant_identity` proving HTTP API endpoints always resolve permissions via `Depends(resolve_actor_permissions)`, which raises 403 `PERMISSION_DENIED` if no trusted server actor context exists, ensuring untrusted HTTP callers can never supply `actor_permissions=None` or manipulate permissions.
-3. **Delegation Depth Operator & Architecture Limitations**: Verified delegation depth operator semantics in `AgentRegistry` (`request.delegation_depth >= MAX_DELEGATION_DEPTH` with `MAX_DELEGATION_DEPTH = 3`: depth 0, 1, 2 allowed; depth 3, 4, 10 blocked). Explicitly documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
+3. **Delegation Depth Propagation Spying Proof & Operator Semantics**: In `test_agent_delegation_depth_propagation_and_boundary`, spied on target `agent.run` via monkeypatch. Demonstrated that input depth 0 produces `sub_request` delegation_depth == 1, depth 1 produces delegation_depth == 2, depth 2 produces delegation_depth == 3, while depths 3, 4, 10 are BLOCKED by `request.delegation_depth >= MAX_DELEGATION_DEPTH` (with `MAX_DELEGATION_DEPTH = 3`) without invoking target `agent.run`. Explicitly documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
 4. **LOW-Risk Action Policy Contract Traceability**: Traced LOW-risk action policy (`send_message`, `create_task`, `add_tag`, `remove_tag`, `log_result`, `delay`, `emit_event`) against Master Blueprint Section 6. Confirmed these non-destructive logging/messaging actions execute autonomously under verified tenant scope, while mutation or financial operations require MEDIUM/HIGH/CRITICAL permissions and approvals.
 5. **Updated Risk Mapping**: Confirmed explicit policy mappings in `app/core/authority/risk.py` for `"issue_refund": ActionRiskLevel.CRITICAL` and `"request_refund": ActionRiskLevel.HIGH`.
 
