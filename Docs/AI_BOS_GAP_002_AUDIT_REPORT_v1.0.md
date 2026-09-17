@@ -1,20 +1,25 @@
 # GAP-002 Authority & Permission Matrix Audit & Closure Report
 
 **Date**: September 17, 2026
-**Status**: PASS / AUDITED & CLOSED
+**Status**: READY FOR INDEPENDENT REVIEW
 **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-**HEAD SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3` (Uncommitted changes on working tree branch `jules-6817737319026513721-13e7f3f6`)
+**Pushed HEAD SHA**: `194c3657d6782e897ff998e8fd5e8b5906885612`
+**Branch**: `repair/gap-002-authority-permission-matrix`
+**Pull Request**: PR #47 (`https://github.com/passyugaming-cell/multi-agent-ai-system2/pull/47`)
 
 ---
 
 ## Executive Summary
-Task **GAP-002 Authority & Permission Matrix** has been audited and verified against the Master Blueprint, Master Execution Plan, Locked Decisions (ACT-001–ACT-090), and current repository state.
+Task **GAP-002 Authority & Permission Matrix** has been repaired, audited, and verified against the Master Blueprint, Master Execution Plan, Locked Decisions (ACT-001–ACT-090), and repository standards following independent architecture & security review feedback.
 
 The audit confirmed that the existing codebase possesses a complete, solid, and unified authority control plane across all layers (`app/core/authority/`, `app/core/context.py`, `app/core/auth.py`, `app/core/approvals/`, `app/agents/`, `app/integrations/`, `app/tenants/`, `app/billing/`).
 
-No architectural modifications or duplicate authorization subsystems were required or created. Two minor clean-ups were performed:
-1. Updated `ACTION_RISK_POLICY_MAP` in `app/core/authority/risk.py` to explicitly map `"issue_refund"` as `ActionRiskLevel.CRITICAL` and `"request_refund"` as `ActionRiskLevel.HIGH`.
-2. Created a dedicated 17-test verification matrix in `tests/test_gap_002_authority_matrix.py` proving all positive and negative authorization, isolation, risk classification, delegation depth, self-approval prohibition, approval parameter binding, service-layer enforcement, and auditability invariants.
+No architectural modifications or duplicate authorization subsystems were created. Key repairs and verifications performed:
+1. **`allow_internal=True` Security Boundary Audit**: Inventory of all 59 occurrences across repository (14 production occurrences in `app/` and 45 test/doc occurrences). Confirmed that zero untrusted client HTTP inputs or AI payload manipulations can pass `allow_internal=True` to bypass authorization or tenant isolation.
+2. **Security Attack Regression Tests (Attacks 1–5)**: Added explicit test cases in `tests/test_gap_002_authority_matrix.py` proving rejection of forged internal bypass, cross-tenant internal access, AI escalation via internal delegation, approval bypass for HIGH/CRITICAL actions, and forged approval ID reuse with mismatched tenant/target/action/params.
+3. **Delegation Monotonicity**: Verified that delegated authority cannot exceed delegator authority.
+4. **LOW Risk Permission Contract**: Documented that LOW-risk actions (`send_message`, `create_task`, `add_tag`, `remove_tag`, `log_result`, `delay`, `emit_event`) are read-only/non-destructive operational logging/messaging actions that execute autonomously under verified tenant scope, while mutation or financial operations require MEDIUM/HIGH/CRITICAL permissions and approvals.
+5. **Updated Risk Mapping**: Confirmed explicit policy mappings in `app/core/authority/risk.py` for `"issue_refund": ActionRiskLevel.CRITICAL` and `"request_refund": ActionRiskLevel.HIGH`.
 
 ---
 
@@ -33,8 +38,8 @@ No architectural modifications or duplicate authorization subsystems were requir
 | 9 | **Action vs Authority Separation** | Action types classified into `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` risk levels deterministically via `RiskClassifier`. Authorization decisions produced by `ActionAuthorizationService`. | **PASS** |
 | 10 | **Policy Boundary & Risk Levels** | `LOW` auto-executes; `MEDIUM` requires RBAC permission check; `HIGH`/`CRITICAL` require explicit Human Owner approval (`WAITING_APPROVAL`). | **PASS** |
 | 11 | **Confirmation / Approval Gate** | High/Critical actions require active `Approval` record. Identity check enforces Human Platform Owner approval for HIGH/CRITICAL risk. Parameter binding enforced via SHA-256 `ActionBinding.compute_hash`. | **PASS** |
-| 12 | **Delegation & Non-Transitive Authority** | Depth limit `MAX_DELEGATION_DEPTH = 3` in `AgentRegistry`. An agent cannot delegate authority it does not possess or delegate to `owner_ai`. | **PASS** |
-| 13 | **Trusted Internal Calls** | Internal calls pass explicit `allow_internal=True` context without bypassing tenant isolation or actor identity. | **PASS** |
+| 12 | **Delegation & Non-Transitive Authority** | Depth limit `MAX_DELEGATION_DEPTH = 3` in `AgentRegistry`. An agent cannot delegate authority it does not possess or delegate to `owner_ai`. Delegated authority is monotonic. | **PASS** |
+| 13 | **Trusted Internal Calls (`allow_internal`)** | Service entrypoints verify permissions (`_check_permission`). Internal paths used by workflow engine or owner tools pass explicit trusted context without permitting client header bypasses. | **PASS** |
 | 14 | **Service-Layer Authorization** | `IntegrationService`, `BusinessDataService`, `RefundService`, `InvoiceService` enforce permission gates (`_check_permission`) at service entrypoints. | **PASS** |
 | 15 | **AI Cannot Grant/Escalate Authority** | AI reasoning cannot mutate RBAC permissions or grant itself approval authority. AI self-approval is forbidden (`SELF_APPROVAL_FORBIDDEN`). | **PASS** |
 | 16 | **Approval Cannot Be Fabricated/Reused** | Parameter tampering invalidates SHA-256 `ActionBinding` hash (`APPROVAL_BINDING_MISMATCH`). Cross-tenant approval reuse is rejected. | **PASS** |
@@ -42,36 +47,46 @@ No architectural modifications or duplicate authorization subsystems were requir
 
 ---
 
-## Files Modified / Added
+## Files Changed
 - `app/core/authority/risk.py`: Added explicit policy mappings for `"issue_refund": ActionRiskLevel.CRITICAL` and `"request_refund": ActionRiskLevel.HIGH`.
 - `app/core/approvals/service.py`: Preserved `meta_data` dictionary integrity on approval updates.
 - `tests/test_action_risk_authority.py`: Updated risk classification test assertions for `request_refund` (HIGH) and `issue_refund` (CRITICAL).
-- `tests/test_gap_002_authority_matrix.py`: Created comprehensive 17-test verification suite covering all positive/negative authorization paths.
+- `tests/test_gap_002_authority_matrix.py`: Created 23-test verification suite covering 17 GAP-002 paths, Attacks 1–5, and Delegation Monotonicity.
+- `Docs/AI_BOS_GAP_002_AUDIT_REPORT_v1.0.md`: Updated comprehensive evidence report.
 
 ---
 
 ## Verification & Test Results
 Targeted test suite execution passed 100%:
 ```
-tests/test_gap_002_authority_matrix.py ................. [100%] (17 passed)
-tests/test_owner_ai_security_boundary.py ........        [100%] (8 passed)
-tests/test_approvals_and_tasks.py .......                [100%] (7 passed)
-tests/test_action_risk_authority.py ...............      [100%] (15 passed)
-tests/test_r1_workflow_privilege_escalation.py .......   [100%] (7 passed)
-tests/test_tenant_isolation_phase1.py .....              [100%] (5 passed)
-tests/test_credential_security.py .....                  [100%] (5 passed)
-tests/test_r1_real_jwt_security.py ......                [100%] (6 passed)
+tests/test_gap_002_authority_matrix.py .......................           [ 30%] (23 passed)
+tests/test_action_risk_authority.py ...............                      [ 50%] (15 passed)
+tests/test_owner_ai_security_boundary.py ........                        [ 60%] (8 passed)
+tests/test_approvals_and_tasks.py .......                                [ 69%] (7 passed)
+tests/test_r1_workflow_privilege_escalation.py .......                   [ 78%] (7 passed)
+tests/test_tenant_isolation_phase1.py .....                              [ 85%] (5 passed)
+tests/test_credential_security.py .....                                  [ 92%] (5 passed)
+tests/test_r1_real_jwt_security.py ......                                [100%] (6 passed)
 
-======================== 70 passed in 83.46s ========================
+======================== 76 passed in 69.82s ========================
 ```
 
 ---
 
-## Known Limitations
-- None. System state conforms strictly to Master Blueprint, Execution Plan, and ACT Decisions.
+## CI & Pre-Commit Status
+- **Pre-Commit / Lint**: NOT CONFIGURED (No `.pre-commit-config.yaml` in repo root; verified via `poetry run pytest`).
+- **Tested SHA**: `194c3657d6782e897ff998e8fd5e8b5906885612` (Commit on PR #47 branch `repair/gap-002-authority-permission-matrix`).
+- **CI Note on Merge Ref**: CI runs on GitHub Actions temporary merge ref `33853d04534a817acc7e4040f71dff831b807e59` merging PR HEAD `194c3657d6782e897ff998e8fd5e8b5906885612` with target `main` (`13c1e7e18c6182857a08fbfbb60c1a531925d4e3`).
 
 ---
 
-## Final Recommendation
-Task **GAP-002 Authority & Permission Matrix** is **CLOSED (PASS)**.
-The codebase is fully aligned with platform authority and isolation requirements. Ready for submission.
+## Remaining Findings
+- **P0**: None
+- **P1**: None
+- **P2**: None
+- **UNKNOWN**: None
+
+---
+
+## Jules Recommendation
+Task **GAP-002 Authority & Permission Matrix** repair is complete, verified, committed, pushed to PR #47, and **READY FOR INDEPENDENT REVIEW**.

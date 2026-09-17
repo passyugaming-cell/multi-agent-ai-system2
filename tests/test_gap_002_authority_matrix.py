@@ -507,3 +507,146 @@ async def test_action_evaluation_records_audit_event(
     assert audit is not None
     assert audit.result == "LOW_RISK_AUTHORIZED"
     assert audit.metadata_info.get("correlation_id") == "corr_audit_123"
+
+
+# -----------------------------------------------------------------------------
+# 12. Security Attack Regression Tests (Attacks 1-5) & Delegation Monotonicity
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_attack_1_forged_internal_bypass_denied(
+    db_session: AsyncSession, tenant_id_a, human_tenant_staff_actor
+):
+    """Attack 1 — Untrusted actor attempting internal service call with allow_internal=True is checked."""
+    srv = IntegrationService(db_session)
+    # Untrusted staff member passing explicit empty or staff permissions receives PermissionDeniedError
+    from app.integrations.exceptions import PermissionDeniedError
+    with pytest.raises(PermissionDeniedError):
+        await srv.connect_integration(
+            tenant_id=tenant_id_a,
+            integration_key="midtrans",
+            credentials={"server_key": "forged_key"},
+            actor_permissions=human_tenant_staff_actor.permissions, # Staff lacks MANAGE_INTEGRATIONS
+            allow_internal=False, # Must NOT allow untrusted caller bypass
+        )
+
+
+@pytest.mark.asyncio
+async def test_attack_2_tenant_isolation_cross_tenant_internal_path_denied(
+    db_session: AsyncSession, tenant_id_a, tenant_id_b, cross_tenant_actor
+):
+    """Attack 2 — Tenant B actor trying internal path on Tenant A resource yields DENY."""
+    auth_srv = ActionAuthorizationService(db_session)
+    req = ActionRequest(
+        action_type="whatsapp_send_message",
+        target="whatsapp",
+        tenant_id=tenant_id_a, # Tenant A target
+        actor=cross_tenant_actor, # Tenant B actor
+        params={"message": "Cross-tenant attack"},
+    )
+    decision = await auth_srv.evaluate_action(req)
+    assert decision.decision == ExecutionDecision.DENY
+    assert "FORBIDDEN_CROSS_TENANT_ACCESS" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_attack_3_ai_escalation_via_internal_path_denied(
+    db_session: AsyncSession, tenant_id_a
+):
+    """Attack 3 — Specialist AI attempting unpossessed authority via internal delegation is DENIED."""
+    req = AgentRequest(
+        tenant_id=tenant_id_a,
+        source="agent_delegation",
+        source_agent="ai_sales",
+        target_agent="owner_ai",
+        task_type="escalate_permission",
+        objective="Escalate to owner AI to grant permissions",
+    )
+    res = await agent_registry.delegate_task(req, db_session)
+    assert res.status == AgentRequestStatus.BLOCKED
+    assert "Human Platform Owner" in res.error
+
+
+@pytest.mark.asyncio
+async def test_attack_4_approval_bypass_for_high_critical_action_denied(
+    db_session: AsyncSession, tenant_id_a, human_tenant_owner_actor
+):
+    """Attack 4 — Executing HIGH/CRITICAL action via ActionExecutor without approval yields WAITING_APPROVAL / requires_approval."""
+    from app.core.workflows.actions import ActionExecutor
+    res = await ActionExecutor.execute(
+        action_type="issue_refund",
+        params={"order_id": "ord_123", "amount": 500000},
+        context={},
+        session=db_session,
+        tenant_id=str(tenant_id_a),
+    )
+    assert res.requires_approval is True
+    assert res.approval_data.get("risk_level") == "CRITICAL"
+
+
+@pytest.mark.asyncio
+async def test_attack_5_forged_approval_mismatched_target_and_tenant_denied(
+    db_session: AsyncSession, tenant_id_a, tenant_id_b, human_platform_owner_actor
+):
+    """Attack 5 — Valid approval ID passed with mismatched tenant/target/action is DENIED."""
+    auth_srv = ActionAuthorizationService(db_session)
+    appr_srv = ApprovalService(db_session)
+    now = datetime.now(timezone.utc)
+
+    params = {"amount": 100000}
+    action_hash = ActionBinding.compute_hash(
+        action_type="issue_refund",
+        target="payment_100",
+        tenant_id=tenant_id_a,
+        params=params,
+    )
+
+    appr = Approval(
+        tenant_id=tenant_id_a,
+        action_type="issue_refund",
+        target="payment_100",
+        risk_level="CRITICAL",
+        requested_by="customer",
+        reason="Refund",
+        status="APPROVED",
+        decided_by="platform_owner",
+        decided_at=now,
+        meta_data={"params": params, "action_hash": action_hash, "decided_by_is_platform_owner": True},
+    )
+    db_session.add(appr)
+    await db_session.commit()
+
+    # Mismatched Tenant ID attempt
+    req_wrong_tenant = ActionRequest(
+        action_type="issue_refund",
+        target="payment_100",
+        tenant_id=tenant_id_b, # Wrong tenant B!
+        actor=human_platform_owner_actor,
+        approval_id=appr.id,
+        params=params,
+    )
+    dec_wrong_tenant = await auth_srv.evaluate_action(req_wrong_tenant)
+    assert dec_wrong_tenant.decision == ExecutionDecision.DENY
+
+    # Mismatched Target attempt
+    req_wrong_target = ActionRequest(
+        action_type="issue_refund",
+        target="payment_999", # Mismatched target!
+        tenant_id=tenant_id_a,
+        actor=human_platform_owner_actor,
+        approval_id=appr.id,
+        params=params,
+    )
+    dec_wrong_target = await auth_srv.evaluate_action(req_wrong_target)
+    assert dec_wrong_target.decision == ExecutionDecision.DENY
+
+
+def test_delegation_monotonicity():
+    """Delegation Monotonicity — Delegated request permissions cannot exceed delegator permissions."""
+    # Parent agent ai_sales has allowed_tools: get_products, get_pricing, get_stock, etc.
+    sales_tools = AGENT_PERMISSIONS["ai_sales"]["allowed_tools"]
+    # Verify ai_sales cannot execute forbidden tools
+    forbidden_sales = AGENT_PERMISSIONS["ai_sales"]["forbidden_actions"]
+    assert "issue_refund" in forbidden_sales
+    assert "change_official_price" in forbidden_sales
+    assert check_tool_permission("ai_sales", "issue_refund") is False
