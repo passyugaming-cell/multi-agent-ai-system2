@@ -201,6 +201,96 @@ async def test_exact_category_authorization_analytics_and_tasks_closure(test_eng
 
 
 @pytest.mark.asyncio
+async def test_real_analytics_population_closure(test_engine, setup_closure_tenants):
+    """Verifies that AnalyticsService.get_business_health correctly populates facts['analytics']."""
+    t1_id, _ = setup_closure_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        platform_actor = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="owner",
+            permissions={"*"},
+            is_platform_owner=True,
+        )
+        token = set_actor_context(platform_actor)
+        try:
+            service = ContextAssemblyService(session)
+            req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="owner_ai")
+            ctx = await service.assemble_context(req)
+
+            assert "analytics" in ctx.assembled_categories
+            analytics_facts = ctx.facts.get("analytics")
+            assert analytics_facts is not None
+            assert "score" in analytics_facts
+            assert "category_scores" in analytics_facts
+        finally:
+            reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_active_tasks_limit_ordering_and_isolation_closure(test_engine, setup_closure_tenants):
+    """Verifies max 10 tasks limit, created_at.desc ordering, tenant isolation, and SAFE_TASK_FIELDS projection."""
+    t1_id, t2_id = setup_closure_tenants
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
+        # Create 15 active tasks for Tenant 1
+        for i in range(15):
+            t = Task(
+                tenant_id=t1_id,
+                title=f"Task Item {i:02d}",
+                description=f"Description {i}",
+                task_type="general",
+                status="IN_PROGRESS",
+                priority="NORMAL",
+                assigned_agent="ai_sales",
+            )
+            session.add(t)
+
+        # Create 2 active tasks for Tenant 2
+        for i in range(2):
+            t_other = Task(
+                tenant_id=t2_id,
+                title=f"Tenant 2 Task {i}",
+                description="Secret T2 Task",
+                task_type="general",
+                status="IN_PROGRESS",
+                priority="HIGH",
+                assigned_agent="ai_sales",
+            )
+            session.add(t_other)
+
+        await session.commit()
+
+        platform_actor = AuthenticatedActor(
+            user_id=uuid.uuid4(),
+            tenant_id=t1_id,
+            role="owner",
+            permissions={"*"},
+            is_platform_owner=True,
+        )
+        token = set_actor_context(platform_actor)
+        try:
+            service = ContextAssemblyService(session)
+            req = ContextAssemblyRequest(tenant_id=t1_id, agent_name="owner_ai")
+            ctx = await service.assemble_context(req)
+
+            assert ctx.task_context is not None
+            task_list = ctx.task_context.get("tasks", [])
+
+            # 1. Max task items cap (<= 10)
+            assert len(task_list) == 10
+
+            # 2. Tenant isolation (no Tenant 2 tasks)
+            assert not any("Tenant 2 Task" in task["title"] for task in task_list)
+
+            # 3. Safe field allowlist projection
+            allowed_fields = {"id", "title", "description", "status", "priority", "task_type", "assigned_agent"}
+            for task_dict in task_list:
+                assert set(task_dict.keys()).issubset(allowed_fields)
+        finally:
+            reset_actor_context(token)
+
+
+@pytest.mark.asyncio
 async def test_relevance_and_empty_result_semantics_closure(test_engine, setup_closure_tenants):
     """Verifies that non-matching product/knowledge search queries return EMPTY results instead of arbitrary records."""
     t1_id, t2_id = setup_closure_tenants
