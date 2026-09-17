@@ -321,6 +321,8 @@ class SubscriptionService:
             })
 
         # 3. Active customers count check
+        # Note: In the AI BOS schema, Customer model has no `is_active` status column;
+        # all customer records belonging to the tenant represent the active customer baseline.
         cust_stmt = select(func.count(Customer.id)).where(Customer.tenant_id == tenant_id)
         total_customers = (await self.session.execute(cust_stmt)).scalar() or 0
         cust_lim = target_limits.get("active_customers", -1)

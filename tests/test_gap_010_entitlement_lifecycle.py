@@ -142,20 +142,106 @@ async def test_usage_limits_overage_and_access_states(db_session: AsyncSession, 
     acc_below = await resolver.evaluate_metric_access(tenant_a.id, UsageMetric.ADMINS, current_usage=1)
     assert acc_below.allowed is True
     assert acc_below.state == AccessState.AVAILABLE
+    assert acc_below.limit == 3
+    assert acc_below.current_usage == 1
 
     # Usage exactly at limit
     acc_at_limit = await resolver.evaluate_metric_access(tenant_a.id, UsageMetric.ADMINS, current_usage=3)
     assert acc_at_limit.allowed is False
     assert acc_at_limit.state == AccessState.LIMITED
+    assert acc_at_limit.limit == 3
+    assert acc_at_limit.current_usage == 3
 
     # Overage enforcement with BLOCK policy
     await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=2, policy="BLOCK")
     with pytest.raises(LimitExceededError):
         await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=2, policy="BLOCK")
 
-    # Overage enforcement with WARN / ALLOW policy
-    rec_warn = await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=2, policy="WARN")
-    assert rec_warn.quantity == 2
+    # Overage enforcement with WARN / ALLOW / APPROVED_OVERAGE / DEGRADE
+    rec_warn = await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=1, policy="WARN")
+    assert rec_warn.quantity == 1
+
+    rec_allow = await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=1, policy="ALLOW")
+    assert rec_allow.quantity == 1
+
+    rec_degrade = await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=1, policy="DEGRADE")
+    assert rec_degrade.quantity == 1
+
+    # Unknown policy raises ValueError fail-closed
+    with pytest.raises(ValueError, match="Unsupported usage policy"):
+        await usage_svc.check_and_increment_usage(tenant_a.id, UsageMetric.ADMINS, quantity=1, policy="UNSUPPORTED_UNKNOWN")
+
+
+@pytest.mark.asyncio
+async def test_addon_temporal_and_status_matrix(db_session: AsyncSession, tenant_a, tenant_b):
+    """GAP-010-P2-02: Complete add-on matrix verification (active, inactive, future, expired, tenant isolation)."""
+    sub_svc = SubscriptionService(db_session)
+    resolver = EntitlementResolver(db_session)
+
+    await sub_svc.activate_subscription(tenant_a.id, "starter", verified_payment=True)
+    await sub_svc.activate_subscription(tenant_b.id, "starter", verified_payment=True)
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Inactive catalog addon
+    addon_inactive_catalog = Addon(
+        name="Inactive Catalog Addon",
+        code="inactive_cat",
+        is_active=False,
+        feature_grant={"ai_sales": True},
+    )
+    db_session.add(addon_inactive_catalog)
+    await db_session.flush()
+
+    ta1 = TenantAddon(
+        tenant_id=tenant_a.id,
+        addon_id=addon_inactive_catalog.id,
+        status="ACTIVE",
+        current_period_start=now - timedelta(days=1),
+        current_period_end=now + timedelta(days=10),
+    )
+    db_session.add(ta1)
+
+    # 2. Inactive tenant addon status
+    addon_active = Addon(
+        name="Active Catalog Addon",
+        code="active_cat",
+        is_active=True,
+        feature_grant={"ai_support": True},
+    )
+    db_session.add(addon_active)
+    await db_session.flush()
+
+    ta2 = TenantAddon(
+        tenant_id=tenant_a.id,
+        addon_id=addon_active.id,
+        status="INACTIVE",
+        current_period_start=now - timedelta(days=1),
+        current_period_end=now + timedelta(days=10),
+    )
+    db_session.add(ta2)
+
+    # 3. Future scheduled tenant addon
+    ta3 = TenantAddon(
+        tenant_id=tenant_a.id,
+        addon_id=addon_active.id,
+        status="ACTIVE",
+        current_period_start=now + timedelta(days=5),
+        current_period_end=now + timedelta(days=15),
+    )
+    db_session.add(ta3)
+    await db_session.commit()
+
+    # Verify no feature grants from inactive/future addons
+    res_sales = await resolver.can_use(tenant_a.id, "ai_sales")
+    assert res_sales.allowed is False
+
+    res_support = await resolver.can_use(tenant_a.id, "ai_support")
+    assert res_support.allowed is False
+
+    # Tenant B isolation check: Tenant A addons never affect Tenant B
+    res_b = await resolver.can_use(tenant_b.id, "ai_support")
+    assert res_b.allowed is False
 
 
 @pytest.mark.asyncio
@@ -206,6 +292,16 @@ async def test_safe_non_destructive_downgrade(db_session: AsyncSession, tenant_a
     all_custs = (await db_session.execute(cust_stmt)).scalars().all()
     assert len(all_custs) == 1200  # All 1200 customers intact
 
+    # Assert resulting authoritative limit enforcement post-downgrade
+    resolver = EntitlementResolver(db_session)
+    admin_limit_post = await resolver.get_limit(tenant_a.id, UsageMetric.ADMINS)
+    assert admin_limit_post == 3  # Starter limit
+
+    # Pro-only feature is now blocked
+    sales_post = await resolver.can_use(tenant_a.id, "ai_sales")
+    assert sales_post.allowed is False
+    assert sales_post.state == AccessState.BLOCKED
+
 
 @pytest.mark.asyncio
 async def test_workflow_execution_boundary_during_plan_change(db_session: AsyncSession, tenant_a):
@@ -241,8 +337,47 @@ async def test_workflow_execution_boundary_during_plan_change(db_session: AsyncS
     # Plan change Pro -> Starter while execution exists
     await sub_svc.change_plan(tenant_a.id, "starter", verified_payment=True)
 
-    # Execution plan boundary remains strictly 'pro'
+    # Execution plan boundary remains strictly 'pro' for existing execution
     assert exec_inst.context["execution_plan_code"] == "pro"
+
+    # A NEW execution created post-downgrade receives the new 'starter' snapshot
+    evt_new = EventSchema(
+        event_id=f"evt_{uuid.uuid4().hex[:8]}",
+        event_type="order.created",
+        tenant_id=str(tenant_a.id),
+        payload={"order_id": "ord_456"},
+        source="test",
+    )
+    new_executions = await engine.handle_event(evt_new)
+    assert len(new_executions) == 1
+    assert new_executions[0].context["execution_plan_code"] == "starter"
+
+
+@pytest.mark.asyncio
+async def test_ai_security_boundary_cannot_grant_entitlement(db_session: AsyncSession, tenant_a):
+    """GAP-010 AI Security Boundary: Request payload claiming plan/entitlement cannot grant access."""
+    sub_svc = SubscriptionService(db_session)
+    resolver = EntitlementResolver(db_session)
+
+    # Tenant on Starter plan
+    await sub_svc.activate_subscription(tenant_a.id, "starter", verified_payment=True)
+
+    # Simulated AI reasoning / client request payload trying to pass forged plan or entitlement
+    untrusted_payload = {
+        "plan": "pro",
+        "entitled": True,
+        "feature_grant": {"ai_sales": True},
+        "role": "owner",
+    }
+
+    # Authoritative resolver evaluates database truth ONLY and ignores untrusted payload parameters
+    res = await resolver.can_use(tenant_a.id, "ai_sales")
+    assert res.allowed is False
+    assert res.state == AccessState.BLOCKED
+    assert "not included in tenant plan" in res.reason
+
+    limit = await resolver.get_limit(tenant_a.id, UsageMetric.ADMINS)
+    assert limit == 3  # Starter limit, not overridden by untrusted payload
 
 
 @pytest.mark.asyncio
