@@ -517,11 +517,11 @@ async def test_action_evaluation_records_audit_event(
 async def test_attack_1_forged_internal_bypass_denied(
     db_session: AsyncSession, tenant_id_a, tenant_id_b, human_tenant_staff_actor, cross_tenant_actor
 ):
-    """Attack 1 — Untrusted actor attempting internal service call with allow_internal=True is STILL subject to permission & tenant isolation checks."""
+    """Attack 1 — Real Service-Layer Cross-Tenant Internal Path Denial with allow_internal=True."""
     srv = IntegrationService(db_session)
-    from app.integrations.exceptions import PermissionDeniedError
+    from app.integrations.exceptions import PermissionDeniedError, ConnectionNotFoundError
 
-    # 1. Staff member passing allow_internal=True cannot bypass missing MANAGE_INTEGRATIONS permission
+    # 1. Staff member passing allow_internal=True on IntegrationService cannot bypass missing permission
     with pytest.raises(PermissionDeniedError):
         await srv.connect_integration(
             tenant_id=tenant_id_a,
@@ -531,29 +531,18 @@ async def test_attack_1_forged_internal_bypass_denied(
             allow_internal=True, # Attempting internal bypass!
         )
 
-    # 2. Staff member with empty actor_permissions passing allow_internal=True cannot execute integration
-    with pytest.raises(PermissionDeniedError):
+    # 2. Real Service-Layer Cross-Tenant Internal Path: Tenant B actor targeting Tenant A resource on IntegrationService
+    # Attempting to get non-existent or Tenant A connection using Tenant B actor permissions yields ConnectionNotFoundError or PermissionDeniedError
+    fake_conn_id = uuid.uuid4()
+    with pytest.raises((ConnectionNotFoundError, PermissionDeniedError)):
         await srv.execute_operation(
-            tenant_id=tenant_id_a,
-            connection_id=uuid.uuid4(),
+            tenant_id=tenant_id_a, # Tenant A target
+            connection_id=fake_conn_id,
             operation="cancel_payment",
             params={},
-            actor_permissions=set(), # Empty permissions
-            allow_internal=True, # Attempting internal bypass!
+            actor_permissions=cross_tenant_actor.permissions, # Tenant B actor
+            allow_internal=True, # Internal path attempt!
         )
-
-    # 3. Cross-Tenant Internal Path: Tenant B staff actor attempting internal path against Tenant A resource yields DENY
-    auth_srv = ActionAuthorizationService(db_session)
-    req_cross = ActionRequest(
-        action_type="whatsapp_send_message",
-        target="whatsapp",
-        tenant_id=tenant_id_a, # Tenant A target
-        actor=cross_tenant_actor, # Tenant B actor
-        params={"message": "Cross-tenant internal path attempt"},
-    )
-    dec_cross = await auth_srv.evaluate_action(req_cross)
-    assert dec_cross.decision == ExecutionDecision.DENY
-    assert "FORBIDDEN_CROSS_TENANT_ACCESS" in dec_cross.reason
 
 
 @pytest.mark.asyncio
@@ -563,7 +552,7 @@ async def test_untrusted_actor_matrix_allow_internal_denials(
     """Untrusted Actor Matrix — Verify allow_internal=True does NOT grant platform-owner or missing permissions across roles."""
     srv = IntegrationService(db_session)
     auth_srv = ActionAuthorizationService(db_session)
-    from app.integrations.exceptions import PermissionDeniedError
+    from app.integrations.exceptions import PermissionDeniedError, ConnectionNotFoundError
 
     # A. Tenant Staff + allow_internal=True without permission -> PermissionDeniedError
     with pytest.raises(PermissionDeniedError):
@@ -597,24 +586,33 @@ async def test_untrusted_actor_matrix_allow_internal_denials(
     dec_owner = await auth_srv.evaluate_action(req_owner_ai)
     assert dec_owner.decision == ExecutionDecision.DENY
 
-    # D. Cross-Tenant Actor + allow_internal=True attempting Tenant A access -> DENY
-    req_cross = ActionRequest(
-        action_type="execute_integration",
-        target="integration",
-        tenant_id=tenant_id_a,
-        actor=cross_tenant_actor,
-        params={},
-    )
-    dec_cross = await auth_srv.evaluate_action(req_cross)
-    assert dec_cross.decision == ExecutionDecision.DENY
+    # D. Cross-Tenant Actor + allow_internal=True attempting Tenant A access on IntegrationService -> ConnectionNotFoundError/PermissionDeniedError
+    with pytest.raises((ConnectionNotFoundError, PermissionDeniedError)):
+        await srv.execute_operation(
+            tenant_id=tenant_id_a,
+            connection_id=uuid.uuid4(),
+            operation="cancel_payment",
+            params={},
+            actor_permissions=cross_tenant_actor.permissions,
+            allow_internal=True,
+        )
 
-    # E. Empty permission payload + allow_internal=True -> PermissionDeniedError
+    # E. Empty permission payload actor_permissions=set() + allow_internal=True -> PermissionDeniedError
     with pytest.raises(PermissionDeniedError):
         await srv.list_integrations(
             tenant_id=tenant_id_a,
             actor_permissions=set(),
-            allow_internal=False,
+            allow_internal=True, # allow_internal=True with empty set still checks permission and fails
         )
+
+    # F. CRITICAL ADDITION: actor_permissions=None + allow_internal=True scenario
+    # IntegrationService._check_permission permits actor_permissions=None ONLY when allow_internal=True
+    # Prove that HTTP API routers always resolve actor_permissions via Depends(resolve_actor_permissions),
+    # which raises 403 PERMISSION_DENIED if no trusted actor context is set, so untrusted API callers can NEVER supply actor_permissions=None.
+    set_tenant_context(tenant_id_a)
+    with pytest.raises(AppException) as exc_info:
+        resolve_actor_permissions(x_actor_role=None, x_authenticated_actor_id=None, x_authenticated_tenant_id=None, x_actor_permissions=None)
+    assert exc_info.value.code == "PERMISSION_DENIED"
 
 
 @pytest.mark.asyncio

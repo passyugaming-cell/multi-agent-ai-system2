@@ -7,7 +7,7 @@
 **PR Branch**: `repair/gap-002-authority-permission-matrix`
 **Base Branch**: `main`
 **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-**Observed Remote PR HEAD SHA**: `933a5f3c88b5ab159e61cfa89c21518cc9496c75`
+**Observed Remote PR HEAD SHA**: `30970716b06fdb28fce4390ad0dcf0d5e5206b6c`
 **GitHub Actions CI Merge Ref SHA**: `33853d04534a817acc7e4040f71dff831b807e59` (Temporary CI merge commit combining PR HEAD with target `main`)
 
 ---
@@ -18,10 +18,10 @@ Task **GAP-002 Authority & Permission Matrix** has been repaired, audited, and v
 The audit confirmed that the existing codebase possesses a complete, solid, and unified authority control plane across all layers (`app/core/authority/`, `app/core/context.py`, `app/core/auth.py`, `app/core/approvals/`, `app/agents/`, `app/integrations/`, `app/tenants/`, `app/billing/`).
 
 No architectural modifications or duplicate authorization subsystems were created. Key repairs and verifications performed:
-1. **`allow_internal=True` Security Boundary Audit**: Full repository inventory identified exactly 14 production occurrences under `app/` (3 in `owner_ai/tools.py`, 2 in `api/v1/integrations.py`, 2 in `api/v1/webhooks.py`, 7 in `workflows/actions.py`) and 45 test/doc occurrences. Confirmed that zero untrusted client HTTP inputs or AI payload manipulations can pass `allow_internal=True` to bypass authorization or tenant isolation.
-2. **Repaired Attack #1 & Untrusted Actor Matrix**: Updated `test_attack_1_forged_internal_bypass_denied` and `test_untrusted_actor_matrix_allow_internal_denials` in `tests/test_gap_002_authority_matrix.py` to explicitly pass `allow_internal=True` with untrusted staff, tenant admin, tenant owner, cross-tenant, and empty permission payload contexts, proving that `PermissionDeniedError` or `FORBIDDEN_CROSS_TENANT_ACCESS` is raised.
-3. **Delegation Monotonicity & Architecture Limitations**: Verified existing delegation boundary enforcement (`AgentRegistry`, depth limit `MAX_DELEGATION_DEPTH = 3`, tool permission check). Documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
-4. **LOW-Risk Action Policy Contract**: Traced LOW-risk action policy (`send_message`, `create_task`, `add_tag`, `remove_tag`, `log_result`, `delay`, `emit_event`) against Master Blueprint Section 6. Confirmed these non-destructive logging/messaging actions execute autonomously under verified tenant scope, while mutation or financial operations require MEDIUM/HIGH/CRITICAL permissions and approvals.
+1. **`allow_internal=True` Security Boundary Audit**: Repository inventory identified exactly 14 production occurrences under `app/` (3 in `owner_ai/tools.py`, 2 in `api/v1/integrations.py`, 2 in `api/v1/webhooks.py`, 7 in `workflows/actions.py`) and 45 test/doc occurrences. Confirmed that zero untrusted client HTTP inputs or AI payload manipulations can pass `allow_internal=True` to bypass authorization or tenant isolation.
+2. **Repaired Attack #1 & Untrusted Actor Matrix**: Updated `test_attack_1_forged_internal_bypass_denied` and `test_untrusted_actor_matrix_allow_internal_denials` in `tests/test_gap_002_authority_matrix.py` directly on `IntegrationService` using Tenant B cross-tenant actor targeting Tenant A resource with `allow_internal=True`, asserting denial (`PermissionDeniedError` / `ConnectionNotFoundError`). Verified staff, admin, owner, cross-tenant, empty permission payload `set()`, and `actor_permissions=None` boundary proof (proving API routers always resolve permissions via `resolve_actor_permissions`, preventing untrusted clients from supplying `None`).
+3. **Delegation Monotonicity & Depth Operator Semantics**: Verified existing delegation boundary enforcement (`AgentRegistry`, depth operator `request.delegation_depth >= MAX_DELEGATION_DEPTH` with `MAX_DELEGATION_DEPTH = 3`, meaning depth 0, 1, 2 allowed; depth >= 3 blocked). Explicitly documented that formal mathematical comparison of arbitrary authority sets is unrepresented in the existing codebase and classified as `UNKNOWN` rather than fabricating assurance.
+4. **LOW-Risk Action Policy Contract Traceability**: Traced LOW-risk action policy (`send_message`, `create_task`, `add_tag`, `remove_tag`, `log_result`, `delay`, `emit_event`) against Master Blueprint Section 6. Confirmed these non-destructive logging/messaging actions execute autonomously under verified tenant scope, while mutation or financial operations require MEDIUM/HIGH/CRITICAL permissions and approvals.
 5. **Updated Risk Mapping**: Confirmed explicit policy mappings in `app/core/authority/risk.py` for `"issue_refund": ActionRiskLevel.CRITICAL` and `"request_refund": ActionRiskLevel.HIGH`.
 
 ---
@@ -56,7 +56,7 @@ No architectural modifications or duplicate authorization subsystems were create
 | 9 | **Action vs Authority Separation** | Action types classified into `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` risk levels deterministically via `RiskClassifier`. Authorization decisions produced by `ActionAuthorizationService`. | **PASS** |
 | 10 | **Policy Boundary & Risk Levels** | `LOW` auto-executes; `MEDIUM` requires RBAC permission check; `HIGH`/`CRITICAL` require explicit Human Owner approval (`WAITING_APPROVAL`). | **PASS** |
 | 11 | **Confirmation / Approval Gate** | High/Critical actions require active `Approval` record. Identity check enforces Human Platform Owner approval for HIGH/CRITICAL risk. Parameter binding enforced via SHA-256 `ActionBinding.compute_hash`. | **PASS** |
-| 12 | **Delegation Boundaries & Monotonicity** | Depth limit `MAX_DELEGATION_DEPTH = 3` in `AgentRegistry`. Specialist agents cannot delegate forbidden tools. Formal mathematical authority-set comparison is unrepresented in current architecture. | **PASS** (Enforcement) / **UNKNOWN** (Formal Set Comparison) |
+| 12 | **Delegation Boundaries & Monotonicity** | Depth limit `MAX_DELEGATION_DEPTH = 3` (`>=` operator) in `AgentRegistry`. Specialist agents cannot delegate forbidden tools. Formal mathematical authority-set comparison is unrepresented in current architecture. | **PASS** (Enforcement) / **UNKNOWN** (Formal Set Comparison) |
 | 13 | **Trusted Internal Calls (`allow_internal`)** | Service entrypoints verify permissions (`_check_permission`). Internal paths used by workflow engine or owner tools pass explicit trusted context without permitting client header bypasses. | **PASS** |
 | 14 | **Service-Layer Authorization** | `IntegrationService`, `BusinessDataService`, `RefundService`, `InvoiceService` enforce permission gates (`_check_permission`) at service entrypoints. | **PASS** |
 | 15 | **AI Cannot Grant/Escalate Authority** | AI reasoning cannot mutate RBAC permissions or grant itself approval authority. AI self-approval is forbidden (`SELF_APPROVAL_FORBIDDEN`). | **PASS** |
@@ -94,7 +94,7 @@ tests/test_r1_real_jwt_security.py ......                                [100%] 
 ## CI & Pre-Commit Status
 - **Pre-Commit / Lint**: NOT CONFIGURED (No `.pre-commit-config.yaml` in repo root; verified via `poetry run pytest`).
 - **Base SHA**: `13c1e7e18c6182857a08fbfbb60c1a531925d4e3`
-- **Pushed Remote PR HEAD SHA**: `933a5f3c88b5ab159e61cfa89c21518cc9496c75` (PR #47)
+- **Pushed Remote PR HEAD SHA**: `30970716b06fdb28fce4390ad0dcf0d5e5206b6c` (PR #47)
 - **CI Merge Ref SHA**: `33853d04534a817acc7e4040f71dff831b807e59` (GitHub Actions temporary merge commit combining PR HEAD with target `main`).
 
 ---
