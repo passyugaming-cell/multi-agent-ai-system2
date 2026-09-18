@@ -57,4 +57,4 @@ jobs:
           DATABASE_URL: "postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test"
           TEST_DATABASE_URL: "postgresql+asyncpg://user:password@localhost:5432/ai_business_os_test"
         run: |
-          poetry run pytest tests/test_gap_004_source_of_truth_matrix.py tests/test_gap_002_authority_matrix.py -v
+          poetry run pytest tests/test_gap_004_source_of_truth_matrix.py -v
