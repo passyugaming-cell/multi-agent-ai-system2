@@ -246,3 +246,140 @@ async def test_05_approved_issue_refund_executes_real_refund(db_session: AsyncSe
     await db_session.refresh(payment)
     assert payment.status == "REFUNDED"
     assert payment.refunded_amount == Decimal("100000.00")
+
+
+@pytest.mark.asyncio
+async def test_06_non_uuid_target_lookups_and_isolation(db_session: AsyncSession, tenant_a, tenant_b):
+    """Verifies ActionExecutor safely resolves non-UUID targets (SKU/external ID/phone) and enforces tenant isolation."""
+    # 1. Product with SKU target
+    prod_a = Product(tenant_id=tenant_a.id, name="Tenant A SKU Item", sku="SKU_TENANT_A", price=100.00, stock=5, is_active=True)
+    prod_b = Product(tenant_id=tenant_b.id, name="Tenant B SKU Item", sku="SKU_TENANT_B", price=200.00, stock=5, is_active=True)
+    db_session.add_all([prod_a, prod_b])
+
+    # 2. Customer with external_id target
+    cust_repo = CustomerRepository(db_session)
+    cust_a, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_a.id,
+        phone="+628777666555",
+        name="Ext Cust A",
+        external_id="EXT_CUST_A_123",
+    )
+    await db_session.commit()
+
+    actor_a = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"product.write", "business.write", "product.read"},
+        is_platform_owner=True,
+    )
+    token = set_actor_context(actor_a)
+    try:
+        # A. Valid SKU resolution for Tenant A (with valid approval for HIGH risk action)
+        params_a = {"target": "SKU_TENANT_A", "price": "150.00"}
+        hash_a = ActionBinding.compute_hash("change_product_price", "SKU_TENANT_A", tenant_a.id, params_a)
+        appr_a = Approval(
+            tenant_id=tenant_a.id,
+            action_type="change_product_price",
+            target="SKU_TENANT_A",
+            risk_level="HIGH",
+            requested_by="owner",
+            reason="Price change",
+            status="APPROVED",
+            decided_by="platform_owner",
+            meta_data={"params": params_a, "action_hash": hash_a, "decided_by_is_platform_owner": True},
+        )
+        db_session.add(appr_a)
+        await db_session.commit()
+
+        exec_params_a = dict(params_a)
+        exec_params_a["_approval_id"] = str(appr_a.id)
+
+        res1 = await ActionExecutor.execute(
+            action_type="change_product_price",
+            params=exec_params_a,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res1.success is True
+        assert res1.requires_approval is False
+        await db_session.refresh(prod_a)
+        assert prod_a.price == Decimal("150.00")
+
+        # B. Non-existent SKU with approval -> FAIL (success=False)
+        params_b = {"target": "SKU_NON_EXISTENT", "price": "150.00"}
+        hash_b = ActionBinding.compute_hash("change_product_price", "SKU_NON_EXISTENT", tenant_a.id, params_b)
+        appr_b = Approval(
+            tenant_id=tenant_a.id,
+            action_type="change_product_price",
+            target="SKU_NON_EXISTENT",
+            risk_level="HIGH",
+            requested_by="owner",
+            reason="Price change non existent",
+            status="APPROVED",
+            decided_by="platform_owner",
+            meta_data={"params": params_b, "action_hash": hash_b, "decided_by_is_platform_owner": True},
+        )
+        db_session.add(appr_b)
+        await db_session.commit()
+
+        exec_params_b = dict(params_b)
+        exec_params_b["_approval_id"] = str(appr_b.id)
+
+        res2 = await ActionExecutor.execute(
+            action_type="change_product_price",
+            params=exec_params_b,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res2.success is False
+        assert "not found" in res2.error.lower()
+
+        # C. Cross-tenant SKU lookup -> Tenant A requesting Tenant B's SKU must fail
+        params_c = {"target": "SKU_TENANT_B", "price": "300.00"}
+        hash_c = ActionBinding.compute_hash("change_product_price", "SKU_TENANT_B", tenant_a.id, params_c)
+        appr_c = Approval(
+            tenant_id=tenant_a.id,
+            action_type="change_product_price",
+            target="SKU_TENANT_B",
+            risk_level="HIGH",
+            requested_by="owner",
+            reason="Cross tenant price change attempt",
+            status="APPROVED",
+            decided_by="platform_owner",
+            meta_data={"params": params_c, "action_hash": hash_c, "decided_by_is_platform_owner": True},
+        )
+        db_session.add(appr_c)
+        await db_session.commit()
+
+        exec_params_c = dict(params_c)
+        exec_params_c["_approval_id"] = str(appr_c.id)
+
+        res3 = await ActionExecutor.execute(
+            action_type="change_product_price",
+            params=exec_params_c,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res3.success is False
+        assert "not found" in res3.error.lower()
+        await db_session.refresh(prod_b)
+        assert prod_b.price == Decimal("200.00")  # Tenant B price unchanged
+
+        # D. Non-UUID External ID Customer resolution
+        res4 = await ActionExecutor.execute(
+            action_type="update_customer",
+            params={"target": "EXT_CUST_A_123", "name": "Ext Cust A Updated"},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res4.success is True
+        await db_session.refresh(cust_a)
+        assert cust_a.name == "Ext Cust A Updated"
+
+    finally:
+        reset_actor_context(token)
