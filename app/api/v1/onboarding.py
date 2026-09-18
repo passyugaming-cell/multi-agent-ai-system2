@@ -43,9 +43,12 @@ def verify_tenant_authorization(tenant_id: uuid.UUID) -> None:
 
 @router.post("/tenants/provision", response_model=ProvisioningResponse)
 async def provision_current_tenant(
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> ProvisioningResponse:
     """Provision configuration for the current active tenant (from X-Tenant-ID context)."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     context_id = get_tenant_context()
     if not context_id:
         raise AppException(code="MISSING_TENANT_HEADER", message="Tenant context not found", status_code=400)
@@ -57,9 +60,12 @@ async def provision_current_tenant(
 @router.post("/tenants/{tenant_id}/provision", response_model=ProvisioningResponse)
 async def provision_tenant_by_id(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> ProvisioningResponse:
     """Provision configuration for a specific tenant_id, enforcing tenant isolation."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     provisioner = TenantProvisioner(db)
     return await provisioner.provision_tenant(tenant_id)
@@ -70,9 +76,12 @@ async def provision_tenant_by_id(
 @router.post("/tenants/{tenant_id}/onboarding/start", response_model=OnboardingSummaryResponse)
 async def start_onboarding(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> OnboardingSummaryResponse:
     """Start onboarding flow for a tenant."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.start_onboarding(tenant_id)
@@ -81,9 +90,12 @@ async def start_onboarding(
 @router.get("/tenants/{tenant_id}/onboarding", response_model=OnboardingSummaryResponse)
 async def get_onboarding_summary(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> OnboardingSummaryResponse:
     """Retrieve onboarding summary and readiness status for a tenant."""
+    if "business.read" not in actor_perms and "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.read permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.get_onboarding_summary(tenant_id)
@@ -92,9 +104,12 @@ async def get_onboarding_summary(
 @router.get("/tenants/{tenant_id}/onboarding/checklist", response_model=list[ChecklistItemResponse])
 async def get_onboarding_checklist(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChecklistItemResponse]:
     """Retrieve all checklist items for a tenant."""
+    if "business.read" not in actor_perms and "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.read permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.get_checklist(tenant_id)
@@ -105,9 +120,12 @@ async def update_checklist_item(
     tenant_id: uuid.UUID,
     item_id: uuid.UUID,
     payload: ChecklistItemUpdate,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> ChecklistItemResponse:
     """Update status or completion percentage of a checklist item."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.update_checklist_item(tenant_id, item_id, payload)
@@ -116,9 +134,12 @@ async def update_checklist_item(
 @router.post("/tenants/{tenant_id}/onboarding/validate", response_model=OnboardingSummaryResponse)
 async def validate_onboarding(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> OnboardingSummaryResponse:
     """Trigger deterministic validation checks on tenant database configuration."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.validate_onboarding(tenant_id)
@@ -127,9 +148,12 @@ async def validate_onboarding(
 @router.post("/tenants/{tenant_id}/onboarding/complete", response_model=OnboardingSummaryResponse)
 async def complete_onboarding(
     tenant_id: uuid.UUID,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> OnboardingSummaryResponse:
     """Complete onboarding and mark tenant as READY if score >= 90% and no blocking items."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.complete_onboarding(tenant_id)
@@ -141,9 +165,12 @@ async def complete_onboarding(
 async def transition_lifecycle_state(
     tenant_id: uuid.UUID,
     payload: LifecycleTransitionRequest,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> LifecycleTransitionResponse:
     """Transition tenant lifecycle state explicitly with rule validation."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     mgr = ClientLifecycleManager(db)
     tenant = await mgr.transition_state(
@@ -220,9 +247,12 @@ async def disconnect_whatsapp_onboarding(
 async def run_ai_test_gate(
     tenant_id: uuid.UUID,
     payload: AITestRequest | None = None,
+    actor_perms: set[str] = Depends(resolve_actor_permissions),
     db: AsyncSession = Depends(get_db),
 ) -> AITestResponse:
     """Run deterministic AI readiness test gate using AIGateway."""
+    if "business.write" not in actor_perms:
+        raise AppException(code="PERMISSION_DENIED", message="business.write permission required", status_code=403)
     verify_tenant_authorization(tenant_id)
     service = OnboardingService(db)
     return await service.run_ai_test(tenant_id, payload)

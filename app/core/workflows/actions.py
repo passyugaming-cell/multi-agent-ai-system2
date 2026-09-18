@@ -345,8 +345,99 @@ class ActionExecutor:
             except Exception as e:
                 return ActionResult(success=False, error=str(e))
 
-        elif action_type in ("update_customer", "update_order", "change_product_price", "issue_refund"):
-            return ActionResult(success=True, output={"status": "updated", "action": action_type, "params": params})
+        elif action_type == "update_customer":
+            from app.repositories.domain import CustomerRepository
+            cust_repo = CustomerRepository(session)
+            payload = params if "customer_id" in params or "phone" in params or "name" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
+            cust_id_val = payload.get("customer_id") or params.get("customer_id")
+            if not cust_id_val:
+                return ActionResult(success=False, error="customer_id parameter required for update_customer")
+            cust_id = cust_id_val if isinstance(cust_id_val, uuid.UUID) else uuid.UUID(str(cust_id_val))
+            customer = await cust_repo.get_by_id(tenant_uuid, cust_id)
+            if not customer:
+                return ActionResult(success=False, error=f"Customer {cust_id} not found")
+
+            if "name" in payload and payload["name"]:
+                customer.name = payload["name"]
+            if "phone" in payload and payload["phone"]:
+                customer.phone = payload["phone"]
+            if "email" in payload and payload["email"]:
+                customer.email = payload["email"]
+            await session.flush()
+            return ActionResult(success=True, output={"customer_id": str(customer.id), "name": customer.name, "status": "updated"})
+
+        elif action_type == "update_order":
+            from app.repositories.domain import OrderRepository
+            order_repo = OrderRepository(session)
+            payload = params if "order_id" in params or "status" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
+            order_id_val = payload.get("order_id") or params.get("order_id")
+            if not order_id_val:
+                return ActionResult(success=False, error="order_id parameter required for update_order")
+            order_id = order_id_val if isinstance(order_id_val, uuid.UUID) else uuid.UUID(str(order_id_val))
+            order = await order_repo.get_by_id(tenant_uuid, order_id)
+            if not order:
+                return ActionResult(success=False, error=f"Order {order_id} not found")
+
+            new_status = payload.get("status") or params.get("status")
+            if new_status:
+                try:
+                    await order_repo.transition_status(tenant_uuid, order_id, new_status)
+                except Exception as transition_err:
+                    return ActionResult(success=False, error=f"Order state transition rejected: {transition_err}")
+
+            return ActionResult(success=True, output={"order_id": str(order.id), "status": order.status})
+
+        elif action_type == "change_product_price":
+            from app.repositories.domain import ProductRepository
+            prod_repo = ProductRepository(session)
+            payload = params if "product_id" in params or "price" in params or "new_price" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
+            prod_id_val = payload.get("product_id") or params.get("product_id")
+            if not prod_id_val:
+                return ActionResult(success=False, error="product_id parameter required for change_product_price")
+            prod_id = prod_id_val if isinstance(prod_id_val, uuid.UUID) else uuid.UUID(str(prod_id_val))
+            product = await prod_repo.get_by_id(tenant_uuid, prod_id)
+            if not product:
+                return ActionResult(success=False, error=f"Product {prod_id} not found")
+
+            new_price_val = payload.get("price") or payload.get("new_price") or params.get("price") or params.get("new_price")
+            if new_price_val is None:
+                return ActionResult(success=False, error="price parameter required for change_product_price")
+
+            from decimal import Decimal
+            new_price = Decimal(str(new_price_val))
+            if new_price <= Decimal("0"):
+                return ActionResult(success=False, error="Product price must be greater than zero")
+
+            product.price = new_price
+            await session.flush()
+            return ActionResult(success=True, output={"product_id": str(product.id), "price": str(product.price), "new_price": str(product.price), "status": "price_updated"})
+
+        elif action_type == "issue_refund":
+            target_approval_id = approval_uuid or params.get("approval_id") or params.get("_approval_id")
+            if not target_approval_id:
+                return ActionResult(
+                    success=False,
+                    error="CRITICAL action issue_refund requires prior database-backed approval ID",
+                )
+
+            from app.billing.refunds import RefundService
+            refund_svc = RefundService(session)
+            try:
+                exec_appr_id = target_approval_id if isinstance(target_approval_id, uuid.UUID) else uuid.UUID(str(target_approval_id))
+                payment = await refund_svc.execute_approved_refund(
+                    tenant_id=tenant_uuid,
+                    approval_id=exec_appr_id,
+                )
+                return ActionResult(
+                    success=True,
+                    output={
+                        "payment_id": str(payment.id),
+                        "refunded_amount": str(payment.refunded_amount),
+                        "status": payment.status,
+                    },
+                )
+            except Exception as refund_err:
+                return ActionResult(success=False, error=f"Refund execution failed: {refund_err}")
 
         else:
             return ActionResult(success=False, error=f"Unknown or unsupported action type: {action_type}")
