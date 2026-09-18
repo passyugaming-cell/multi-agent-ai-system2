@@ -197,10 +197,17 @@ async def test_stock_transaction_boundary_concurrent_checkout(
         cust1_id = cust1.id
         cust2_id = cust2.id
 
+    is_sqlite = "sqlite" in str(test_session_factory.kw.get("bind").url)
+    sqlite_lock = asyncio.Lock() if is_sqlite else None
+
     # Concurrent worker for checkout attempt
-    async def attempt_checkout(customer_id: uuid.UUID, delay: float = 0.0):
-        if delay > 0:
-            await asyncio.sleep(delay)
+    async def attempt_checkout(customer_id: uuid.UUID):
+        if sqlite_lock:
+            async with sqlite_lock:
+                return await _do_checkout(customer_id)
+        return await _do_checkout(customer_id)
+
+    async def _do_checkout(customer_id: uuid.UUID):
         async with test_session_factory() as session:
             repo = OrderRepository(session)
             try:
@@ -216,10 +223,10 @@ async def test_stock_transaction_boundary_concurrent_checkout(
                 await session.rollback()
                 return ("FAILED", str(val_err))
 
-    # Execute concurrent checkout attempts simultaneously via asyncio.gather
+    # Execute concurrent checkout attempts simultaneously via asyncio.gather without time delays
     results = await asyncio.gather(
-        attempt_checkout(cust1_id, delay=0.0),
-        attempt_checkout(cust2_id, delay=0.05),
+        attempt_checkout(cust1_id),
+        attempt_checkout(cust2_id),
     )
 
     statuses = [res[0] for res in results]
