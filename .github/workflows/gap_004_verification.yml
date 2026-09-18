@@ -1,6 +1,8 @@
 name: GAP-004 Source of Truth Verification
 
 on:
+  push:
+    branches: [ repair/gap-004-source-of-truth-matrix-v2, main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -19,13 +21,14 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd="pg_isready -U user -d ai_business_os_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -33,13 +36,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install Poetry
-        run: |
-          python -m pip install --upgrade pip
-          pip install poetry
+        run: pip install poetry
 
       - name: Install Dependencies
+        run: poetry install --no-root
+
+      - name: Install Extra Test Packages
         run: |
-          poetry install --no-root
+          poetry run pip install pytest pytest-asyncio httpx "pydantic[email]" google-genai redis PyJWT cryptography aiosqlite email-validator
 
       - name: Run Alembic Migrations on PostgreSQL
         env:
