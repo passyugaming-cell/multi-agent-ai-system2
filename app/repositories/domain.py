@@ -242,18 +242,20 @@ class ConversationRepository(BaseRepository[Conversation]):
         return result.scalar_one_or_none()
 
     async def get_active_by_customer(
-        self, tenant_id: uuid.UUID, customer_id: uuid.UUID
+        self,
+        tenant_id: uuid.UUID,
+        customer_id: uuid.UUID,
+        channel: str | None = None,
     ) -> Conversation | None:
-        stmt = (
-            select(Conversation)
-            .where(
-                Conversation.tenant_id == tenant_id,
-                Conversation.customer_id == customer_id,
-                Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
-            )
-            .order_by(Conversation.created_at.desc())
-            .execution_options(populate_existing=True)
+        stmt = select(Conversation).where(
+            Conversation.tenant_id == tenant_id,
+            Conversation.customer_id == customer_id,
+            Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
         )
+        if channel is not None:
+            stmt = stmt.where(Conversation.channel == channel)
+
+        stmt = stmt.order_by(Conversation.created_at.desc()).execution_options(populate_existing=True)
         result = await self.session.execute(stmt)
         return result.scalars().first()
 
@@ -263,7 +265,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         customer_id: uuid.UUID,
         channel: str = "whatsapp",
     ) -> tuple[Conversation, bool]:
-        existing = await self.get_active_by_customer(tenant_id, customer_id)
+        existing = await self.get_active_by_customer(tenant_id, customer_id, channel=channel)
         if existing:
             return existing, False
 
@@ -281,7 +283,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         except IntegrityError:
             if 'conversation' in locals() and conversation in self.session:
                 self.session.expunge(conversation)
-            existing = await self.get_active_by_customer(tenant_id, customer_id)
+            existing = await self.get_active_by_customer(tenant_id, customer_id, channel=channel)
             if existing:
                 return existing, False
             raise
@@ -371,22 +373,48 @@ class OrderRepository(BaseRepository[Order]):
         currency: str,
         items_data: list[dict],
         metadata: dict | None = None,
+        deduct_stock: bool = True,
     ) -> Order:
+        """Creates order with line items, enforcing ACT-104 atomic row-level stock revalidation and deduction inside transaction boundary."""
         subtotal = Decimal("0.00")
         order_items = []
 
         for item in items_data:
-            product: Product = item["product"]
+            prod_id = item["product_id"] if "product_id" in item else item["product"].id
             qty: int = item["quantity"]
-            unit_price = product.price
+
+            if qty <= 0:
+                raise ValueError(f"INVALID_QUANTITY: Requested quantity must be greater than zero, got {qty}")
+
+            # ACT-104: Row-level lock on Product for atomic stock revalidation and deduction
+            stmt = select(Product).where(
+                Product.tenant_id == tenant_id,
+                Product.id == prod_id,
+            ).with_for_update()
+            res = await self.session.execute(stmt)
+            db_product = res.scalar_one_or_none()
+
+            if not db_product:
+                raise ValueError(f"PRODUCT_NOT_FOUND: Product {prod_id} not found for tenant {tenant_id}")
+
+            if deduct_stock:
+                if db_product.stock < qty:
+                    raise ValueError(
+                        f"INSUFFICIENT_STOCK: Product '{db_product.name}' has available stock {db_product.stock}, but {qty} was requested"
+                    )
+                db_product.stock -= qty
+                if db_product.stock == 0:
+                    db_product.stock_status = "OUT_OF_STOCK"
+
+            unit_price = db_product.price
             item_subtotal = unit_price * qty
             subtotal += item_subtotal
 
             order_items.append(
                 OrderItem(
                     tenant_id=tenant_id,
-                    product_id=product.id,
-                    product_name_snapshot=product.name,
+                    product_id=db_product.id,
+                    product_name_snapshot=db_product.name,
                     unit_price=unit_price,
                     quantity=qty,
                     subtotal=item_subtotal,

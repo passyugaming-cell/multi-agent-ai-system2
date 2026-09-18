@@ -26,6 +26,7 @@ from app.repositories.domain import (
     CustomerRepository,
     KnowledgeItemRepository,
     ConversationRepository,
+    OrderRepository,
 )
 
 
@@ -87,6 +88,86 @@ async def test_order_price_snapshot_at_checkout(
     await db_session.refresh(order_item)
     assert order_item.unit_price == Decimal("250000.00")
     assert product.price == Decimal("300000.00")
+
+
+@pytest.mark.asyncio
+async def test_stock_transaction_boundary_sufficient_stock(
+    db_session: AsyncSession, tenant_a
+):
+    """ACT-104 Case A: Sufficient stock revalidates and deducts stock atomically at order creation."""
+    cust_repo = CustomerRepository(db_session)
+    order_repo = OrderRepository(db_session)
+
+    customer, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_a.id,
+        phone="+62811223344",
+        name="Stock Buyer A",
+    )
+
+    product = Product(
+        tenant_id=tenant_a.id,
+        name="Stock Item A",
+        sku="STOCK-A-01",
+        price=Decimal("150000.00"),
+        stock=5,
+        is_active=True,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    # Request quantity = 2 from stock = 5
+    order = await order_repo.create_order_with_items(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        currency="IDR",
+        items_data=[{"product": product, "quantity": 2}],
+    )
+    await db_session.commit()
+
+    await db_session.refresh(product)
+    assert product.stock == 3
+    assert product.stock_status == "IN_STOCK"
+    assert order.total == Decimal("300000.00")
+
+
+@pytest.mark.asyncio
+async def test_stock_transaction_boundary_insufficient_stock(
+    db_session: AsyncSession, tenant_a
+):
+    """ACT-104 Case B: Insufficient stock fails deterministically without creating false successes or mutating stock."""
+    cust_repo = CustomerRepository(db_session)
+    order_repo = OrderRepository(db_session)
+
+    customer, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_a.id,
+        phone="+62811223355",
+        name="Stock Buyer B",
+    )
+
+    product = Product(
+        tenant_id=tenant_a.id,
+        name="Stock Item B",
+        sku="STOCK-B-01",
+        price=Decimal("200000.00"),
+        stock=1,
+        is_active=True,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    # Request quantity = 2 from stock = 1 (Insufficient Stock)
+    with pytest.raises(ValueError, match="INSUFFICIENT_STOCK"):
+        await order_repo.create_order_with_items(
+            tenant_id=tenant_a.id,
+            customer_id=customer.id,
+            currency="IDR",
+            items_data=[{"product": product, "quantity": 2}],
+        )
+    await db_session.rollback()
+
+    # Verify stock remains unchanged at 1
+    await db_session.refresh(product)
+    assert product.stock == 1
 
 
 @pytest.mark.asyncio
@@ -266,10 +347,10 @@ async def test_message_status_state_machine_transitions():
 
 
 @pytest.mark.asyncio
-async def test_conversation_active_lookup_channel_behavior(
+async def test_conversation_active_lookup_channel_isolation(
     db_session: AsyncSession, tenant_a
 ):
-    """ACT-045 / Audit Finding P1-01: Verify active conversation retrieval behavior across channels for same customer."""
+    """ACT-045 / P1-01 Repair: Prove same customer on WhatsApp channel and Web channel resolve distinct active conversations."""
     cust_repo = CustomerRepository(db_session)
     conv_repo = ConversationRepository(db_session)
 
@@ -279,17 +360,34 @@ async def test_conversation_active_lookup_channel_behavior(
         name="Multi Channel Customer",
     )
 
-    # Create active conversation on whatsapp channel
-    conv_wa = Conversation(
+    # 1. Create active conversation on "whatsapp" channel
+    conv_wa, created_wa = await conv_repo.get_or_create_active(
         tenant_id=tenant_a.id,
         customer_id=customer.id,
         channel="whatsapp",
-        status="OPEN",
     )
-    db_session.add(conv_wa)
     await db_session.commit()
 
-    # Active conversation lookup finds active conversation
-    active_conv = await conv_repo.get_active_by_customer(tenant_a.id, customer.id)
-    assert active_conv is not None
-    assert active_conv.id == conv_wa.id
+    # 2. Create active conversation on "web" channel for same customer
+    conv_web, created_web = await conv_repo.get_or_create_active(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        channel="web",
+    )
+    await db_session.commit()
+
+    assert created_wa is True
+    assert created_web is True
+    assert conv_wa.id != conv_web.id
+    assert conv_wa.channel == "whatsapp"
+    assert conv_web.channel == "web"
+
+    # 3. Verify channel-isolated retrieval
+    active_wa = await conv_repo.get_active_by_customer(tenant_a.id, customer.id, channel="whatsapp")
+    active_web = await conv_repo.get_active_by_customer(tenant_a.id, customer.id, channel="web")
+
+    assert active_wa is not None
+    assert active_wa.id == conv_wa.id
+
+    assert active_web is not None
+    assert active_web.id == conv_web.id

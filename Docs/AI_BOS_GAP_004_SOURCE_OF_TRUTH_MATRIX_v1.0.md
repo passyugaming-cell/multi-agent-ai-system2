@@ -173,7 +173,7 @@ This comprehensive matrix evaluates the 14 mandatory conflict scenarios. Each en
 - **20. Authority:** Deterministic Checkout Engine.
 - **21. Risk:** HIGH.
 - **22. Existing Implementation:** Implemented in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`).
-- **23. Evidence:** `OrderRepository` pulls `unit_price = product.price` directly from DB product entity.
+- **23. Evidence:** `OrderRepository` pulls `unit_price = db_product.price` directly from DB product entity.
 - **24. Status:** `PASS`.
 - **25. Open Question:** None.
 - **26. Verification Evidence:** Tested via `tests/test_gap_004_source_of_truth_matrix.py::test_order_price_snapshot_at_checkout`.
@@ -193,20 +193,20 @@ This comprehensive matrix evaluates the 14 mandatory conflict scenarios. Each en
 - **10. Conflict Source A:** Official DB `products.stock`.
 - **11. Conflict Source B:** Stale cached stock or AI agent assuming item is in stock.
 - **12. Conflict Type:** Inventory Race Condition / Overselling.
-- **13. Resolution Rule:** **DB Transactional Stock Wins.** Mandatory final deterministic revalidation at checkout commit (ACT-054, ACT-104). Stale cache or AI assumptions are ignored.
-- **14. Escalation Rule:** Out-of-stock during checkout triggers exception handling (ACT-119).
-- **15. Failure Behavior:** Order creation fails with `INSUFFICIENT_STOCK`.
+- **13. Resolution Rule:** **DB Transactional Stock Wins.** Mandatory final deterministic revalidation and deduction at checkout commit with row locking (`select(...).with_for_update()`) (ACT-054, ACT-104). Stale cache or AI assumptions are ignored.
+- **14. Escalation Rule:** Out-of-stock during checkout raises `ValueError("INSUFFICIENT_STOCK")` and fails checkout deterministically.
+- **15. Failure Behavior:** Order creation fails with `INSUFFICIENT_STOCK`; stock remains unchanged.
 - **16. UNKNOWN Behavior:** Treat missing stock count as 0 (Out of stock).
 - **17. Audit Requirement:** Audit stock deduction events.
 - **18. Tenant Scope:** Strictly tenant-isolated.
 - **19. Permission:** `products.read`, `inventory.write`.
 - **20. Authority:** Order Commit Transaction.
 - **21. Risk:** HIGH.
-- **22. Existing Implementation:** DB check constraint `check_product_stock_non_negative` in `app/database/models/product.py`.
-- **23. Evidence:** DB CheckConstraint prevents negative stock at SQL level.
+- **22. Existing Implementation:** Implemented in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`) and DB check constraint `check_product_stock_non_negative` in `app/database/models/product.py`.
+- **23. Evidence:** `create_order_with_items` locks Product row with `with_for_update()`, re-verifies `stock >= qty`, and decrements stock inside order transaction.
 - **24. Status:** `PASS`.
 - **25. Open Question:** None.
-- **26. Verification Evidence:** Tested via `tests/test_gap_004_source_of_truth_matrix.py::test_stock_non_negative_check_constraint`.
+- **26. Verification Evidence:** Tested via `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock`.
 
 ---
 
@@ -574,7 +574,7 @@ Financial and checkout state integrity is governed by strict deterministic gates
    - Exact invoice amount and currency match.
    - Row-level lock (`with_for_update()`) on target payment record.
 3. **Price Snapshot at Checkout:** When an order is created, `OrderRepository.create_order_with_items` snapshots `unit_price` on `order_items.unit_price`. Subsequent catalog price changes do not alter historical order line item prices (ACT-053, ACT-103).
-4. **Stock Revalidation:** Volatile inventory is revalidated with a deterministic DB check at transaction commit (ACT-054, ACT-104). Check constraints (`check_product_stock_non_negative`) enforce zero-overselling at SQL level.
+4. **Stock Revalidation:** Volatile inventory is revalidated and deducted atomically inside transaction boundary with row locking (`select(...).with_for_update()`) (ACT-054, ACT-104). Check constraints (`check_product_stock_non_negative`) enforce zero-overselling at SQL level.
 
 ---
 
@@ -609,7 +609,8 @@ The conclusions in this matrix are backed by actual repository evidence:
 - **Payment Verification Gate:** `app/billing/payments.py` (`PaymentService.handle_provider_webhook`), `app/billing/subscription.py` (`activate_subscription`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_unverified_payment_does_not_grant_paid_status`.
 - **WhatsApp State Machine:** `app/core/messaging_state.py` (`validate_message_status_transition`), `app/repositories/domain.py` (`MessageRepository.transition_status`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_message_status_state_machine_transitions`.
 - **Tenant Isolation:** `app/repositories/domain.py` (`ProductRepository.list_all` & `get_by_id`, `CustomerRepository.get_by_phone`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_cross_tenant_product_repository_isolation` and `test_same_phone_number_different_tenants_isolation`.
-- **Active Conversation Channel Filtering Audit (P1 Candidate A):** `app/repositories/domain.py` (`ConversationRepository.get_active_by_customer`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_conversation_active_lookup_channel_behavior`.
+- **Active Conversation Channel Filtering (P1-01 Closed):** Repaired in `app/repositories/domain.py` (`ConversationRepository.get_active_by_customer`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_conversation_active_lookup_channel_isolation`.
+- **Stock Transaction Boundary (P1-02 / ACT-104 Closed):** Repaired in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock`.
 - **Context Assembly Priority:** `app/core/context_assembly/service.py` (`ContextAssemblyService.assemble_context`).
 - **Entitlement Resolution:** `app/billing/entitlement.py` (`EntitlementResolver`).
 
@@ -620,18 +621,21 @@ The conclusions in this matrix are backed by actual repository evidence:
 ### P0 Findings:
 - **None.** All critical security, billing, payment, and tenant isolation boundaries comply with canonical locked decisions.
 
-### P1 Findings (Operational / Observability / Code Consistency Enhancements):
-1. **Finding P1-01: Channel Parameter Omission in `ConversationRepository.get_active_by_customer`.**
-   - *Evidence:* `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` accepts `(tenant_id, customer_id)` without a `channel` filter parameter, whereas the database partial unique index `uq_active_conversations_tenant_customer_channel` is indexed on `(tenant_id, customer_id, channel)`.
-   - *Impact:* If a customer has simultaneous active conversations on WhatsApp and another channel (e.g. Web Chat), `get_active_by_customer` returns whichever active conversation was created most recently regardless of channel.
-   - *Suggested Future Repair:* Update `get_active_by_customer` signature to accept an optional `channel: str | None = None` parameter and apply `where(Conversation.channel == channel)` when provided.
+### P1 Findings Status:
+1. **Finding P1-01: Channel Parameter Omission in `ConversationRepository.get_active_by_customer` — [CLOSED]**
+   - *Status:* CLOSED via Repair.
+   - *Evidence:* Updated `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` to accept `channel: str | None = None` and apply `where(Conversation.channel == channel)`. Verified by `test_conversation_active_lookup_channel_isolation` in `tests/test_gap_004_source_of_truth_matrix.py`.
 
-2. **Finding P1-02: Absence of Explicit Product Catalog Revision/Version Integer Column.**
+2. **Finding P1-02: Stock Transaction Boundary & Concurrency Protection (ACT-104) — [CLOSED]**
+   - *Status:* CLOSED via Repair.
+   - *Evidence:* Updated `OrderRepository.create_order_with_items` in `app/repositories/domain.py` to lock Product rows with `select(...).with_for_update()`, revalidate available stock against requested quantity, and deduct stock atomically inside transaction commit boundary. Verified by `test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock` in `tests/test_gap_004_source_of_truth_matrix.py`.
+
+3. **Finding P1-03: Absence of Explicit Product Catalog Revision/Version Integer Column — [OPEN RECOMMENDATION]**
    - *Evidence:* `products` table (`app/database/models/product.py`) relies on `updated_at` timestamp rather than an explicit integer `version` or `revision` column.
    - *Impact:* While orders store immutable price snapshots on `order_items`, concurrent catalog edits do not support optimistic concurrency locking via explicit version increments. Order price snapshots satisfy ACT-053/ACT-103.
    - *Suggested Future Repair:* Consider adding `version: Mapped[int] = mapped_column(default=1)` to `Product` model in a future migration if optimistic locking is desired.
 
-3. **Finding P1-03: Absence of Dedicated Relational Promotions DB Table.**
+4. **Finding P1-04: Absence of Dedicated Relational Promotions DB Table — [FUTURE SCOPE]**
    - *Evidence:* Promotions exist as fields on `Product` (`discount_price`), `KnowledgeItem` (category='PROMOTION'), or general business config.
    - *Impact:* Promo code validation relies on custom business config parsing rather than a dedicated relational `promotions` table.
    - *Suggested Future Repair:* Implement a dedicated `promotions` DB table with start/end dates and usage quotas when advanced campaign capabilities are built in V1.5.
@@ -665,7 +669,7 @@ The conclusions in this matrix are backed by actual repository evidence:
 
 - **POTENTIAL-ERROR-001: Non-Transaction Stock Display in Chat Preview.**
   - *Details:* If an AI agent queries product stock during a chat conversation, the returned stock count is a point-in-time read. If another customer completes checkout seconds later, the chat stock count becomes stale.
-  - *Mitigation:* System enforces mandatory final revalidation at transaction commit (ACT-054). Chat agents must present stock counts as informative and clearly disclaim that checkout revalidation applies.
+  - *Mitigation:* System enforces mandatory final revalidation and deduction at transaction commit (ACT-054, ACT-104). Chat agents must present stock counts as informative and clearly disclaim that checkout revalidation applies.
 
 ---
 
@@ -674,7 +678,6 @@ The conclusions in this matrix are backed by actual repository evidence:
 1. **Maintain Context Assembly Hierarchy:** Ensure `ContextAssemblyService` continues to enforce DB Facts > Business Config > Approved Knowledge > Memory hierarchy without allowing prompt injection to alter context priority.
 2. **Keep Order Price Snapshots Immutable:** Retain strict unit price snapshot creation on `order_items` during checkout.
 3. **Preserve Webhook Payment Verification Gates:** Ensure no shortcut endpoint allows marking payments as `SUCCESS` without provider HMAC signature and amount matching.
-4. **Harden `get_active_by_customer` in Future Sprint:** Pass `channel` parameter to `get_active_by_customer` in `app/repositories/domain.py` to align 100% with `uq_active_conversations_tenant_customer_channel`.
 
 ---
 
@@ -690,13 +693,13 @@ The conclusions in this matrix are backed by actual repository evidence:
 | **AC-006** | AI memory cannot override authoritative DB state | Section 9 & Case 10 Audit | **PASS** |
 | **AC-007** | Customer claim does not become transaction truth | Section 10 & Case 5/6 Audit | **PASS** |
 | **AC-008** | Payment status requires authoritative verification | Section 10 & Case 6 Audit | **PASS** |
-| **AC-009** | Volatile stock has transaction-boundary validation requirement | Section 10 & Case 3 Audit | **PASS** |
+| **AC-009** | Volatile stock has transaction-boundary validation requirement | Section 10 & Case 3 Audit (`OrderRepository.create_order_with_items` with `with_for_update`) | **PASS** |
 | **AC-010** | Approved knowledge cannot override live transaction state | Section 11 & Case 9 Audit | **PASS** |
 | **AC-011** | Tenant scope of critical sources identified | Section 8 Tenant Isolation Analysis | **PASS** |
 | **AC-012** | UNKNOWN items remain UNKNOWN until evidence exists | Section 15 UNKNOWN Items | **PASS** |
 | **AC-013** | Conflicts have Source A, Source B, impact & escalation rules | Section 7 Conflict Resolution Matrix | **PASS** |
 | **AC-014** | Repository implementation compared with canonical contract | Section 13 & 14 Findings | **PASS** |
-| **AC-015** | No silent architecture changes made | Design contract task; no core changes | **PASS** |
+| **AC-015** | No silent architecture changes made | Design contract task; minimum required ACT-104 / P1-01 repairs | **PASS** |
 
 ---
 
