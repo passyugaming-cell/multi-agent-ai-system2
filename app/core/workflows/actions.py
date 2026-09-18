@@ -349,13 +349,22 @@ class ActionExecutor:
             from app.repositories.domain import CustomerRepository
             cust_repo = CustomerRepository(session)
             payload = params if "customer_id" in params or "phone" in params or "name" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
-            cust_id_val = payload.get("customer_id") or params.get("customer_id")
+            cust_id_val = payload.get("customer_id") or params.get("customer_id") or params.get("target")
             if not cust_id_val:
                 return ActionResult(success=False, error="customer_id parameter required for update_customer")
-            cust_id = cust_id_val if isinstance(cust_id_val, uuid.UUID) else uuid.UUID(str(cust_id_val))
-            customer = await cust_repo.get_by_id(tenant_uuid, cust_id)
+
+            customer = None
+            try:
+                cust_id = cust_id_val if isinstance(cust_id_val, uuid.UUID) else uuid.UUID(str(cust_id_val))
+                customer = await cust_repo.get_by_id(tenant_uuid, cust_id)
+            except (ValueError, TypeError):
+                customer = None
+
+            if not customer and cust_id_val:
+                customer = await cust_repo.get_by_external_id(tenant_uuid, str(cust_id_val)) or await cust_repo.get_by_phone(tenant_uuid, str(cust_id_val))
+
             if not customer:
-                return ActionResult(success=False, error=f"Customer {cust_id} not found")
+                return ActionResult(success=False, error=f"Customer '{cust_id_val}' not found")
 
             if "name" in payload and payload["name"]:
                 customer.name = payload["name"]
@@ -370,13 +379,19 @@ class ActionExecutor:
             from app.repositories.domain import OrderRepository
             order_repo = OrderRepository(session)
             payload = params if "order_id" in params or "status" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
-            order_id_val = payload.get("order_id") or params.get("order_id")
+            order_id_val = payload.get("order_id") or params.get("order_id") or params.get("target")
             if not order_id_val:
                 return ActionResult(success=False, error="order_id parameter required for update_order")
-            order_id = order_id_val if isinstance(order_id_val, uuid.UUID) else uuid.UUID(str(order_id_val))
-            order = await order_repo.get_by_id(tenant_uuid, order_id)
+
+            order = None
+            try:
+                order_id = order_id_val if isinstance(order_id_val, uuid.UUID) else uuid.UUID(str(order_id_val))
+                order = await order_repo.get_by_id(tenant_uuid, order_id)
+            except (ValueError, TypeError):
+                order = None
+
             if not order:
-                return ActionResult(success=False, error=f"Order {order_id} not found")
+                return ActionResult(success=False, error=f"Order '{order_id_val}' not found")
 
             new_status = payload.get("status") or params.get("status")
             if new_status:
@@ -391,13 +406,22 @@ class ActionExecutor:
             from app.repositories.domain import ProductRepository
             prod_repo = ProductRepository(session)
             payload = params if "product_id" in params or "price" in params or "new_price" in params else (context.get("payload") if isinstance(context.get("payload"), dict) else context)
-            prod_id_val = payload.get("product_id") or params.get("product_id")
+            prod_id_val = payload.get("product_id") or params.get("product_id") or params.get("target")
             if not prod_id_val:
                 return ActionResult(success=False, error="product_id parameter required for change_product_price")
-            prod_id = prod_id_val if isinstance(prod_id_val, uuid.UUID) else uuid.UUID(str(prod_id_val))
-            product = await prod_repo.get_by_id(tenant_uuid, prod_id)
+
+            product = None
+            try:
+                prod_id = prod_id_val if isinstance(prod_id_val, uuid.UUID) else uuid.UUID(str(prod_id_val))
+                product = await prod_repo.get_by_id(tenant_uuid, prod_id)
+            except (ValueError, TypeError):
+                product = None
+
+            if not product and prod_id_val:
+                product = await prod_repo.get_by_sku(tenant_uuid, str(prod_id_val))
+
             if not product:
-                return ActionResult(success=False, error=f"Product {prod_id} not found")
+                return ActionResult(success=False, error=f"Product '{prod_id_val}' not found")
 
             new_price_val = payload.get("price") or payload.get("new_price") or params.get("price") or params.get("new_price")
             if new_price_val is None:
