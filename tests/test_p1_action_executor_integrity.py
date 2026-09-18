@@ -444,6 +444,19 @@ async def test_07_customer_phone_lookup_and_cross_tenant_isolation(db_session: A
 @pytest.mark.asyncio
 async def test_08_malformed_and_invalid_target_fail_closed(db_session: AsyncSession, tenant_a):
     """Verifies malformed/invalid target identifiers fail closed with success=False and zero DB mutations."""
+    # Create real Tenant A Product to prove entity remains unchanged upon malformed target execution
+    real_prod = Product(
+        tenant_id=tenant_a.id,
+        name="Real Product A",
+        sku="SKU_REAL_A",
+        price=Decimal("100.00"),
+        stock=10,
+        is_active=True,
+    )
+    db_session.add(real_prod)
+    await db_session.commit()
+    original_price = real_prod.price
+
     actor_a = AuthenticatedActor(
         user_id=uuid.uuid4(),
         tenant_id=tenant_a.id,
@@ -504,6 +517,10 @@ async def test_08_malformed_and_invalid_target_fail_closed(db_session: AsyncSess
         )
         assert res3.success is False
         assert "not found" in res3.error.lower()
+
+        # Assert real product price remains completely unchanged
+        await db_session.refresh(real_prod)
+        assert real_prod.price == original_price
 
     finally:
         reset_actor_context(token)
