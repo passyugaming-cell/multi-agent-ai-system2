@@ -206,7 +206,7 @@ This comprehensive matrix evaluates the 14 mandatory conflict scenarios. Each en
 - **23. Evidence:** `create_order_with_items` locks Product row with `with_for_update()`, re-verifies `stock >= qty`, and decrements stock inside order transaction.
 - **24. Status:** `PASS`.
 - **25. Open Question:** None.
-- **26. Verification Evidence:** Tested via `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock`.
+- **26. Verification Evidence:** Tested via `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout`.
 
 ---
 
@@ -610,7 +610,7 @@ The conclusions in this matrix are backed by actual repository evidence:
 - **WhatsApp State Machine:** `app/core/messaging_state.py` (`validate_message_status_transition`), `app/repositories/domain.py` (`MessageRepository.transition_status`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_message_status_state_machine_transitions`.
 - **Tenant Isolation:** `app/repositories/domain.py` (`ProductRepository.list_all` & `get_by_id`, `CustomerRepository.get_by_phone`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_cross_tenant_product_repository_isolation` and `test_same_phone_number_different_tenants_isolation`.
 - **Active Conversation Channel Filtering (P1-01 Closed):** Repaired in `app/repositories/domain.py` (`ConversationRepository.get_active_by_customer`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_conversation_active_lookup_channel_isolation`.
-- **Stock Transaction Boundary (P1-02 / ACT-104 Closed):** Repaired in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock`.
+- **Stock Transaction Boundary & Concurrency Proof (P1-02 / ACT-104 Closed):** Repaired in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout`.
 - **Context Assembly Priority:** `app/core/context_assembly/service.py` (`ContextAssemblyService.assemble_context`).
 - **Entitlement Resolution:** `app/billing/entitlement.py` (`EntitlementResolver`).
 
@@ -624,11 +624,11 @@ The conclusions in this matrix are backed by actual repository evidence:
 ### P1 Findings Status:
 1. **Finding P1-01: Channel Parameter Omission in `ConversationRepository.get_active_by_customer` — [CLOSED]**
    - *Status:* CLOSED via Repair.
-   - *Evidence:* Updated `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` to accept `channel: str | None = None` and apply `where(Conversation.channel == channel)`. Verified by `test_conversation_active_lookup_channel_isolation` in `tests/test_gap_004_source_of_truth_matrix.py`.
+   - *Evidence:* Updated `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` to accept `channel: str = "whatsapp"` and filter `Conversation.channel == channel`. Verified by `test_conversation_active_lookup_channel_isolation` in `tests/test_gap_004_source_of_truth_matrix.py`.
 
 2. **Finding P1-02: Stock Transaction Boundary & Concurrency Protection (ACT-104) — [CLOSED]**
    - *Status:* CLOSED via Repair.
-   - *Evidence:* Updated `OrderRepository.create_order_with_items` in `app/repositories/domain.py` to lock Product rows with `select(...).with_for_update()`, revalidate available stock against requested quantity, and deduct stock atomically inside transaction commit boundary. Verified by `test_stock_transaction_boundary_sufficient_stock` and `test_stock_transaction_boundary_insufficient_stock` in `tests/test_gap_004_source_of_truth_matrix.py`.
+   - *Evidence:* Updated `OrderRepository.create_order_with_items` in `app/repositories/domain.py` to lock Product rows with `select(...).with_for_update()`, revalidate available stock against requested quantity, and deduct stock atomically inside transaction commit boundary. Verified by `test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout` in `tests/test_gap_004_source_of_truth_matrix.py`.
 
 3. **Finding P1-03: Absence of Explicit Product Catalog Revision/Version Integer Column — [OPEN RECOMMENDATION]**
    - *Evidence:* `products` table (`app/database/models/product.py`) relies on `updated_at` timestamp rather than an explicit integer `version` or `revision` column.
@@ -678,6 +678,7 @@ The conclusions in this matrix are backed by actual repository evidence:
 1. **Maintain Context Assembly Hierarchy:** Ensure `ContextAssemblyService` continues to enforce DB Facts > Business Config > Approved Knowledge > Memory hierarchy without allowing prompt injection to alter context priority.
 2. **Keep Order Price Snapshots Immutable:** Retain strict unit price snapshot creation on `order_items` during checkout.
 3. **Preserve Webhook Payment Verification Gates:** Ensure no shortcut endpoint allows marking payments as `SUCCESS` without provider HMAC signature and amount matching.
+4. **Harden `get_active_by_customer` in Future Sprint:** Explicitly pass `channel` parameter across all multi-channel routers to align 100% with `uq_active_conversations_tenant_customer_channel`.
 
 ---
 

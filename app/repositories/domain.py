@@ -245,17 +245,19 @@ class ConversationRepository(BaseRepository[Conversation]):
         self,
         tenant_id: uuid.UUID,
         customer_id: uuid.UUID,
-        channel: str | None = None,
+        channel: str = "whatsapp",
     ) -> Conversation | None:
-        stmt = select(Conversation).where(
-            Conversation.tenant_id == tenant_id,
-            Conversation.customer_id == customer_id,
-            Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
+        stmt = (
+            select(Conversation)
+            .where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.customer_id == customer_id,
+                Conversation.channel == channel,
+                Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
+            )
+            .order_by(Conversation.created_at.desc())
+            .execution_options(populate_existing=True)
         )
-        if channel is not None:
-            stmt = stmt.where(Conversation.channel == channel)
-
-        stmt = stmt.order_by(Conversation.created_at.desc()).execution_options(populate_existing=True)
         result = await self.session.execute(stmt)
         return result.scalars().first()
 
@@ -386,11 +388,16 @@ class OrderRepository(BaseRepository[Order]):
             if qty <= 0:
                 raise ValueError(f"INVALID_QUANTITY: Requested quantity must be greater than zero, got {qty}")
 
-            # ACT-104: Row-level lock on Product for atomic stock revalidation and deduction
-            stmt = select(Product).where(
-                Product.tenant_id == tenant_id,
-                Product.id == prod_id,
-            ).with_for_update()
+            # ACT-104: Row-level lock on Product for atomic stock revalidation and deduction with fresh DB state
+            stmt = (
+                select(Product)
+                .where(
+                    Product.tenant_id == tenant_id,
+                    Product.id == prod_id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             res = await self.session.execute(stmt)
             db_product = res.scalar_one_or_none()
 

@@ -6,9 +6,10 @@ and conflict resolution boundaries without modifying product behavior or schema.
 """
 
 import uuid
+import asyncio
 from decimal import Decimal
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.exc import IntegrityError
 
 from app.database.models.product import Product
@@ -168,6 +169,74 @@ async def test_stock_transaction_boundary_insufficient_stock(
     # Verify stock remains unchanged at 1
     await db_session.refresh(product)
     assert product.stock == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_transaction_boundary_concurrent_checkout(
+    test_session_factory: async_sessionmaker[AsyncSession], tenant_a
+):
+    """ACT-104 Case C: Concurrent checkout attempts (via asyncio.gather) targeting last stock unit (stock = 1) guarantees exactly 1 success and 1 deterministic INSUFFICIENT_STOCK failure via populate_existing=True row revalidation."""
+    # Setup initial product and customers in session 1
+    async with test_session_factory() as session1:
+        cust_repo = CustomerRepository(session1)
+        cust1, _ = await cust_repo.get_or_create(tenant_a.id, phone="+62811223366", name="Concurrent Buyer 1")
+        cust2, _ = await cust_repo.get_or_create(tenant_a.id, phone="+62811223377", name="Concurrent Buyer 2")
+
+        product = Product(
+            tenant_id=tenant_a.id,
+            name="Flash Sale Item",
+            sku="FLASH-01",
+            price=Decimal("500000.00"),
+            stock=1,
+            is_active=True,
+        )
+        session1.add(product)
+        await session1.commit()
+
+        product_id = product.id
+        cust1_id = cust1.id
+        cust2_id = cust2.id
+
+    # Concurrent worker for checkout attempt
+    async def attempt_checkout(customer_id: uuid.UUID, delay: float = 0.0):
+        if delay > 0:
+            await asyncio.sleep(delay)
+        async with test_session_factory() as session:
+            repo = OrderRepository(session)
+            try:
+                order = await repo.create_order_with_items(
+                    tenant_id=tenant_a.id,
+                    customer_id=customer_id,
+                    currency="IDR",
+                    items_data=[{"product_id": product_id, "quantity": 1}],
+                )
+                await session.commit()
+                return ("SUCCESS", order.id)
+            except ValueError as val_err:
+                await session.rollback()
+                return ("FAILED", str(val_err))
+
+    # Execute concurrent checkout attempts simultaneously via asyncio.gather
+    results = await asyncio.gather(
+        attempt_checkout(cust1_id, delay=0.0),
+        attempt_checkout(cust2_id, delay=0.01),
+    )
+
+    statuses = [res[0] for res in results]
+
+    assert statuses.count("SUCCESS") == 1
+    assert statuses.count("FAILED") == 1
+
+    failed_result = next(res for res in results if res[0] == "FAILED")
+    assert "INSUFFICIENT_STOCK" in failed_result[1]
+
+    # Verify final DB stock state in fresh session
+    async with test_session_factory() as session_verify:
+        p_repo = ProductRepository(session_verify)
+        final_product = await p_repo.get_by_id(tenant_a.id, product_id)
+        assert final_product is not None
+        assert final_product.stock == 0
+        assert final_product.stock_status == "OUT_OF_STOCK"
 
 
 @pytest.mark.asyncio

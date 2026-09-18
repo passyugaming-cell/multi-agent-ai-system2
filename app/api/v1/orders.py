@@ -66,14 +66,21 @@ async def create_order(
             )
         items_data.append({"product": product, "quantity": item.quantity})
 
-    order = await order_repo.create_order_with_items(
-        tenant_id=tenant_id,
-        customer_id=payload.customer_id,
-        currency=payload.currency,
-        items_data=items_data,
-        metadata=payload.metadata,
-    )
-    await db.commit()
+    try:
+        order = await order_repo.create_order_with_items(
+            tenant_id=tenant_id,
+            customer_id=payload.customer_id,
+            currency=payload.currency,
+            items_data=items_data,
+            metadata=payload.metadata,
+        )
+        await db.commit()
+    except ValueError as val_err:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        )
 
     full_order = await order_repo.get_by_id_with_items(tenant_id, order.id)
     return full_order
