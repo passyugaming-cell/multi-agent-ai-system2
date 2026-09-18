@@ -383,3 +383,127 @@ async def test_06_non_uuid_target_lookups_and_isolation(db_session: AsyncSession
 
     finally:
         reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_07_customer_phone_lookup_and_cross_tenant_isolation(db_session: AsyncSession, tenant_a, tenant_b):
+    """Verifies update_customer resolves customer by phone number and enforces tenant isolation."""
+    cust_repo = CustomerRepository(db_session)
+
+    # 1. Tenant A customer
+    cust_a, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_a.id,
+        phone="+6281234567890",
+        name="Tenant A Phone Cust",
+    )
+    # 2. Tenant B customer
+    cust_b, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_b.id,
+        phone="+6289876543210",
+        name="Tenant B Phone Cust",
+    )
+    await db_session.commit()
+
+    actor_a = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.write"},
+    )
+    token = set_actor_context(actor_a)
+    try:
+        # A. Tenant A phone lookup -> SUCCESS
+        res1 = await ActionExecutor.execute(
+            action_type="update_customer",
+            params={"target": "+6281234567890", "name": "Tenant A Phone Cust Updated"},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res1.success is True
+        await db_session.refresh(cust_a)
+        assert cust_a.name == "Tenant A Phone Cust Updated"
+
+        # B. Tenant A requesting Tenant B phone -> FAIL (success=False, no mutation)
+        res2 = await ActionExecutor.execute(
+            action_type="update_customer",
+            params={"target": "+6289876543210", "name": "Hacked Tenant B Cust"},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res2.success is False
+        assert "not found" in res2.error.lower()
+        await db_session.refresh(cust_b)
+        assert cust_b.name == "Tenant B Phone Cust"  # Unchanged
+
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_08_malformed_and_invalid_target_fail_closed(db_session: AsyncSession, tenant_a):
+    """Verifies malformed/invalid target identifiers fail closed with success=False and zero DB mutations."""
+    actor_a = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.write", "product.write"},
+        is_platform_owner=True,
+    )
+    token = set_actor_context(actor_a)
+    try:
+        # 1. Malformed customer target
+        res1 = await ActionExecutor.execute(
+            action_type="update_customer",
+            params={"target": "!@#$%^&*()_malformed_cust", "name": "New Name"},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res1.success is False
+        assert "not found" in res1.error.lower()
+
+        # 2. Malformed order target
+        res2 = await ActionExecutor.execute(
+            action_type="update_order",
+            params={"target": "ORDER_MALFORMED_1234", "status": "PAID"},
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res2.success is False
+        assert "not found" in res2.error.lower()
+
+        # 3. Malformed product price target
+        params_3 = {"target": "PROD_MALFORMED_1234", "price": "50000.00"}
+        hash_3 = ActionBinding.compute_hash("change_product_price", "PROD_MALFORMED_1234", tenant_a.id, params_3)
+        appr_3 = Approval(
+            tenant_id=tenant_a.id,
+            action_type="change_product_price",
+            target="PROD_MALFORMED_1234",
+            risk_level="HIGH",
+            requested_by="owner",
+            reason="Price change malformed",
+            status="APPROVED",
+            decided_by="platform_owner",
+            meta_data={"params": params_3, "action_hash": hash_3, "decided_by_is_platform_owner": True},
+        )
+        db_session.add(appr_3)
+        await db_session.commit()
+
+        exec_params_3 = dict(params_3)
+        exec_params_3["_approval_id"] = str(appr_3.id)
+
+        res3 = await ActionExecutor.execute(
+            action_type="change_product_price",
+            params=exec_params_3,
+            context={},
+            session=db_session,
+            tenant_id=str(tenant_a.id),
+        )
+        assert res3.success is False
+        assert "not found" in res3.error.lower()
+
+    finally:
+        reset_actor_context(token)
