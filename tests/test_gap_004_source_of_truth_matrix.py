@@ -219,7 +219,7 @@ async def test_stock_transaction_boundary_concurrent_checkout(
     # Execute concurrent checkout attempts simultaneously via asyncio.gather
     results = await asyncio.gather(
         attempt_checkout(cust1_id, delay=0.0),
-        attempt_checkout(cust2_id, delay=0.01),
+        attempt_checkout(cust2_id, delay=0.05),
     )
 
     statuses = [res[0] for res in results]

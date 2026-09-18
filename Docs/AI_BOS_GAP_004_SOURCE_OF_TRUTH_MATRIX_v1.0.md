@@ -193,7 +193,7 @@ This comprehensive matrix evaluates the 14 mandatory conflict scenarios. Each en
 - **10. Conflict Source A:** Official DB `products.stock`.
 - **11. Conflict Source B:** Stale cached stock or AI agent assuming item is in stock.
 - **12. Conflict Type:** Inventory Race Condition / Overselling.
-- **13. Resolution Rule:** **DB Transactional Stock Wins.** Mandatory final deterministic revalidation and deduction at checkout commit with row locking (`select(...).with_for_update()`) (ACT-054, ACT-104). Stale cache or AI assumptions are ignored.
+- **13. Resolution Rule:** **DB Transactional Stock Wins.** Mandatory final deterministic revalidation and deduction at checkout commit with row locking (`select(...).with_for_update().execution_options(populate_existing=True)`) (ACT-054, ACT-104). Stale cache or AI assumptions are ignored.
 - **14. Escalation Rule:** Out-of-stock during checkout raises `ValueError("INSUFFICIENT_STOCK")` and fails checkout deterministically.
 - **15. Failure Behavior:** Order creation fails with `INSUFFICIENT_STOCK`; stock remains unchanged.
 - **16. UNKNOWN Behavior:** Treat missing stock count as 0 (Out of stock).
@@ -574,7 +574,7 @@ Financial and checkout state integrity is governed by strict deterministic gates
    - Exact invoice amount and currency match.
    - Row-level lock (`with_for_update()`) on target payment record.
 3. **Price Snapshot at Checkout:** When an order is created, `OrderRepository.create_order_with_items` snapshots `unit_price` on `order_items.unit_price`. Subsequent catalog price changes do not alter historical order line item prices (ACT-053, ACT-103).
-4. **Stock Revalidation:** Volatile inventory is revalidated and deducted atomically inside transaction boundary with row locking (`select(...).with_for_update()`) (ACT-054, ACT-104). Check constraints (`check_product_stock_non_negative`) enforce zero-overselling at SQL level.
+4. **Stock Revalidation:** Volatile inventory is revalidated and deducted atomically inside transaction boundary with row locking (`select(...).with_for_update().execution_options(populate_existing=True)`) (ACT-054, ACT-104). Check constraints (`check_product_stock_non_negative`) enforce zero-overselling at SQL level.
 
 ---
 
@@ -609,8 +609,13 @@ The conclusions in this matrix are backed by actual repository evidence:
 - **Payment Verification Gate:** `app/billing/payments.py` (`PaymentService.handle_provider_webhook`), `app/billing/subscription.py` (`activate_subscription`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_unverified_payment_does_not_grant_paid_status`.
 - **WhatsApp State Machine:** `app/core/messaging_state.py` (`validate_message_status_transition`), `app/repositories/domain.py` (`MessageRepository.transition_status`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_message_status_state_machine_transitions`.
 - **Tenant Isolation:** `app/repositories/domain.py` (`ProductRepository.list_all` & `get_by_id`, `CustomerRepository.get_by_phone`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_cross_tenant_product_repository_isolation` and `test_same_phone_number_different_tenants_isolation`.
-- **Active Conversation Channel Filtering (P1-01 Closed):** Repaired in `app/repositories/domain.py` (`ConversationRepository.get_active_by_customer`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_conversation_active_lookup_channel_isolation`.
-- **Stock Transaction Boundary & Concurrency Proof (P1-02 / ACT-104 Closed):** Repaired in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`). Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout`.
+- **Active Conversation Channel Filtering (P1-01 Closed):** Repaired in `app/repositories/domain.py` (`ConversationRepository.get_active_by_customer`) with explicit `channel="whatsapp"` default signature and channel filtering. Production callers audited:
+  | Caller Path | Channel Source | Channel Value | Server Controlled | Non-WhatsApp Capability |
+  | :--- | :--- | :--- | :--- | :--- |
+  | `receive_whatsapp_webhook` (`app/api/v1/webhooks.py`) | WhatsApp Webhook Event | `"whatsapp"` | YES | WhatsApp Webhook Channel |
+  | `ConversationRepository.get_or_create_active` (`app/repositories/domain.py`) | Parameter `channel` | `"whatsapp"` (default) | YES | Supports `"web"`, `"whatsapp"`, etc. |
+- **Stock Transaction Boundary & Concurrency Proof (P1-02 / ACT-104 Closed):** Repaired in `app/repositories/domain.py` (`OrderRepository.create_order_with_items`) with `select(Product)...with_for_update().execution_options(populate_existing=True)`. Verified by `tests/test_gap_004_source_of_truth_matrix.py::test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout`.
+- **CI PostgreSQL Verification Workflow:** Dedicated CI workflow `.github/workflows/gap_004_verification.yml` executing `alembic upgrade head` and `pytest tests/test_gap_004_source_of_truth_matrix.py tests/test_gap_002_authority_matrix.py` against a PostgreSQL 16 container (`postgres:16`).
 - **Context Assembly Priority:** `app/core/context_assembly/service.py` (`ContextAssemblyService.assemble_context`).
 - **Entitlement Resolution:** `app/billing/entitlement.py` (`EntitlementResolver`).
 
@@ -624,11 +629,11 @@ The conclusions in this matrix are backed by actual repository evidence:
 ### P1 Findings Status:
 1. **Finding P1-01: Channel Parameter Omission in `ConversationRepository.get_active_by_customer` — [CLOSED]**
    - *Status:* CLOSED via Repair.
-   - *Evidence:* Updated `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` to accept `channel: str = "whatsapp"` and filter `Conversation.channel == channel`. Verified by `test_conversation_active_lookup_channel_isolation` in `tests/test_gap_004_source_of_truth_matrix.py`.
+   - *Evidence:* Updated `ConversationRepository.get_active_by_customer` in `app/repositories/domain.py` to signature `channel: str = "whatsapp"` and filter `Conversation.channel == channel`. Verified by `test_conversation_active_lookup_channel_isolation` in `tests/test_gap_004_source_of_truth_matrix.py`. Production webhook caller in `app/api/v1/webhooks.py` explicitly passes `channel="whatsapp"`.
 
 2. **Finding P1-02: Stock Transaction Boundary & Concurrency Protection (ACT-104) — [CLOSED]**
    - *Status:* CLOSED via Repair.
-   - *Evidence:* Updated `OrderRepository.create_order_with_items` in `app/repositories/domain.py` to lock Product rows with `select(...).with_for_update()`, revalidate available stock against requested quantity, and deduct stock atomically inside transaction commit boundary. Verified by `test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout` in `tests/test_gap_004_source_of_truth_matrix.py`.
+   - *Evidence:* Updated `OrderRepository.create_order_with_items` in `app/repositories/domain.py` to lock Product rows with `select(...).with_for_update().execution_options(populate_existing=True)`, revalidate available stock against requested quantity, and deduct stock atomically inside transaction commit boundary. Verified by `test_stock_transaction_boundary_sufficient_stock`, `test_stock_transaction_boundary_insufficient_stock`, and `test_stock_transaction_boundary_concurrent_checkout` in `tests/test_gap_004_source_of_truth_matrix.py`. CI workflow `.github/workflows/gap_004_verification.yml` executes tests against PostgreSQL 16.
 
 3. **Finding P1-03: Absence of Explicit Product Catalog Revision/Version Integer Column — [OPEN RECOMMENDATION]**
    - *Evidence:* `products` table (`app/database/models/product.py`) relies on `updated_at` timestamp rather than an explicit integer `version` or `revision` column.
@@ -678,7 +683,7 @@ The conclusions in this matrix are backed by actual repository evidence:
 1. **Maintain Context Assembly Hierarchy:** Ensure `ContextAssemblyService` continues to enforce DB Facts > Business Config > Approved Knowledge > Memory hierarchy without allowing prompt injection to alter context priority.
 2. **Keep Order Price Snapshots Immutable:** Retain strict unit price snapshot creation on `order_items` during checkout.
 3. **Preserve Webhook Payment Verification Gates:** Ensure no shortcut endpoint allows marking payments as `SUCCESS` without provider HMAC signature and amount matching.
-4. **Harden `get_active_by_customer` in Future Sprint:** Explicitly pass `channel` parameter across all multi-channel routers to align 100% with `uq_active_conversations_tenant_customer_channel`.
+4. **Harden `get_active_by_customer` across Future Routers:** Explicitly pass `channel` parameter across all future multi-channel routers to align 100% with `uq_active_conversations_tenant_customer_channel`.
 
 ---
 
