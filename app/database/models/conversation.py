@@ -46,7 +46,7 @@ class Conversation(BaseModel):
             "customer_id",
             "channel",
             unique=True,
-            postgresql_where=sa_text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
-            sqlite_where=sa_text("status IN ('OPEN', 'WAITING_HUMAN', 'HUMAN_ACTIVE')"),
+            postgresql_where=sa_text("status IN ('OPEN', 'PENDING', 'WAITING_HUMAN', 'HUMAN_HANDLING', 'HUMAN_ACTIVE')"),
+            sqlite_where=sa_text("status IN ('OPEN', 'PENDING', 'WAITING_HUMAN', 'HUMAN_HANDLING', 'HUMAN_ACTIVE')"),
         ),
     )

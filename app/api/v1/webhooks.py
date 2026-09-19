@@ -474,11 +474,26 @@ async def _process_whatsapp_webhook_body(
                     sender_phone = un_msg.metadata.get("sender_phone")
                     sender_name = un_msg.metadata.get("sender_name") or "WhatsApp Customer"
 
+                    # D-006-02 Anonymous / Guest Identity Resolution:
+                    # Do NOT create a permanent Customer solely because sender_phone is missing.
+                    # WhatsApp inbound message processing requires sender_phone for identity and outbound routing.
+                    if not sender_phone or not str(sender_phone).strip():
+                        logger.warning(
+                            "Inbound WhatsApp message %s rejected for tenant %s: missing required sender_phone",
+                            un_msg.external_message_id, tenant_id
+                        )
+                        processed_results.append({
+                            "external_message_id": un_msg.external_message_id,
+                            "status": "rejected_missing_sender_phone",
+                        })
+                        continue
+
+                    cust_phone = str(sender_phone).strip()
                     customer, customer_created = await cust_repo.get_or_create(
                         tenant_id=tenant_id,
-                        phone=sender_phone or "628000000000",
+                        phone=cust_phone,
                         name=sender_name,
-                        external_id=sender_phone,
+                        external_id=cust_phone,
                     )
                     if customer_created:
                         await publish_integration_event(
