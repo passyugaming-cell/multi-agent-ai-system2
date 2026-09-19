@@ -58,10 +58,17 @@ class OnboardingService:
         if not tenant:
             raise TenantNotFoundException()
 
-        if tenant.lifecycle_state == "PROSPECT":
-            await self.lifecycle_manager.transition_state(
+        if tenant.lifecycle_state in (
+            "PROSPECT",
+            "LEAD",
+            "QUALIFIED",
+            "PROPOSAL",
+            "WAITING_PAYMENT",
+            "PAID",
+            "CLIENT",
+        ):
+            await self.lifecycle_manager.advance_to_onboarding(
                 tenant_id=tenant_id,
-                target_state="ONBOARDING",
                 reason="Onboarding process started by client",
             )
 

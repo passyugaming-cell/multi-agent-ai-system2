@@ -154,8 +154,9 @@ class IntegrationService:
                 self.session.add(connection)
                 await self.session.flush()
             else:
-                self._validate_transition(connection.status, "CONNECTING")
-                connection.status = "CONNECTING"
+                target_init_status = "RECONNECTING" if connection.status == "ACTIVE" else "CONNECTING"
+                self._validate_transition(connection.status, target_init_status)
+                connection.status = target_init_status
                 connection.provider_key = integration.provider_key
                 if external_account_id:
                     connection.external_account_id = external_account_id

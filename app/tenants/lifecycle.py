@@ -47,7 +47,7 @@ class ClientLifecycleManager:
 
             subscription = await self.subscription_service.get_subscription_or_none(tenant_id)
             readiness_summary = await onboarding_service.get_onboarding_summary(tenant_id)
-            readiness_score = readiness_summary.readiness
+            readiness_score = readiness_summary
 
         validate_tenant_lifecycle_transition(
             current_state=current_state,
@@ -80,6 +80,52 @@ class ClientLifecycleManager:
         await self.db.refresh(tenant)
         return tenant
 
+    async def is_payment_verified(self, tenant_id: uuid.UUID) -> bool:
+        """
+        Evaluates authoritative billing/payment evidence for a tenant.
+        Returns True if:
+        1. Tenant has an ACTIVE or TRIALING subscription.
+        2. Subscription amount is 0 (free plan) or metadata_ contains verified_payment=True.
+        3. Tenant has a SUCCEEDED payment record.
+        4. Tenant has a PAID invoice record.
+        """
+        from decimal import Decimal
+        from sqlalchemy import and_
+        from app.database.models.billing import Payment, Invoice
+        from app.billing.state_machine import SubscriptionStatus, PaymentStatus, InvoiceStatus
+
+        subscription = await self.subscription_service.get_subscription_or_none(tenant_id)
+        if subscription:
+            if subscription.status == SubscriptionStatus.ACTIVE:
+                return True
+            if subscription.amount == Decimal("0.00") or float(subscription.amount) == 0:
+                return True
+            meta = subscription.metadata_ or {}
+            if meta.get("verified_payment") is True:
+                return True
+
+        stmt_pay = select(Payment).where(
+            and_(
+                Payment.tenant_id == tenant_id,
+                Payment.status == PaymentStatus.SUCCEEDED,
+            )
+        )
+        succeeded_pay = (await self.db.execute(stmt_pay)).scalars().first()
+        if succeeded_pay:
+            return True
+
+        stmt_inv = select(Invoice).where(
+            and_(
+                Invoice.tenant_id == tenant_id,
+                Invoice.status == InvoiceStatus.PAID,
+            )
+        )
+        paid_inv = (await self.db.execute(stmt_inv)).scalars().first()
+        if paid_inv:
+            return True
+
+        return False
+
     async def advance_to_onboarding(
         self,
         tenant_id: uuid.UUID,
@@ -90,6 +136,8 @@ class ClientLifecycleManager:
         Advances a prospect tenant sequentially through the sales pipeline:
         PROSPECT -> LEAD -> QUALIFIED -> PROPOSAL -> WAITING_PAYMENT -> PAID -> CLIENT -> ONBOARDING
         in strict compliance with the frozen S-001 lifecycle matrix.
+        Evaluates authoritative payment state prior to WAITING_PAYMENT -> PAID.
+        If payment is not verified, progress stops at WAITING_PAYMENT.
         """
         stmt = select(Tenant).where(Tenant.id == tenant_id)
         tenant = (await self.db.execute(stmt)).scalar_one_or_none()
@@ -97,7 +145,7 @@ class ClientLifecycleManager:
             raise AppException(code="TENANT_NOT_FOUND", message="Tenant not found.", status_code=404)
 
         current_state = tenant.lifecycle_state or "PROSPECT"
-        if current_state == "ONBOARDING":
+        if current_state in ("ONBOARDING", "CONFIGURING", "TESTING", "READY", "ACTIVE"):
             return tenant
 
         sequence = [
@@ -116,6 +164,16 @@ class ClientLifecycleManager:
             for i in range(start_idx, len(sequence) - 1):
                 from_state = sequence[i]
                 to_state = sequence[i + 1]
+
+                if from_state == "WAITING_PAYMENT" and to_state == "PAID":
+                    verified = await self.is_payment_verified(tenant_id)
+                    if not verified:
+                        logger.info(
+                            "Tenant %s pipeline progress paused at WAITING_PAYMENT (unverified payment).",
+                            tenant_id,
+                        )
+                        return tenant
+
                 tenant = await self.transition_state(
                     tenant_id=tenant_id,
                     target_state=to_state,
@@ -141,6 +199,8 @@ class ClientLifecycleManager:
         Advances an onboarding tenant sequentially through the configuration steps:
         ONBOARDING -> CONFIGURING -> TESTING -> READY
         in strict compliance with the frozen S-001 lifecycle matrix.
+        Evaluates authoritative payment state prior to WAITING_PAYMENT -> PAID.
+        If payment is not verified, progress stops at WAITING_PAYMENT.
         """
         stmt = select(Tenant).where(Tenant.id == tenant_id)
         tenant = (await self.db.execute(stmt)).scalar_one_or_none()
@@ -170,6 +230,16 @@ class ClientLifecycleManager:
             for i in range(start_idx, len(sequence) - 1):
                 from_state = sequence[i]
                 to_state = sequence[i + 1]
+
+                if from_state == "WAITING_PAYMENT" and to_state == "PAID":
+                    verified = await self.is_payment_verified(tenant_id)
+                    if not verified:
+                        logger.info(
+                            "Tenant %s onboarding progress paused at WAITING_PAYMENT (unverified payment).",
+                            tenant_id,
+                        )
+                        return tenant
+
                 tenant = await self.transition_state(
                     tenant_id=tenant_id,
                     target_state=to_state,

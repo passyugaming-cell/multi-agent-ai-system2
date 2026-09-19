@@ -246,3 +246,131 @@ async def test_s007_approval_execution_status_separation(db_session: AsyncSessio
     assert approval.meta_data.get("execution_status") == "EXECUTED"
     assert executed_payment.status == "PARTIALLY_REFUNDED"
     assert executed_payment.refunded_amount == Decimal("50.00")
+
+
+@pytest.mark.asyncio
+async def test_s001_prospect_cannot_directly_become_onboarding(tenant_a: Tenant):
+    """1. PROSPECT cannot directly become ONBOARDING."""
+    with pytest.raises(AppException) as exc_info:
+        validate_tenant_lifecycle_transition("PROSPECT", "ONBOARDING", tenant_a)
+    assert exc_info.value.code == "INVALID_TENANT_LIFECYCLE_TRANSITION"
+
+
+@pytest.mark.asyncio
+async def test_s001_unpaid_tenant_stops_at_waiting_payment(db_session: AsyncSession, tenant_a: Tenant):
+    """2 & 3. start_onboarding() and advance_to_onboarding() stop unpaid tenants at WAITING_PAYMENT without marking PAID."""
+    from app.tenants.onboarding_service import OnboardingService
+    from app.tenants.lifecycle import ClientLifecycleManager
+
+    onboarding_svc = OnboardingService(db_session)
+    mgr = ClientLifecycleManager(db_session)
+
+    # Ensure tenant is in PROSPECT state
+    tenant_a.lifecycle_state = "PROSPECT"
+    await db_session.commit()
+
+    # Call start_onboarding -> progresses PROSPECT -> LEAD -> QUALIFIED -> PROPOSAL -> WAITING_PAYMENT and pauses!
+    summary = await onboarding_svc.start_onboarding(tenant_a.id)
+    await db_session.refresh(tenant_a)
+
+    assert tenant_a.lifecycle_state == "WAITING_PAYMENT"
+    assert summary.lifecycle_state == "WAITING_PAYMENT"
+
+    # Calling advance_to_onboarding on WAITING_PAYMENT without verified payment keeps tenant in WAITING_PAYMENT
+    res_tenant = await mgr.advance_to_onboarding(tenant_a.id)
+    assert res_tenant.lifecycle_state == "WAITING_PAYMENT"
+
+
+@pytest.mark.asyncio
+async def test_s001_verified_paid_tenant_progresses_to_onboarding(db_session: AsyncSession, tenant_a: Tenant):
+    """4 & 5. A verified-paid WAITING_PAYMENT tenant transitions to PAID, then CLIENT -> ONBOARDING."""
+    from app.tenants.lifecycle import ClientLifecycleManager
+    from app.database.models.billing import Plan, Subscription
+    from app.billing.state_machine import SubscriptionStatus
+
+    mgr = ClientLifecycleManager(db_session)
+
+    # Seed starter plan and active subscription for tenant
+    plan = Plan(
+        name="Starter Plan",
+        code=f"starter_{uuid.uuid4().hex[:6]}",
+        price_monthly=Decimal("100000.00"),
+        price_yearly=Decimal("1000000.00"),
+    )
+    db_session.add(plan)
+    await db_session.flush()
+
+    sub = Subscription(
+        tenant_id=tenant_a.id,
+        plan_id=plan.id,
+        status=SubscriptionStatus.ACTIVE,
+        billing_cycle="MONTHLY",
+        amount=Decimal("100000.00"),
+        started_at=datetime.now(timezone.utc),
+        current_period_start=datetime.now(timezone.utc),
+        current_period_end=datetime.now(timezone.utc),
+        metadata_={"verified_payment": True},
+    )
+    db_session.add(sub)
+
+    # Set tenant state to WAITING_PAYMENT
+    tenant_a.lifecycle_state = "WAITING_PAYMENT"
+    await db_session.commit()
+
+    # Call advance_to_onboarding on verified-paid tenant -> completes WAITING_PAYMENT -> PAID -> CLIENT -> ONBOARDING
+    res_tenant = await mgr.advance_to_onboarding(tenant_a.id)
+    assert res_tenant.lifecycle_state == "ONBOARDING"
+
+
+@pytest.mark.asyncio
+async def test_s001_paid_and_client_tenants_progress_without_replaying(db_session: AsyncSession, tenant_a: Tenant):
+    """5 & 6. Tenants starting from PAID or CLIENT progress forward without replaying earlier states."""
+    from app.tenants.lifecycle import ClientLifecycleManager
+
+    mgr = ClientLifecycleManager(db_session)
+
+    # Starting from PAID -> CLIENT -> ONBOARDING
+    tenant_a.lifecycle_state = "PAID"
+    await db_session.commit()
+
+    res1 = await mgr.advance_to_onboarding(tenant_a.id)
+    assert res1.lifecycle_state == "ONBOARDING"
+
+    # Calling advance_to_onboarding on ONBOARDING tenant returns immediately without state changes
+    res2 = await mgr.advance_to_onboarding(tenant_a.id)
+    assert res2.lifecycle_state == "ONBOARDING"
+
+
+@pytest.mark.asyncio
+async def test_s006_disconnect_integration_validation(db_session: AsyncSession, tenant_a: Tenant):
+    """7. S-006 disconnect_integration validation is enforced immediately before status mutation."""
+    from app.integrations.service import IntegrationService
+    from app.database.models.integrations import Integration, IntegrationConnection
+
+    svc = IntegrationService(db_session)
+
+    integration = Integration(
+        integration_key=f"test_key_{uuid.uuid4().hex[:6]}",
+        provider_key="whatsapp_cloud_api",
+        display_name="Test WhatsApp",
+        category="messaging",
+    )
+    db_session.add(integration)
+    await db_session.flush()
+
+    conn = IntegrationConnection(
+        tenant_id=tenant_a.id,
+        integration_id=integration.id,
+        provider_key="whatsapp_cloud_api",
+        status="ACTIVE",
+    )
+    db_session.add(conn)
+    await db_session.commit()
+
+    # Disconnect active connection -> transitions ACTIVE to DISCONNECTED
+    disc_conn = await svc.disconnect_integration(
+        tenant_id=tenant_a.id,
+        connection_id=conn.id,
+        allow_internal=True,
+    )
+    assert disc_conn.status == "DISCONNECTED"

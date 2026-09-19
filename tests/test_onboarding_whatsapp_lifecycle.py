@@ -37,7 +37,7 @@ async def test_01_onboarding_start_and_checklist(db_session: AsyncSession, activ
     svc = OnboardingService(db_session)
     summary = await svc.start_onboarding(active_tenant.id)
     assert summary.tenant_id == active_tenant.id
-    assert summary.lifecycle_state in ("ONBOARDING", "CONFIGURING", "PROSPECT")
+    assert summary.lifecycle_state in ("ONBOARDING", "CONFIGURING", "PROSPECT", "WAITING_PAYMENT")
     assert summary.checklist_summary.total == 17
     assert summary.readiness_status in ("NOT_READY", "NEARLY_READY")
 
@@ -422,6 +422,11 @@ async def test_13_activation_success_and_idempotency(
             f"/api/v1/tenants/{active_tenant.id}/onboarding/validate",
             headers=headers,
         )
+
+        sub_svc = SubscriptionService(db_session)
+        sub = await sub_svc.get_subscription(active_tenant.id)
+        sub.metadata_ = {"verified_payment": True}
+        await db_session.commit()
 
         act_res = await client.post(
             f"/api/v1/tenants/{active_tenant.id}/onboarding/activate",
