@@ -80,6 +80,111 @@ class ClientLifecycleManager:
         await self.db.refresh(tenant)
         return tenant
 
+    async def advance_to_onboarding(
+        self,
+        tenant_id: uuid.UUID,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> Tenant:
+        """
+        Advances a prospect tenant sequentially through the sales pipeline:
+        PROSPECT -> LEAD -> QUALIFIED -> PROPOSAL -> WAITING_PAYMENT -> PAID -> CLIENT -> ONBOARDING
+        in strict compliance with the frozen S-001 lifecycle matrix.
+        """
+        stmt = select(Tenant).where(Tenant.id == tenant_id)
+        tenant = (await self.db.execute(stmt)).scalar_one_or_none()
+        if not tenant:
+            raise AppException(code="TENANT_NOT_FOUND", message="Tenant not found.", status_code=404)
+
+        current_state = tenant.lifecycle_state or "PROSPECT"
+        if current_state == "ONBOARDING":
+            return tenant
+
+        sequence = [
+            "PROSPECT",
+            "LEAD",
+            "QUALIFIED",
+            "PROPOSAL",
+            "WAITING_PAYMENT",
+            "PAID",
+            "CLIENT",
+            "ONBOARDING",
+        ]
+
+        if current_state in sequence:
+            start_idx = sequence.index(current_state)
+            for i in range(start_idx, len(sequence) - 1):
+                from_state = sequence[i]
+                to_state = sequence[i + 1]
+                tenant = await self.transition_state(
+                    tenant_id=tenant_id,
+                    target_state=to_state,
+                    reason=reason or f"Sequential pipeline step ({from_state} -> {to_state})",
+                    actor=actor,
+                )
+            return tenant
+        else:
+            return await self.transition_state(
+                tenant_id=tenant_id,
+                target_state="ONBOARDING",
+                reason=reason,
+                actor=actor,
+            )
+
+    async def advance_to_ready(
+        self,
+        tenant_id: uuid.UUID,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> Tenant:
+        """
+        Advances an onboarding tenant sequentially through the configuration steps:
+        ONBOARDING -> CONFIGURING -> TESTING -> READY
+        in strict compliance with the frozen S-001 lifecycle matrix.
+        """
+        stmt = select(Tenant).where(Tenant.id == tenant_id)
+        tenant = (await self.db.execute(stmt)).scalar_one_or_none()
+        if not tenant:
+            raise AppException(code="TENANT_NOT_FOUND", message="Tenant not found.", status_code=404)
+
+        current_state = tenant.lifecycle_state or "PROSPECT"
+        if current_state in ("READY", "ACTIVE"):
+            return tenant
+
+        sequence = [
+            "PROSPECT",
+            "LEAD",
+            "QUALIFIED",
+            "PROPOSAL",
+            "WAITING_PAYMENT",
+            "PAID",
+            "CLIENT",
+            "ONBOARDING",
+            "CONFIGURING",
+            "TESTING",
+            "READY",
+        ]
+
+        if current_state in sequence:
+            start_idx = sequence.index(current_state)
+            for i in range(start_idx, len(sequence) - 1):
+                from_state = sequence[i]
+                to_state = sequence[i + 1]
+                tenant = await self.transition_state(
+                    tenant_id=tenant_id,
+                    target_state=to_state,
+                    reason=reason or f"Sequential onboarding step ({from_state} -> {to_state})",
+                    actor=actor,
+                )
+            return tenant
+        else:
+            return await self.transition_state(
+                tenant_id=tenant_id,
+                target_state="READY",
+                reason=reason,
+                actor=actor,
+            )
+
 
 class TenantLifecycleState(str, Enum):
     PROSPECT = "PROSPECT"
