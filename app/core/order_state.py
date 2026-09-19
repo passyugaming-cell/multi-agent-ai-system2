@@ -104,6 +104,23 @@ ALLOWED_ORDER_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
 }
 
 
+VALID_INITIAL_ORDER_STATUSES: Set[str] = {
+    OrderStatus.CART.value,
+    OrderStatus.PENDING_CONFIRMATION.value,
+    OrderStatus.ORDER_CREATED.value,
+}
+
+
+def validate_initial_order_status(initial_status: str) -> None:
+    """Validates that an Order is created only in a canonical initial state."""
+    if initial_status not in VALID_INITIAL_ORDER_STATUSES:
+        logger.warning("Rejected invalid initial order status creation: '%s'", initial_status)
+        raise ValueError(
+            f"INVALID_INITIAL_ORDER_STATUS: Order cannot be created directly in state '{initial_status}'. "
+            f"Valid initial states are {sorted(list(VALID_INITIAL_ORDER_STATUSES))}."
+        )
+
+
 def validate_order_status_transition(current_status: str, target_status: str) -> None:
     """Validates Order state transition according to ACT-111 state machine rules."""
     if current_status == target_status:

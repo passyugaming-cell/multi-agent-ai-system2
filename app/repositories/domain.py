@@ -395,6 +395,11 @@ class OrderRepository(BaseRepository[Order]):
         status: str = "ORDER_CREATED",
     ) -> Order:
         """Creates order with line items, enforcing ACT-104 atomic row-level stock revalidation and deduction inside transaction boundary."""
+        from app.core.order_state import validate_initial_order_status
+
+        # ACT-111: Validate initial order status BEFORE any persistent side effects (stock deduction, order items, order creation)
+        validate_initial_order_status(status)
+
         subtotal = Decimal("0.00")
         order_items = []
 

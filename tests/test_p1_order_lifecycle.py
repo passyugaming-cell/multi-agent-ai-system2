@@ -155,3 +155,95 @@ async def test_04_cross_tenant_order_transition_isolation(db_session: AsyncSessi
     # Assert Tenant B's order status remains completely unchanged in DB
     await db_session.refresh(order_b)
     assert order_b.status == "ORDER_CREATED"
+
+
+@pytest.mark.asyncio
+async def test_05_valid_initial_order_statuses(db_session: AsyncSession, tenant_a: Tenant):
+    """Verifies that Orders can be created only in valid canonical initial states (CART, PENDING_CONFIRMATION, ORDER_CREATED)."""
+    cust_repo = CustomerRepository(db_session)
+    customer, _ = await cust_repo.get_or_create(tenant_id=tenant_a.id, phone="+6281234000111", name="Valid Initial Cust")
+
+    from app.database.models.product import Product
+    prod = Product(tenant_id=tenant_a.id, name="Initial Item", price=10000.00, stock=100, is_active=True)
+    db_session.add(prod)
+    await db_session.commit()
+
+    order_repo = OrderRepository(db_session)
+
+    # 1. CART
+    order_cart = await order_repo.create_order_with_items(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        currency="IDR",
+        items_data=[{"product": prod, "quantity": 1}],
+        status="CART",
+    )
+    await db_session.commit()
+    assert order_cart.status == "CART"
+
+    # 2. PENDING_CONFIRMATION
+    order_pending = await order_repo.create_order_with_items(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        currency="IDR",
+        items_data=[{"product": prod, "quantity": 1}],
+        status="PENDING_CONFIRMATION",
+    )
+    await db_session.commit()
+    assert order_pending.status == "PENDING_CONFIRMATION"
+
+    # 3. ORDER_CREATED (Default)
+    order_created = await order_repo.create_order_with_items(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        currency="IDR",
+        items_data=[{"product": prod, "quantity": 1}],
+        status="ORDER_CREATED",
+    )
+    await db_session.commit()
+    assert order_created.status == "ORDER_CREATED"
+
+
+@pytest.mark.asyncio
+async def test_06_invalid_initial_order_statuses_fail_closed_before_side_effects(db_session: AsyncSession, tenant_a: Tenant):
+    """Verifies that invalid initial order states fail closed BEFORE any stock deduction or Order/OrderItem creation."""
+    cust_repo = CustomerRepository(db_session)
+    customer, _ = await cust_repo.get_or_create(tenant_id=tenant_a.id, phone="+6281234000222", name="Invalid Initial Cust")
+
+    from app.database.models.product import Product
+    from app.database.models.order import Order, OrderItem
+    from sqlalchemy import select, func
+
+    prod = Product(tenant_id=tenant_a.id, name="Stock Guard Item", price=25000.00, stock=10, is_active=True)
+    db_session.add(prod)
+    await db_session.commit()
+
+    initial_stock = prod.stock  # 10
+
+    # Baseline counts in DB
+    orders_before = (await db_session.execute(select(func.count(Order.id)).where(Order.tenant_id == tenant_a.id))).scalar()
+    items_before = (await db_session.execute(select(func.count(OrderItem.id)).where(OrderItem.tenant_id == tenant_a.id))).scalar()
+
+    order_repo = OrderRepository(db_session)
+    invalid_statuses = ["PAID", "PROCESSING", "FULFILLED", "COMPLETED", "CANCELLED", "REFUNDED", "EXPIRED", "RETURNED"]
+
+    for invalid_status in invalid_statuses:
+        with pytest.raises(ValueError) as exc_info:
+            await order_repo.create_order_with_items(
+                tenant_id=tenant_a.id,
+                customer_id=customer.id,
+                currency="IDR",
+                items_data=[{"product": prod, "quantity": 1}],
+                status=invalid_status,
+            )
+        assert "INVALID_INITIAL_ORDER_STATUS" in str(exc_info.value)
+
+    # Verify ZERO stock deduction and ZERO record creation occurred across all invalid attempts
+    await db_session.refresh(prod)
+    assert prod.stock == initial_stock  # Still exactly 10!
+
+    orders_after = (await db_session.execute(select(func.count(Order.id)).where(Order.tenant_id == tenant_a.id))).scalar()
+    items_after = (await db_session.execute(select(func.count(OrderItem.id)).where(OrderItem.tenant_id == tenant_a.id))).scalar()
+
+    assert orders_after == orders_before
+    assert items_after == items_before
