@@ -242,8 +242,8 @@ class WorkflowEngine:
                 return  # Pause execution
 
             if res.is_delayed:
-                validate_workflow_execution_transition(execution.status, "PENDING")
-                execution.status = "PENDING"
+                validate_workflow_execution_transition(execution.status, "WAITING_RETRY")
+                execution.status = "WAITING_RETRY"
                 execution.next_retry_at = now + timedelta(seconds=res.delay_seconds)
                 self._record_history(execution, "DELAY_INITIATED", result={"seconds": res.delay_seconds})
                 return
