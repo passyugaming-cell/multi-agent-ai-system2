@@ -456,12 +456,13 @@ async def test_r2_002_refund_failure_persistence_and_concurrency(test_session_fa
         with pytest.raises(PaymentFailedError):
             await ref_srv.execute_approved_refund(tenant_a.id, app_id)
 
-    # Verify Approval status is persisted as FAILED with error message across a NEW independent session
-    async with test_session_factory() as check_session:
-        stmt = select(Approval).where(Approval.id == app_id)
-        app_db = (await check_session.execute(stmt)).scalar_one()
-        assert app_db.status == "FAILED"
-        assert "Simulated bank timeout" in app_db.meta_data.get("failure_reason", "")
+        # Verify Approval execution_status is persisted as FAILED in metadata across a NEW independent session
+        async with test_session_factory() as check_session:
+            stmt = select(Approval).where(Approval.id == app_id)
+            app_db = (await check_session.execute(stmt)).scalar_one()
+            assert app_db.status in ("APPROVED", "MODIFIED")
+            assert app_db.meta_data.get("execution_status") == "FAILED"
+            assert "Simulated bank timeout" in app_db.meta_data.get("failure_reason", "")
 
         stmt_pmt = select(Payment).where(Payment.id == pmt_id)
         pmt_db = (await check_session.execute(stmt_pmt)).scalar_one()
@@ -529,11 +530,13 @@ async def test_r2_002_concurrent_over_refund_prevention(test_session_factory, te
         assert pmt_check.refunded_amount <= Decimal("100000.00")
         assert pmt_check.status == PaymentStatus.PARTIALLY_REFUNDED
 
-        # Verify winner Approval == EXECUTED and loser Approval == FAILED
+        # Verify winner Approval execution_status == EXECUTED and loser Approval execution_status == FAILED in metadata
         app1_db = (await check_session.execute(select(Approval).where(Approval.id == app1_id))).scalar_one()
         app2_db = (await check_session.execute(select(Approval).where(Approval.id == app2_id))).scalar_one()
-        app_statuses = {app1_db.status, app2_db.status}
-        assert app_statuses == {"EXECUTED", "FAILED"}
+        assert app1_db.status in ("APPROVED", "MODIFIED")
+        assert app2_db.status in ("APPROVED", "MODIFIED")
+        exec_statuses = {app1_db.meta_data.get("execution_status"), app2_db.meta_data.get("execution_status")}
+        assert exec_statuses == {"EXECUTED", "FAILED"}
 
 
 @pytest.mark.asyncio
@@ -592,5 +595,7 @@ async def test_r2_002_concurrent_valid_partial_refunds(test_session_factory, ten
 
         app1_db = (await check_session.execute(select(Approval).where(Approval.id == app1_id))).scalar_one()
         app2_db = (await check_session.execute(select(Approval).where(Approval.id == app2_id))).scalar_one()
-        assert app1_db.status == "EXECUTED"
-        assert app2_db.status == "EXECUTED"
+        assert app1_db.status in ("APPROVED", "MODIFIED")
+        assert app2_db.status in ("APPROVED", "MODIFIED")
+        assert app1_db.meta_data.get("execution_status") == "EXECUTED"
+        assert app2_db.meta_data.get("execution_status") == "EXECUTED"
