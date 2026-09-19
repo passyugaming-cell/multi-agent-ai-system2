@@ -5,7 +5,7 @@ from app.core.approvals.service import ApprovalService
 from app.core.events.schemas import EventSchema
 from app.core.workflows.engine import WorkflowEngine
 from app.database.models.workflow import Approval, WorkflowExecution, WorkflowConfiguration
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, AppException
 from app.core.context import AuthenticatedActor, set_actor_context, reset_actor_context
 
 
@@ -32,7 +32,7 @@ async def test_task_lifecycle_transitions(db_session, tenant_a):
     assert task.completed_at is not None
 
     # Attempt invalid transition from COMPLETED to IN_PROGRESS
-    with pytest.raises(AppError, match="Invalid task status transition"):
+    with pytest.raises((AppError, AppException), match="(Cannot transition task status|Invalid task status transition)"):
         await service.update_status(tenant_a.id, task.id, "IN_PROGRESS")
 
 

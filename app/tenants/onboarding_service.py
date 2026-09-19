@@ -15,6 +15,7 @@ from app.tenants.provisioning.validators import TenantValidatorEngine
 from app.tenants.provisioning.readiness import ReadinessCalculator
 from app.tenants.provisioning.exceptions import ChecklistRequirementError, ReadinessValidationError
 from app.integrations.service import IntegrationService
+from app.integrations.state_machine import validate_integration_connection_transition
 from app.integrations.events import publish_integration_event
 from app.integrations.registry import integration_registry
 from app.integrations.exceptions import PermissionDeniedError, IntegrationError, ConnectionNotFoundError
@@ -57,10 +58,17 @@ class OnboardingService:
         if not tenant:
             raise TenantNotFoundException()
 
-        if tenant.lifecycle_state == "PROSPECT":
-            await self.lifecycle_manager.transition_state(
+        if tenant.lifecycle_state in (
+            "PROSPECT",
+            "LEAD",
+            "QUALIFIED",
+            "PROPOSAL",
+            "WAITING_PAYMENT",
+            "PAID",
+            "CLIENT",
+        ):
+            await self.lifecycle_manager.advance_to_onboarding(
                 tenant_id=tenant_id,
-                target_state="ONBOARDING",
                 reason="Onboarding process started by client",
             )
 
@@ -177,9 +185,8 @@ class OnboardingService:
         tenant = (await self.session.execute(tenant_stmt)).scalar_one_or_none()
 
         if tenant and readiness.readiness_status == "READY":
-            await self.lifecycle_manager.transition_state(
+            await self.lifecycle_manager.advance_to_ready(
                 tenant_id=tenant_id,
-                target_state="READY",
                 reason="Onboarding validation passed minimum readiness score >= 90%",
             )
 
@@ -194,9 +201,8 @@ class OnboardingService:
                 f"and blocking items remain: {summary.blocking_items}"
             )
 
-        await self.lifecycle_manager.transition_state(
+        await self.lifecycle_manager.advance_to_ready(
             tenant_id=tenant_id,
-            target_state="READY",
             reason="Onboarding explicitly completed with readiness score >= 90%",
         )
 
@@ -399,6 +405,7 @@ class OnboardingService:
         )
 
         if is_healthy:
+            validate_integration_connection_transition(connection.status, "ACTIVE")
             connection.status = "ACTIVE"
             connection.last_success_at = utc_now()
             connection.error_message = None
@@ -409,6 +416,7 @@ class OnboardingService:
                 payload={"connection_id": str(connection_id), "status": "ACTIVE"},
             )
         else:
+            validate_integration_connection_transition(connection.status, "ERROR")
             connection.status = "ERROR"
             connection.last_error_at = utc_now()
             connection.error_message = "WhatsApp health check verification failed"
@@ -634,9 +642,8 @@ class OnboardingService:
 
         prev_state = tenant.lifecycle_state
         if prev_state not in ("READY", "SUSPENDED"):
-            await self.lifecycle_manager.transition_state(
+            await self.lifecycle_manager.advance_to_ready(
                 tenant_id=tenant_id,
-                target_state="READY",
                 reason="Pre-activation state transition to READY",
             )
 
