@@ -182,40 +182,19 @@ async def receive_midtrans_webhook(
         return {"status": "PROCESSED", "idempotent": True, "transaction_status": norm_status}
 
     from app.billing.payments import PaymentService
-    pay_service = PaymentService(db)
+    from app.billing.provider import MidtransPaymentProvider
+    midtrans_provider = MidtransPaymentProvider(server_key=server_key)
+    pay_service = PaymentService(db, provider=midtrans_provider)
 
-    from app.database.models.billing import Payment
-    p_stmt = select(Payment).where(Payment.tenant_id == tenant_id, Payment.invoice_id == invoice_id)
-    payment = (await db.execute(p_stmt)).scalars().first()
-
-    if not payment:
-        payment = await pay_service.create_payment_intent(
-            tenant_id=tenant_id,
-            invoice_id=invoice_id,
-            amount=invoice.total,
+    try:
+        payment = await pay_service.handle_provider_webhook(
+            payload=payload,
+            headers=dict(request.headers),
+            secret=server_key,
         )
-
-    if norm_status == "SUCCEEDED" and payment.status != "SUCCEEDED":
-        await pay_service.confirm_payment_success(
-            tenant_id=tenant_id,
-            payment_id=payment.id,
-            provider_payment_id=transaction_id,
-        )
-    elif norm_status == "FAILED" and payment.status != "FAILED":
-        await pay_service.record_payment_failure(
-            tenant_id=tenant_id,
-            payment_id=payment.id,
-            reason=payload.get("status_message") or "Midtrans payment failed",
-        )
-    elif norm_status == "CANCELLED" and payment.status != "CANCELLED":
-        payment.status = "CANCELLED"
-        await db.commit()
-    elif norm_status == "EXPIRED" and payment.status != "EXPIRED":
-        payment.status = "EXPIRED"
-        await db.commit()
-    elif norm_status == "REFUNDED" and payment.status != "REFUNDED":
-        payment.status = "REFUNDED"
-        await db.commit()
+    except Exception as err:
+        logger.warning("Payment webhook processing rejected by PaymentService state authority: %s", err)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Payment processing failed: {err}")
 
     exec_record = IntegrationExecution(
         tenant_id=tenant_id,

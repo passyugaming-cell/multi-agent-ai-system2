@@ -46,10 +46,20 @@ async def test_01_onboarding_start_and_checklist(db_session: AsyncSession, activ
 async def test_02_tenant_isolation_cross_tenant_protection(
     client: AsyncClient, active_tenant: Tenant, tenant_b: Tenant
 ) -> None:
-    res = await client.get(
-        f"/api/v1/tenants/{tenant_b.id}/onboarding",
-        headers=AUTH_HEADERS(active_tenant.id),
+    actor = AuthenticatedActor(
+        user_id=uuid.uuid4(),
+        tenant_id=active_tenant.id,
+        role="owner",
+        permissions={"business.read", "business.write"},
     )
+    token = set_actor_context(actor)
+    try:
+        res = await client.get(
+            f"/api/v1/tenants/{tenant_b.id}/onboarding",
+            headers=AUTH_HEADERS(active_tenant.id),
+        )
+    finally:
+        reset_actor_context(token)
     assert res.status_code == 403
     assert res.json()["error"]["code"] == "FORBIDDEN_CROSS_TENANT_ACCESS"
 
@@ -144,7 +154,7 @@ async def test_07_whatsapp_connect_exceed_limit_denied(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token = set_actor_context(actor)
     try:
@@ -178,7 +188,7 @@ async def test_08_whatsapp_reconnect_reuses_same_connection_id(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token = set_actor_context(actor)
     try:
@@ -216,7 +226,7 @@ async def test_09_whatsapp_reconnect_cross_tenant_denied(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token_a = set_actor_context(actor_a)
     try:
@@ -260,7 +270,7 @@ async def test_10_whatsapp_disconnect_and_repeated_disconnect(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token = set_actor_context(actor)
     try:
@@ -299,7 +309,7 @@ async def test_11_ai_test_gate(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token = set_actor_context(actor)
     try:
@@ -336,7 +346,7 @@ async def test_12_activation_blocked_when_requirements_missing(
         user_id=uuid.uuid4(),
         tenant_id=active_tenant.id,
         role="owner",
-        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS"},
+        permissions={"MANAGE_INTEGRATIONS", "MANAGE_CREDENTIALS", "VIEW_INTEGRATIONS", "business.read", "business.write"},
     )
     token = set_actor_context(actor)
     try:

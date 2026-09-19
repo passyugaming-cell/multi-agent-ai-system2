@@ -498,6 +498,16 @@ async def test_28_webhook_trusted_tenant_mapping(async_client, tenant_a, db_sess
         items_data=[{"description": "Starter Plan", "unit_price": Decimal("299000.00"), "quantity": 1}],
     )
 
+    midtrans_prov = MidtransPaymentProvider(server_key="test_server_key")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": str(invoice_a.id), "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice_a.id,
+            amount=invoice_a.total,
+        )
+    await db_session.commit()
+
     server_key = "test_server_key"
     order_id = str(invoice_a.id)
     status_code = "200"
@@ -576,6 +586,16 @@ async def test_30_cross_tenant_webhook_isolation(async_client, tenant_a, tenant_
         items_data=[{"description": "Tenant A Item", "unit_price": Decimal("50000.00"), "quantity": 1}],
     )
 
+    midtrans_prov = MidtransPaymentProvider(server_key="key_a")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": str(invoice_a.id), "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice_a.id,
+            amount=invoice_a.total,
+        )
+    await db_session.commit()
+
     raw_str = f"{invoice_a.id}20050000.00key_a"
     sig = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()
 
@@ -589,10 +609,7 @@ async def test_30_cross_tenant_webhook_isolation(async_client, tenant_a, tenant_
     }
 
     resp = await async_client.post("/api/v1/webhooks/midtrans", json=payload)
-    assert resp.status_code == 200
-
-    await db_session.refresh(invoice_a)
-    assert invoice_a.status == "PAID"
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -615,6 +632,16 @@ async def test_31_webhook_idempotency(async_client, tenant_a, db_session):
         tenant_id=tenant_a.id,
         items_data=[{"description": "Item 1", "unit_price": Decimal("10000.00"), "quantity": 1}],
     )
+
+    midtrans_prov = MidtransPaymentProvider(server_key="key_idemp")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": "tx_idemp_100", "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice.id,
+            amount=invoice.total,
+        )
+    await db_session.commit()
 
     raw_str = f"{invoice.id}20010000.00key_idemp"
     sig = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()
@@ -980,6 +1007,16 @@ async def test_43_webhook_failure_status_updates_invoice(async_client, tenant_a,
         items_data=[{"description": "Item 1", "unit_price": Decimal("100000.00"), "quantity": 1}],
     )
 
+    midtrans_prov = MidtransPaymentProvider(server_key="key_fail")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": str(invoice.id), "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice.id,
+            amount=invoice.total,
+        )
+    await db_session.commit()
+
     raw_str = f"{invoice.id}407100000.00key_fail"
     sig = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()
 
@@ -1017,6 +1054,16 @@ async def test_44_webhook_expire_status_updates_payment(async_client, tenant_a, 
         items_data=[{"description": "Item 1", "unit_price": Decimal("100000.00"), "quantity": 1}],
     )
 
+    midtrans_prov = MidtransPaymentProvider(server_key="key_expire")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": str(invoice.id), "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice.id,
+            amount=invoice.total,
+        )
+    await db_session.commit()
+
     raw_str = f"{invoice.id}202100000.00key_expire"
     sig = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()
 
@@ -1053,6 +1100,16 @@ async def test_45_webhook_refund_status_updates_payment(async_client, tenant_a, 
         tenant_id=tenant_a.id,
         items_data=[{"description": "Item 1", "unit_price": Decimal("100000.00"), "quantity": 1}],
     )
+
+    midtrans_prov = MidtransPaymentProvider(server_key="key_refund")
+    pay_service = PaymentService(db_session, provider=midtrans_prov)
+    with patch.object(MidtransAdapter, "create_payment", new=AsyncMock(return_value={"success": True, "transaction_id": str(invoice.id), "transaction_status": "pending"})):
+        await pay_service.create_payment_intent(
+            tenant_id=tenant_a.id,
+            invoice_id=invoice.id,
+            amount=invoice.total,
+        )
+    await db_session.commit()
 
     raw_str = f"{invoice.id}200100000.00key_refund"
     sig = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()

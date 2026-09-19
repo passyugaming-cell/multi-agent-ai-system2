@@ -168,7 +168,8 @@ class MidtransPaymentProvider(PaymentProvider):
         amount = Decimal(str(payload.get("gross_amount", "0.00")))
         norm_status = self.adapter.normalize_notification(payload)
 
-        tenant_id = uuid.UUID(payload.get("tenant_id")) if "tenant_id" in payload else uuid.UUID(int=0)
+        tenant_id_str = payload.get("tenant_id")
+        tenant_id = uuid.UUID(tenant_id_str) if tenant_id_str else None
         invoice_id = uuid.UUID(order_id) if order_id else uuid.UUID(int=0)
 
         currency = str(payload.get("currency", "IDR"))
@@ -245,10 +246,12 @@ class FakePaymentProvider(PaymentProvider):
 
         event_type = payload.get("event", "payment.succeeded")
         payment_id = payload.get("provider_payment_id") or f"pay_fake_{uuid.uuid4().hex[:8]}"
-        amount = Decimal(str(payload.get("amount", "0.00")))
-        tenant_id = uuid.UUID(payload["tenant_id"])
-        invoice_id = uuid.UUID(payload["invoice_id"])
-        status = payload.get("status", "SUCCEEDED")
+        amount = Decimal(str(payload.get("gross_amount") or payload.get("amount") or "0.00"))
+        tenant_id_str = payload.get("tenant_id")
+        tenant_id = uuid.UUID(tenant_id_str) if tenant_id_str else None
+        invoice_id_str = payload.get("invoice_id") or payload.get("order_id")
+        invoice_id = uuid.UUID(invoice_id_str) if invoice_id_str else None
+        status = payload.get("status") or ("SUCCEEDED" if payload.get("transaction_status") in ("settlement", "capture") else "PENDING")
 
         currency = str(payload.get("currency", "IDR"))
         return WebhookResult(

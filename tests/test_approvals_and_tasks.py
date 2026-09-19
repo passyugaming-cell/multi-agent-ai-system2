@@ -40,6 +40,18 @@ async def test_task_lifecycle_transitions(db_session, tenant_a):
 async def test_approval_workflow_pause_and_resume(db_session, tenant_a):
     tenant_uuid = tenant_a.id
 
+    from decimal import Decimal
+    from app.database.models import Product
+    product = Product(
+        tenant_id=tenant_uuid,
+        name="Test Product 123",
+        sku="product_123",
+        price=Decimal("200.00"),
+        stock=10,
+    )
+    db_session.add(product)
+    await db_session.flush()
+
     # Create high risk workflow
     wf = WorkflowConfiguration(
         tenant_id=tenant_uuid,

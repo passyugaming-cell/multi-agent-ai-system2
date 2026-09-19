@@ -239,23 +239,29 @@ class PaymentService:
         webhook_res: WebhookResult = await self.provider.handle_webhook(payload, headers, secret)
 
         # R2-002-P0-006: Unmatched Webhook Policy
-        # Verify that referenced invoice exists and belongs to the specified tenant.
-        # Catch ONLY InvoiceNotFoundError so DB/connection errors propagate directly as infrastructure failures.
         from app.billing.exceptions import InvoiceNotFoundError
-        try:
-            invoice = await self.invoice_service.get_invoice(
-                tenant_id=webhook_res.tenant_id,
-                invoice_id=webhook_res.invoice_id,
-            )
-        except InvoiceNotFoundError as err:
-            raise PaymentFailedError(
-                f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found for tenant '{webhook_res.tenant_id}'."
-            ) from err
+        from app.database.models.billing import Invoice
 
-        if invoice.tenant_id != webhook_res.tenant_id:
-            raise PaymentFailedError(
-                f"Unmatched webhook rejected: invoice tenant '{invoice.tenant_id}' mismatch with webhook tenant '{webhook_res.tenant_id}'."
-            )
+        invoice = None
+        if webhook_res.tenant_id:
+            try:
+                invoice = await self.invoice_service.get_invoice(
+                    tenant_id=webhook_res.tenant_id,
+                    invoice_id=webhook_res.invoice_id,
+                )
+            except InvoiceNotFoundError as err:
+                raise PaymentFailedError(
+                    f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found for tenant '{webhook_res.tenant_id}'."
+                ) from err
+        else:
+            stmt_inv = select(Invoice).where(Invoice.id == webhook_res.invoice_id)
+            invoice = (await self.session.execute(stmt_inv)).scalar_one_or_none()
+            if not invoice:
+                raise PaymentFailedError(
+                    f"Unmatched webhook rejected: invoice '{webhook_res.invoice_id}' not found."
+                )
+
+        target_tenant_id = invoice.tenant_id
 
         # R2-002 FOLLOW-UP: Verify webhook amount AND currency match authoritative invoice total and currency
         if webhook_res.amount != invoice.total:
@@ -273,7 +279,7 @@ class PaymentService:
         # DO NOT blindly create a Payment if no internal intent exists!
         stmt = select(Payment).where(
             and_(
-                Payment.tenant_id == webhook_res.tenant_id,
+                Payment.tenant_id == target_tenant_id,
                 Payment.provider == provider_name,
                 Payment.provider_payment_id == webhook_res.provider_payment_id,
             )
@@ -284,7 +290,7 @@ class PaymentService:
             # Attempt to find payment by invoice_id if provider_payment_id was not populated during creation
             stmt_inv = select(Payment).where(
                 and_(
-                    Payment.tenant_id == webhook_res.tenant_id,
+                    Payment.tenant_id == target_tenant_id,
                     Payment.invoice_id == webhook_res.invoice_id,
                     Payment.status == PaymentStatus.PENDING,
                 )
@@ -300,13 +306,13 @@ class PaymentService:
         # Single State Authority route
         if webhook_res.status == "SUCCEEDED" or webhook_res.event_type == "payment.succeeded":
             return await self.confirm_payment_success(
-                tenant_id=webhook_res.tenant_id,
+                tenant_id=target_tenant_id,
                 payment_id=payment.id,
                 provider_payment_id=webhook_res.provider_payment_id,
             )
         elif webhook_res.status == "FAILED" or webhook_res.event_type == "payment.failed":
             return await self.record_payment_failure(
-                tenant_id=webhook_res.tenant_id,
+                tenant_id=target_tenant_id,
                 payment_id=payment.id,
                 reason="Failed via provider webhook",
             )

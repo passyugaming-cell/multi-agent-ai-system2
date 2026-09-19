@@ -25,7 +25,7 @@ class Order(BaseModel):
         nullable=False,
         index=True,
     )
-    status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="ORDER_CREATED", nullable=False)
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="IDR", nullable=False)

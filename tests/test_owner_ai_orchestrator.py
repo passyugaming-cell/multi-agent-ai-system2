@@ -31,7 +31,7 @@ async def test_owner_ai_agent_and_orchestrator(db_session: AsyncSession):
         objective="Kenapa performa bisnis bulan ini menurun dan apa yang harus saya lakukan?",
     )
 
-    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}))
+    token = set_actor_context(AuthenticatedActor(user_id=uuid.uuid4(), tenant_id=tenant.id, role="owner", permissions={"business.read", "product.read", "knowledge.read"}, is_platform_owner=True))
     try:
         res = await owner_agent.run(req, db_session)
     finally:

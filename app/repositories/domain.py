@@ -368,6 +368,22 @@ class OrderRepository(BaseRepository[Order]):
     ) -> Order | None:
         return await self.get_by_id(tenant_id, order_id)
 
+    async def transition_status(
+        self, tenant_id: uuid.UUID, order_id: uuid.UUID, target_status: str
+    ) -> Order:
+        from app.core.order_state import validate_order_status_transition
+
+        stmt = select(Order).where(Order.tenant_id == tenant_id, Order.id == order_id).with_for_update()
+        result = await self.session.execute(stmt)
+        order = result.scalar_one_or_none()
+        if not order:
+            raise ValueError(f"Order {order_id} not found for tenant {tenant_id}")
+
+        validate_order_status_transition(order.status, target_status)
+        order.status = target_status
+        await self.session.flush()
+        return order
+
     async def create_order_with_items(
         self,
         tenant_id: uuid.UUID,
@@ -376,8 +392,14 @@ class OrderRepository(BaseRepository[Order]):
         items_data: list[dict],
         metadata: dict | None = None,
         deduct_stock: bool = True,
+        status: str = "ORDER_CREATED",
     ) -> Order:
         """Creates order with line items, enforcing ACT-104 atomic row-level stock revalidation and deduction inside transaction boundary."""
+        from app.core.order_state import validate_initial_order_status
+
+        # ACT-111: Validate initial order status BEFORE any persistent side effects (stock deduction, order items, order creation)
+        validate_initial_order_status(status)
+
         subtotal = Decimal("0.00")
         order_items = []
 
@@ -433,7 +455,7 @@ class OrderRepository(BaseRepository[Order]):
         order = Order(
             tenant_id=tenant_id,
             customer_id=customer_id,
-            status="PENDING",
+            status=status,
             subtotal=subtotal,
             total=total,
             currency=currency,
