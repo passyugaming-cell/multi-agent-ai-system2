@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models.tenant import Tenant
 from app.database.models.billing import Subscription
+from app.database.models.audit import ProvisioningAudit
 from app.billing.subscription import SubscriptionService
 from app.core.context import get_actor_context
 
@@ -36,13 +37,17 @@ class ClientLifecycleManager:
         current_state = tenant.lifecycle_state or "PROSPECT"
         active_actor = get_actor_context()
 
-        # Resolve subscription & readiness score context for activation gate
-        from app.tenants.onboarding_service import OnboardingService
-        onboarding_service = OnboardingService(self.db)
+        # Resolve subscription & readiness score context ONLY when target_state is ACTIVE
+        subscription = None
+        readiness_score = None
 
-        subscription = await self.subscription_service.get_subscription_or_none(tenant_id)
-        readiness_summary = await onboarding_service.get_onboarding_summary(tenant_id)
-        readiness_score = readiness_summary.readiness
+        if target_state == "ACTIVE" or target_state == TenantLifecycleState.ACTIVE.value:
+            from app.tenants.onboarding_service import OnboardingService
+            onboarding_service = OnboardingService(self.db)
+
+            subscription = await self.subscription_service.get_subscription_or_none(tenant_id)
+            readiness_summary = await onboarding_service.get_onboarding_summary(tenant_id)
+            readiness_score = readiness_summary.readiness
 
         validate_tenant_lifecycle_transition(
             current_state=current_state,
@@ -58,6 +63,18 @@ class ClientLifecycleManager:
         tenant.lifecycle_state = target_state
         tenant.state_transition_at = now
         tenant.transition_reason = reason or f"Transitioned by {actor or 'system'}"
+
+        # Record audit evidence for tenant lifecycle transition
+        audit = ProvisioningAudit(
+            tenant_id=tenant_id,
+            action="tenant.lifecycle_transition",
+            previous_state=current_state,
+            new_state=target_state,
+            actor=actor or (str(active_actor.user_id) if active_actor and active_actor.user_id else "system"),
+            reason=tenant.transition_reason,
+            result="SUCCESS",
+        )
+        self.db.add(audit)
 
         await self.db.commit()
         await self.db.refresh(tenant)

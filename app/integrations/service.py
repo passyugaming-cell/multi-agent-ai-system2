@@ -227,16 +227,21 @@ class IntegrationService:
                 session=self.session,
             )
             if connected:
+                self._validate_transition(connection.status, "CONNECTED")
+                connection.status = "CONNECTED"
+                self._validate_transition(connection.status, "ACTIVE")
                 connection.status = "ACTIVE"
                 connection.last_connected_at = now
                 connection.last_success_at = now
                 connection.error_message = None
             else:
+                self._validate_transition(connection.status, "ERROR")
                 connection.status = "ERROR"
                 connection.last_error_at = now
                 connection.error_message = "Adapter connect returned False"
         except Exception as e:
             logger.error("Adapter connect failed for tenant %s integration %s: %s", tenant_id, integration_key, e)
+            self._validate_transition(connection.status, "ERROR")
             connection.status = "ERROR"
             connection.last_error_at = now
             connection.error_message = redact_secrets(str(e))
