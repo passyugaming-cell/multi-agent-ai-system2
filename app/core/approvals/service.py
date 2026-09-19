@@ -5,6 +5,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.workflow import Approval, WorkflowExecution, WorkflowConfiguration
+from app.core.workflow_state import validate_workflow_execution_transition
 from app.core.workflows.engine import WorkflowEngine
 from app.core.workflows.actions import ActionExecutor, get_action_risk_level, RiskLevel
 from app.core.exceptions import AppError
@@ -132,6 +133,7 @@ class ApprovalService:
             exec_stmt = select(WorkflowExecution).where(WorkflowExecution.id == approval.workflow_execution_id)
             execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
             if execution:
+                validate_workflow_execution_transition(execution.status, "CANCELLED")
                 execution.status = "CANCELLED"
                 execution.error = f"Protected action {approval.action_type} approval cancelled by {approval.decided_by}"
 
@@ -226,6 +228,7 @@ class ApprovalService:
             exec_stmt = select(WorkflowExecution).where(WorkflowExecution.id == approval.workflow_execution_id)
             execution = (await self.session.execute(exec_stmt)).scalar_one_or_none()
             if execution:
+                validate_workflow_execution_transition(execution.status, "CANCELLED")
                 execution.status = "CANCELLED"
                 execution.error = f"Protected action {approval.action_type} rejected by {approval.decided_by}: {approval.decision_reason}"
 
@@ -336,11 +339,13 @@ class ApprovalService:
             if res.success and not res.requires_approval:
                 execution.context.update(res.output)
                 execution.current_step += 1
+                validate_workflow_execution_transition(execution.status, "RUNNING")
                 execution.status = "RUNNING"
 
                 # Resume engine loop for subsequent steps
                 engine = WorkflowEngine(self.session)
                 await engine.run_execution_pipeline(execution, wf)
             else:
+                validate_workflow_execution_transition(execution.status, "FAILED")
                 execution.status = "FAILED"
                 execution.error = res.error

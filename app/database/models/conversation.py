@@ -1,6 +1,7 @@
 import uuid
+from typing import Any
 from sqlalchemy import String, Text, Boolean, ForeignKey, Index, UniqueConstraint, text as sa_text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import BaseModel
@@ -34,6 +35,7 @@ class Conversation(BaseModel):
     human_handoff: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_conversations_tenant_id"),

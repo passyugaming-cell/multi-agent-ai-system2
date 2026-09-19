@@ -92,13 +92,14 @@ class RefundService:
         if not approval:
             raise BillingError(f"Refund approval request '{approval_id}' not found.")
 
-        if approval.status == "EXECUTED":
+        exec_status = (approval.meta_data or {}).get("execution_status")
+        if exec_status == "EXECUTED":
             # Idempotent return if already executed
             payment_id = uuid.UUID(approval.meta_data["payment_id"])
             return await self.payment_service.get_payment(tenant_id, payment_id)
 
-        if approval.status != "APPROVED":
-            raise BillingError(f"Refund approval request is in status '{approval.status}', expected APPROVED.")
+        if approval.status not in ("APPROVED", "MODIFIED"):
+            raise BillingError(f"Refund approval request is in status '{approval.status}', expected APPROVED or MODIFIED.")
 
         payment_id = uuid.UUID(approval.meta_data["payment_id"])
         refund_amount = Decimal(str(approval.meta_data["amount"]))
@@ -116,8 +117,10 @@ class RefundService:
         remaining_refundable = payment.amount - current_refunded
 
         if refund_amount > remaining_refundable:
-            approval.status = "FAILED"
-            approval.meta_data = dict(approval.meta_data or {}, failure_reason="Refund amount exceeds remaining refundable amount.")
+            meta = dict(approval.meta_data or {})
+            meta["execution_status"] = "FAILED"
+            meta["failure_reason"] = "Refund amount exceeds remaining refundable amount."
+            approval.meta_data = meta
             await self.session.commit()
             raise BillingError(
                 f"Refund amount ({refund_amount}) exceeds remaining refundable amount ({remaining_refundable})."
@@ -136,8 +139,10 @@ class RefundService:
         )
 
         if not res.success:
-            approval.status = "FAILED"
-            approval.meta_data = dict(approval.meta_data or {}, failure_reason=res.error_message or "Provider refund failed.")
+            meta = dict(approval.meta_data or {})
+            meta["execution_status"] = "FAILED"
+            meta["failure_reason"] = res.error_message or "Provider refund failed."
+            approval.meta_data = meta
             await self.session.commit()
             await publish_billing_event(
                 event_type="refund.failed",
@@ -152,7 +157,9 @@ class RefundService:
             raise PaymentFailedError(res.error_message or "Provider refund failed.")
 
         # Atomic state updates on provider success
-        approval.status = "EXECUTED"
+        meta = dict(approval.meta_data or {})
+        meta["execution_status"] = "EXECUTED"
+        approval.meta_data = meta
         payment.refunded_amount = new_total_refunded
         payment.status = target_status
 
