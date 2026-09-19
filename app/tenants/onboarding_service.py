@@ -178,9 +178,8 @@ class OnboardingService:
         tenant = (await self.session.execute(tenant_stmt)).scalar_one_or_none()
 
         if tenant and readiness.readiness_status == "READY":
-            await self.lifecycle_manager.transition_state(
+            await self.lifecycle_manager.advance_to_ready(
                 tenant_id=tenant_id,
-                target_state="READY",
                 reason="Onboarding validation passed minimum readiness score >= 90%",
             )
 
@@ -195,9 +194,8 @@ class OnboardingService:
                 f"and blocking items remain: {summary.blocking_items}"
             )
 
-        await self.lifecycle_manager.transition_state(
+        await self.lifecycle_manager.advance_to_ready(
             tenant_id=tenant_id,
-            target_state="READY",
             reason="Onboarding explicitly completed with readiness score >= 90%",
         )
 
@@ -637,9 +635,8 @@ class OnboardingService:
 
         prev_state = tenant.lifecycle_state
         if prev_state not in ("READY", "SUSPENDED"):
-            await self.lifecycle_manager.transition_state(
+            await self.lifecycle_manager.advance_to_ready(
                 tenant_id=tenant_id,
-                target_state="READY",
                 reason="Pre-activation state transition to READY",
             )
 
