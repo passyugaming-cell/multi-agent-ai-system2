@@ -38,19 +38,16 @@ class InvalidOrderStateTransitionError(AppException):
 ALLOWED_ORDER_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     OrderStatus.CART: {
         OrderStatus.PENDING_CONFIRMATION,
-        OrderStatus.ORDER_CREATED,
         OrderStatus.CANCELLED,
         OrderStatus.EXPIRED,
     },
     OrderStatus.PENDING_CONFIRMATION: {
         OrderStatus.ORDER_CREATED,
-        OrderStatus.PAYMENT_PENDING,
         OrderStatus.CANCELLED,
         OrderStatus.EXPIRED,
     },
     OrderStatus.ORDER_CREATED: {
         OrderStatus.PAYMENT_PENDING,
-        OrderStatus.PAID,
         OrderStatus.CANCELLED,
         OrderStatus.EXPIRED,
     },
@@ -62,14 +59,12 @@ ALLOWED_ORDER_TRANSITIONS: dict[OrderStatus, Set[OrderStatus]] = {
     },
     OrderStatus.PAID: {
         OrderStatus.PROCESSING,
-        OrderStatus.FULFILLED,
         OrderStatus.REFUND_PENDING,
         OrderStatus.REFUNDED,
         OrderStatus.CANCELLED,
     },
     OrderStatus.PROCESSING: {
         OrderStatus.FULFILLED,
-        OrderStatus.COMPLETED,
         OrderStatus.REFUND_PENDING,
         OrderStatus.CANCELLED,
     },
