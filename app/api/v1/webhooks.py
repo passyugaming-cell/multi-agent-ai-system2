@@ -474,11 +474,23 @@ async def _process_whatsapp_webhook_body(
                     sender_phone = un_msg.metadata.get("sender_phone")
                     sender_name = un_msg.metadata.get("sender_name") or "WhatsApp Customer"
 
+                    # D-006-02 Anonymous / Guest Identity Resolution:
+                    # NEVER use a shared hardcoded phone string ("628000000000").
+                    # If sender_phone is present, phone = sender_phone, external_id = sender_phone.
+                    # If sender_phone is missing/empty, phone = None, and external_id = unique synthetic guest identity.
+                    if sender_phone and str(sender_phone).strip():
+                        cust_phone = str(sender_phone).strip()
+                        cust_ext_id = cust_phone
+                    else:
+                        cust_phone = None
+                        anon_seed = un_msg.external_message_id or uuid.uuid4().hex[:12]
+                        cust_ext_id = f"anon_wa_{anon_seed}"
+
                     customer, customer_created = await cust_repo.get_or_create(
                         tenant_id=tenant_id,
-                        phone=sender_phone or "628000000000",
+                        phone=cust_phone,
                         name=sender_name,
-                        external_id=sender_phone,
+                        external_id=cust_ext_id,
                     )
                     if customer_created:
                         await publish_integration_event(

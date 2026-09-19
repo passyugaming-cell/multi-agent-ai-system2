@@ -181,11 +181,13 @@ class CustomerRepository(BaseRepository[Customer]):
         return result.scalars().first()
 
     async def get_by_external_id(self, tenant_id: uuid.UUID, external_id: str) -> Customer | None:
-        stmt = select(Customer).where(
-            Customer.tenant_id == tenant_id, Customer.external_id == external_id
+        stmt = (
+            select(Customer)
+            .where(Customer.tenant_id == tenant_id, Customer.external_id == external_id)
+            .execution_options(populate_existing=True)
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def get_or_create(
         self,
@@ -201,16 +203,33 @@ class CustomerRepository(BaseRepository[Customer]):
             except PhoneNormalizationError:
                 norm_phone = phone
 
+        existing_by_phone = None
         if norm_phone:
-            existing = await self.get_by_phone(tenant_id, norm_phone)
-            if existing:
-                return existing, False
+            existing_by_phone = await self.get_by_phone(tenant_id, norm_phone)
+
+        existing_by_ext = None
+        if external_id:
+            existing_by_ext = await self.get_by_external_id(tenant_id, external_id)
+
+        # D-006-04 Phone vs External_ID Conflict Detection:
+        # If phone points to Customer A and external_id points to Customer B (and A != B), raise error
+        if existing_by_phone and existing_by_ext and existing_by_phone.id != existing_by_ext.id:
+            raise ValueError(
+                f"IDENTITY_CONFLICT: Phone '{norm_phone}' maps to customer {existing_by_phone.id}, "
+                f"but external_id '{external_id}' maps to customer {existing_by_ext.id}"
+            )
+
+        if existing_by_phone:
+            return existing_by_phone, False
+
+        if existing_by_ext:
+            return existing_by_ext, False
 
         try:
             async with self.session.begin_nested():
                 customer = Customer(
                     tenant_id=tenant_id,
-                    name=name,
+                    name=name or "Customer",
                     phone=norm_phone or phone,
                     external_id=external_id or norm_phone or phone,
                 )
@@ -222,6 +241,10 @@ class CustomerRepository(BaseRepository[Customer]):
                 self.session.expunge(customer)
             if norm_phone:
                 existing = await self.get_by_phone(tenant_id, norm_phone)
+                if existing:
+                    return existing, False
+            if external_id:
+                existing = await self.get_by_external_id(tenant_id, external_id)
                 if existing:
                     return existing, False
             raise
@@ -253,7 +276,7 @@ class ConversationRepository(BaseRepository[Conversation]):
                 Conversation.tenant_id == tenant_id,
                 Conversation.customer_id == customer_id,
                 Conversation.channel == channel,
-                Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING"]),
+                Conversation.status.in_(["OPEN", "PENDING", "WAITING_HUMAN", "HUMAN_HANDLING", "HUMAN_ACTIVE"]),
             )
             .order_by(Conversation.created_at.desc())
             .execution_options(populate_existing=True)
