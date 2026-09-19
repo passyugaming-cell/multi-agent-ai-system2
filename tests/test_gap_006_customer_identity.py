@@ -2,11 +2,14 @@
 GAP-006 Customer Identity Repair Verification Tests.
 
 These tests verify deterministic customer identity resolution, phone vs external_id
-conflict detection, anonymous sender isolation, conversation active state alignment,
-and cross-tenant order ownership boundaries.
+conflict detection, duplicate external_id ambiguity handling, phoneless webhook sender
+rejection, conversation active state alignment, cart ownership, and cross-tenant isolation.
 """
 
 import uuid
+import hmac
+import hashlib
+import json
 import pytest
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +19,11 @@ from app.database.models.user import User
 from app.database.models.customer import Customer
 from app.database.models.conversation import Conversation
 from app.database.models.product import Product
+from app.database.models.order import Order
 from app.database.models.integrations import Integration, IntegrationConnection, IntegrationCredential
+from app.integrations.service import IntegrationService
+from app.billing.plans import PlanService
+from app.billing.subscription import SubscriptionService
 from app.repositories.domain import (
     CustomerRepository,
     ConversationRepository,
@@ -31,7 +38,6 @@ async def test_phone_vs_external_id_conflict_detection(db_session: AsyncSession,
     """D-006-04: Phone -> Customer A and External_ID -> Customer B raises explicit IDENTITY_CONFLICT error."""
     cust_repo = CustomerRepository(db_session)
 
-    # 1. Create Customer A with phone_a and ext_id_a
     cust_a, _ = await cust_repo.get_or_create(
         tenant_id=tenant_a.id,
         phone="+628111000111",
@@ -40,7 +46,6 @@ async def test_phone_vs_external_id_conflict_detection(db_session: AsyncSession,
     )
     await db_session.commit()
 
-    # 2. Create Customer B with phone_b and ext_id_b
     cust_b, _ = await cust_repo.get_or_create(
         tenant_id=tenant_a.id,
         phone="+628111000222",
@@ -51,7 +56,6 @@ async def test_phone_vs_external_id_conflict_detection(db_session: AsyncSession,
 
     assert cust_a.id != cust_b.id
 
-    # 3. Attempt get_or_create with phone_a (+628111000111) AND ext_id_b ("EXT-B")
     with pytest.raises(ValueError, match="IDENTITY_CONFLICT"):
         await cust_repo.get_or_create(
             tenant_id=tenant_a.id,
@@ -61,83 +65,8 @@ async def test_phone_vs_external_id_conflict_detection(db_session: AsyncSession,
 
 
 @pytest.mark.asyncio
-async def test_anonymous_webhook_sender_isolation(async_client, db_session, tenant_a):
-    """D-006-02: Anonymous/phone-less senders are assigned unique synthetic IDs and do NOT share hardcoded phone '628000000000'."""
-    cust_repo = CustomerRepository(db_session)
-
-    # 1. Create customer with phone = None, external_id = "anon_wa_msg_1"
-    cust_1, created_1 = await cust_repo.get_or_create(
-        tenant_id=tenant_a.id,
-        phone=None,
-        name="Anonymous Customer 1",
-        external_id="anon_wa_msg_1",
-    )
-    await db_session.commit()
-
-    # 2. Create customer with phone = None, external_id = "anon_wa_msg_2"
-    cust_2, created_2 = await cust_repo.get_or_create(
-        tenant_id=tenant_a.id,
-        phone=None,
-        name="Anonymous Customer 2",
-        external_id="anon_wa_msg_2",
-    )
-    await db_session.commit()
-
-    assert created_1 is True
-    assert created_2 is True
-    assert cust_1.id != cust_2.id
-    assert cust_1.phone is None
-    assert cust_2.phone is None
-    assert cust_1.external_id == "anon_wa_msg_1"
-    assert cust_2.external_id == "anon_wa_msg_2"
-
-
-@pytest.mark.asyncio
-async def test_conversation_active_status_alignment(db_session: AsyncSession, tenant_a):
-    """Finding D / Conversation active status alignment: HUMAN_ACTIVE status is recognized as active."""
-    cust_repo = CustomerRepository(db_session)
-    conv_repo = ConversationRepository(db_session)
-
-    customer, _ = await cust_repo.get_or_create(
-        tenant_id=tenant_a.id,
-        phone="+6281234999",
-        name="Active Conv Customer",
-    )
-    await db_session.commit()
-
-    # Create conversation with status = "HUMAN_ACTIVE"
-    conv = Conversation(
-        tenant_id=tenant_a.id,
-        customer_id=customer.id,
-        channel="whatsapp",
-        status="HUMAN_ACTIVE",
-    )
-    db_session.add(conv)
-    await db_session.commit()
-
-    # get_active_by_customer must successfully find this active conversation
-    active_conv = await conv_repo.get_active_by_customer(
-        tenant_id=tenant_a.id,
-        customer_id=customer.id,
-        channel="whatsapp",
-    )
-    assert active_conv is not None
-    assert active_conv.id == conv.id
-    assert active_conv.status == "HUMAN_ACTIVE"
-
-    # get_or_create_active must return existing conv instead of attempting duplicate creation
-    conv_existing, created = await conv_repo.get_or_create_active(
-        tenant_id=tenant_a.id,
-        customer_id=customer.id,
-        channel="whatsapp",
-    )
-    assert created is False
-    assert conv_existing.id == conv.id
-
-
-@pytest.mark.asyncio
-async def test_get_by_external_id_non_crashing_first(db_session: AsyncSession, tenant_a):
-    """Finding B / D-006-01: get_by_external_id safely returns scalar without throwing 500 MultipleResultsFound."""
+async def test_duplicate_external_id_controlled_ambiguity_conflict(db_session: AsyncSession, tenant_a):
+    """Points 5 & 6: get_by_external_id raises AMBIGUOUS_EXTERNAL_ID error when duplicate external_ids exist."""
     cust1 = Customer(
         tenant_id=tenant_a.id,
         name="Duplicate Ext 1",
@@ -154,9 +83,147 @@ async def test_get_by_external_id_non_crashing_first(db_session: AsyncSession, t
     await db_session.commit()
 
     cust_repo = CustomerRepository(db_session)
-    found = await cust_repo.get_by_external_id(tenant_a.id, "EXT-SHARED-01")
-    assert found is not None
-    assert found.id in (cust1.id, cust2.id)
+    with pytest.raises(ValueError, match="AMBIGUOUS_EXTERNAL_ID"):
+        await cust_repo.get_by_external_id(tenant_a.id, "EXT-SHARED-01")
+
+
+@pytest.mark.asyncio
+async def test_phoneless_webhook_sender_rejection_no_customer_created(async_client, db_session, tenant_a):
+    """Points 1, 2, 7: Inbound WhatsApp message without sender_phone is rejected without creating permanent Customer."""
+    plan_srv = PlanService(db_session)
+    await plan_srv.seed_plans()
+
+    sub_srv = SubscriptionService(db_session)
+    await sub_srv.create_trial_subscription(tenant_a.id)
+
+    integration = Integration(
+        integration_key="whatsapp_cloud_api",
+        provider_key="whatsapp_cloud_api",
+        display_name="WhatsApp Cloud API",
+        is_enabled=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+
+    service = IntegrationService(db_session)
+    phone_id_a = f"phone_anon_{uuid.uuid4().hex[:6]}"
+    app_secret_a = "secret_anon_123"
+
+    await service.connect_integration(
+        tenant_id=tenant_a.id,
+        integration_key="whatsapp_cloud_api",
+        credentials={"access_token": "token_a", "app_secret": app_secret_a, "phone_number_id": phone_id_a},
+        external_account_id=phone_id_a,
+        allow_internal=True,
+    )
+
+    # Payload with message missing "from" / sender_phone
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "entry_id",
+                "changes": [
+                    {
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "123", "phone_number_id": phone_id_a},
+                            "messages": [{"id": "wamid.anon_msg_1", "timestamp": "12345", "type": "text", "text": {"body": "Phoneless message"}}],
+                        },
+                        "field": "messages",
+                    }
+                ],
+            }
+        ],
+    }
+
+    raw_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(app_secret_a.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+
+    resp = await async_client.post(
+        "/api/v1/webhooks/whatsapp",
+        content=raw_body,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={sig}"},
+    )
+    assert resp.status_code == 200
+    res_data = resp.json()
+    assert res_data["processed"][0]["status"] == "rejected_missing_sender_phone"
+
+    # Verify NO Customer row was created for tenant_a
+    cust_repo = CustomerRepository(db_session)
+    customers = await cust_repo.list_all(tenant_a.id)
+    assert len(customers) == 0
+
+
+@pytest.mark.asyncio
+async def test_conversation_active_status_alignment(db_session: AsyncSession, tenant_a):
+    """Finding D / Conversation active status alignment: HUMAN_ACTIVE status is recognized as active."""
+    cust_repo = CustomerRepository(db_session)
+    conv_repo = ConversationRepository(db_session)
+
+    customer, _ = await cust_repo.get_or_create(
+        tenant_id=tenant_a.id,
+        phone="+6281234999",
+        name="Active Conv Customer",
+    )
+    await db_session.commit()
+
+    conv = Conversation(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        channel="whatsapp",
+        status="HUMAN_ACTIVE",
+    )
+    db_session.add(conv)
+    await db_session.commit()
+
+    active_conv = await conv_repo.get_active_by_customer(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        channel="whatsapp",
+    )
+    assert active_conv is not None
+    assert active_conv.id == conv.id
+    assert active_conv.status == "HUMAN_ACTIVE"
+
+    conv_existing, created = await conv_repo.get_or_create_active(
+        tenant_id=tenant_a.id,
+        customer_id=customer.id,
+        channel="whatsapp",
+    )
+    assert created is False
+    assert conv_existing.id == conv.id
+
+
+@pytest.mark.asyncio
+async def test_cart_ownership_and_tenant_isolation(db_session: AsyncSession, tenant_a, tenant_b):
+    """Decision D-006-06 / Point 9: Cart Order(status=CART) is deterministic and isolated by tenant and customer."""
+    cust_repo = CustomerRepository(db_session)
+    order_repo = OrderRepository(db_session)
+
+    cust_a, _ = await cust_repo.get_or_create(tenant_a.id, phone="+62811000", name="Cart Cust A")
+    cust_b, _ = await cust_repo.get_or_create(tenant_a.id, phone="+62822000", name="Cart Cust B")
+
+    prod = Product(tenant_id=tenant_a.id, name="Cart Item", sku="CART-01", price=Decimal("100000.00"), stock=10)
+    db_session.add(prod)
+    await db_session.commit()
+
+    # Create Cart order for Customer A
+    cart_a = await order_repo.create_order_with_items(
+        tenant_id=tenant_a.id,
+        customer_id=cust_a.id,
+        currency="IDR",
+        items_data=[{"product": prod, "quantity": 1}],
+        status="CART",
+    )
+    await db_session.commit()
+
+    assert cart_a.status == "CART"
+    assert cart_a.customer_id == cust_a.id
+
+    # Tenant B lookup for Tenant A's Cart order returns None
+    fetched_b = await order_repo.get_by_id(tenant_b.id, cart_a.id)
+    assert fetched_b is None
 
 
 @pytest.mark.asyncio

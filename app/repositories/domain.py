@@ -187,7 +187,14 @@ class CustomerRepository(BaseRepository[Customer]):
             .execution_options(populate_existing=True)
         )
         result = await self.session.execute(stmt)
-        return result.scalars().first()
+        customers = result.scalars().all()
+        if len(customers) > 1:
+            cust_ids = [str(c.id) for c in customers]
+            raise ValueError(
+                f"AMBIGUOUS_EXTERNAL_ID: Multiple customer records ({', '.join(cust_ids)}) "
+                f"match external_id '{external_id}' for tenant {tenant_id}"
+            )
+        return customers[0] if customers else None
 
     async def get_or_create(
         self,
