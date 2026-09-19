@@ -392,6 +392,7 @@ class OrderRepository(BaseRepository[Order]):
         items_data: list[dict],
         metadata: dict | None = None,
         deduct_stock: bool = True,
+        status: str = "ORDER_CREATED",
     ) -> Order:
         """Creates order with line items, enforcing ACT-104 atomic row-level stock revalidation and deduction inside transaction boundary."""
         subtotal = Decimal("0.00")
@@ -449,7 +450,7 @@ class OrderRepository(BaseRepository[Order]):
         order = Order(
             tenant_id=tenant_id,
             customer_id=customer_id,
-            status="PENDING",
+            status=status,
             subtotal=subtotal,
             total=total,
             currency=currency,

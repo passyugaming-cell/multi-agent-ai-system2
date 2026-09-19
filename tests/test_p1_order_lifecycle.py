@@ -62,7 +62,7 @@ async def test_02_illegal_order_state_transitions_fail_closed():
 
 @pytest.mark.asyncio
 async def test_03_order_repository_transition_status_enforcement(db_session: AsyncSession, tenant_a: Tenant):
-    """Verifies OrderRepository.transition_status enforces ACT-111 transitions with row locking."""
+    """Verifies OrderRepository.transition_status enforces ACT-111 transitions with row locking over full DB-backed lifecycle."""
     cust_repo = CustomerRepository(db_session)
     customer, _ = await cust_repo.get_or_create(
         tenant_id=tenant_a.id,
@@ -82,32 +82,49 @@ async def test_03_order_repository_transition_status_enforcement(db_session: Asy
     await db_session.commit()
 
     order_repo = OrderRepository(db_session)
+    # 1. Create order with initial status PENDING_CONFIRMATION
     order = await order_repo.create_order_with_items(
         tenant_id=tenant_a.id,
         customer_id=customer.id,
         currency="IDR",
         items_data=[{"product": prod, "quantity": 1}],
+        status="PENDING_CONFIRMATION",
     )
     await db_session.commit()
+    assert order.status == "PENDING_CONFIRMATION"
 
-    # Initial order status is PENDING (maps to PENDING_CONFIRMATION / ORDER_CREATED)
-    # Order status -> PAYMENT_PENDING -> PAID
-    order.status = "ORDER_CREATED"
-    await db_session.commit()
+    # 2. Execute complete canonical transition sequence purely via transition_status()
+    # PENDING_CONFIRMATION -> ORDER_CREATED
+    updated = await order_repo.transition_status(tenant_a.id, order.id, "ORDER_CREATED")
+    assert updated.status == "ORDER_CREATED"
 
+    # ORDER_CREATED -> PAYMENT_PENDING
     updated = await order_repo.transition_status(tenant_a.id, order.id, "PAYMENT_PENDING")
     assert updated.status == "PAYMENT_PENDING"
 
+    # PAYMENT_PENDING -> PAID
     updated = await order_repo.transition_status(tenant_a.id, order.id, "PAID")
     assert updated.status == "PAID"
 
-    # Attempt illegal transition: PAID -> CART -> must FAIL
-    with pytest.raises(InvalidOrderStateTransitionError):
-        await order_repo.transition_status(tenant_a.id, order.id, "CART")
+    # PAID -> PROCESSING
+    updated = await order_repo.transition_status(tenant_a.id, order.id, "PROCESSING")
+    assert updated.status == "PROCESSING"
 
-    # Verify state remains unchanged as PAID
+    # PROCESSING -> FULFILLED
+    updated = await order_repo.transition_status(tenant_a.id, order.id, "FULFILLED")
+    assert updated.status == "FULFILLED"
+
+    # FULFILLED -> COMPLETED
+    updated = await order_repo.transition_status(tenant_a.id, order.id, "COMPLETED")
+    assert updated.status == "COMPLETED"
+
+    # Attempt illegal transition: COMPLETED -> PAYMENT_PENDING -> must FAIL
+    with pytest.raises(InvalidOrderStateTransitionError):
+        await order_repo.transition_status(tenant_a.id, order.id, "PAYMENT_PENDING")
+
+    # Verify state remains unchanged as COMPLETED
     await db_session.refresh(order)
-    assert order.status == "PAID"
+    assert order.status == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -127,8 +144,8 @@ async def test_04_cross_tenant_order_transition_isolation(db_session: AsyncSessi
         customer_id=cust_b.id,
         currency="IDR",
         items_data=[{"product": prod_b, "quantity": 1}],
+        status="ORDER_CREATED",
     )
-    order_b.status = "ORDER_CREATED"
     await db_session.commit()
 
     # Tenant A attempts to transition Tenant B's order -> must FAIL (raise ValueError/not found)
