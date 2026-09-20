@@ -82,46 +82,51 @@ class ClientLifecycleManager:
 
     async def is_payment_verified(self, tenant_id: uuid.UUID) -> bool:
         """
-        Evaluates authoritative billing/payment evidence for a tenant.
+        Evaluates authoritative billing/payment evidence for a tenant's current subscription.
+        Requires the complete authoritative billing relationship chain:
+            Current Subscription -> Paid Invoice (subscription_id == Subscription.id) -> Succeeded Payment (invoice_id == Invoice.id)
         Returns True if:
-        1. Tenant has an ACTIVE or TRIALING subscription.
-        2. Subscription amount is 0 (free plan) or metadata_ contains verified_payment=True.
-        3. Tenant has a SUCCEEDED payment record.
-        4. Tenant has a PAID invoice record.
+        1. Tenant has a $0 free plan subscription (amount == 0).
+        2. Tenant has a paid subscription (amount > 0) with a PAID Invoice linked to subscription.id
+           AND a SUCCEEDED Payment linked to that Invoice.
         """
         from decimal import Decimal
         from sqlalchemy import and_
         from app.database.models.billing import Payment, Invoice
-        from app.billing.state_machine import SubscriptionStatus, PaymentStatus, InvoiceStatus
+        from app.billing.state_machine import PaymentStatus, InvoiceStatus
 
         subscription = await self.subscription_service.get_subscription_or_none(tenant_id)
-        if subscription:
-            if subscription.status == SubscriptionStatus.ACTIVE:
-                return True
-            if subscription.amount == Decimal("0.00") or float(subscription.amount) == 0:
-                return True
-            meta = subscription.metadata_ or {}
-            if meta.get("verified_payment") is True:
-                return True
+        if not subscription:
+            return False
 
+        # Support $0 free tier subscriptions
+        if subscription.amount == Decimal("0.00") or float(subscription.amount) == 0:
+            return True
+
+        # For paid subscriptions (amount > 0), verify the complete authoritative billing chain:
+        # 1. Query for a PAID invoice linked specifically to current subscription.id
+        stmt_inv = select(Invoice).where(
+            and_(
+                Invoice.tenant_id == tenant_id,
+                Invoice.subscription_id == subscription.id,
+                Invoice.status == InvoiceStatus.PAID,
+            )
+        )
+        paid_invoices = (await self.db.execute(stmt_inv)).scalars().all()
+        if not paid_invoices:
+            return False
+
+        # 2. Query for a SUCCEEDED payment corresponding to any of the subscription's PAID invoices
+        invoice_ids = [inv.id for inv in paid_invoices]
         stmt_pay = select(Payment).where(
             and_(
                 Payment.tenant_id == tenant_id,
+                Payment.invoice_id.in_(invoice_ids),
                 Payment.status == PaymentStatus.SUCCEEDED,
             )
         )
         succeeded_pay = (await self.db.execute(stmt_pay)).scalars().first()
         if succeeded_pay:
-            return True
-
-        stmt_inv = select(Invoice).where(
-            and_(
-                Invoice.tenant_id == tenant_id,
-                Invoice.status == InvoiceStatus.PAID,
-            )
-        )
-        paid_inv = (await self.db.execute(stmt_inv)).scalars().first()
-        if paid_inv:
             return True
 
         return False
@@ -410,13 +415,17 @@ def validate_tenant_lifecycle_transition(
     try:
         curr_enum = TenantLifecycleState(current_state)
     except ValueError:
-        curr_enum = None
+        raise AppException(
+            code="INVALID_TENANT_STATE_TRANSITION",
+            message=f"Unknown current tenant lifecycle state: '{current_state}'.",
+            status_code=400,
+        )
 
     try:
         target_enum = TenantLifecycleState(target_state)
     except ValueError:
         raise AppException(
-            code="INVALID_TENANT_LIFECYCLE_TRANSITION",
+            code="INVALID_TENANT_STATE_TRANSITION",
             message=f"Unknown target tenant lifecycle state: '{target_state}'.",
             status_code=400,
         )
@@ -431,20 +440,19 @@ def validate_tenant_lifecycle_transition(
                 status_code=403,
             )
 
-    if curr_enum:
-        allowed = ALLOWED_TENANT_LIFECYCLE_TRANSITIONS.get(curr_enum, set())
-        if target_enum not in allowed:
-            logger.warning(
-                "Rejected invalid tenant lifecycle transition: '%s' -> '%s' for tenant %s",
-                current_state,
-                target_state,
-                tenant.id,
-            )
-            raise AppException(
-                code="INVALID_TENANT_LIFECYCLE_TRANSITION",
-                message=f"Cannot transition tenant lifecycle state from '{current_state}' to '{target_state}'.",
-                status_code=400,
-            )
+    allowed = ALLOWED_TENANT_LIFECYCLE_TRANSITIONS.get(curr_enum, set())
+    if target_enum not in allowed:
+        logger.warning(
+            "Rejected invalid tenant lifecycle transition: '%s' -> '%s' for tenant %s",
+            current_state,
+            target_state,
+            tenant.id,
+        )
+        raise AppException(
+            code="INVALID_TENANT_STATE_TRANSITION",
+            message=f"Cannot transition tenant lifecycle state from '{current_state}' to '{target_state}'.",
+            status_code=400,
+        )
 
     # Activation Gate Enforcement for transition to ACTIVE
     if target_enum == TenantLifecycleState.ACTIVE:

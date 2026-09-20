@@ -76,7 +76,11 @@ def validate_handoff_state_transition(current_state: str, target_state: str) -> 
     try:
         curr_enum = HumanHandoffState(current_state)
     except ValueError:
-        curr_enum = None
+        raise AppException(
+            code="INVALID_HANDOFF_STATE_TRANSITION",
+            message=f"Unknown current handoff state: '{current_state}'.",
+            status_code=400,
+        )
 
     try:
         target_enum = HumanHandoffState(target_state)
@@ -87,24 +91,23 @@ def validate_handoff_state_transition(current_state: str, target_state: str) -> 
             status_code=400,
         )
 
-    if curr_enum:
-        allowed = ALLOWED_HANDOFF_TRANSITIONS.get(curr_enum, set())
-        if target_enum not in allowed:
-            logger.warning(
-                "Rejected invalid handoff state transition: '%s' -> '%s'",
-                current_state,
-                target_state,
-            )
-            raise AppException(
-                code="INVALID_HANDOFF_STATE_TRANSITION",
-                message=f"Cannot transition handoff state from '{current_state}' to '{target_state}'.",
-                status_code=400,
-            )
+    allowed = ALLOWED_HANDOFF_TRANSITIONS.get(curr_enum, set())
+    if target_enum not in allowed:
+        logger.warning(
+            "Rejected invalid handoff state transition: '%s' -> '%s'",
+            current_state,
+            target_state,
+        )
+        raise AppException(
+            code="INVALID_HANDOFF_STATE_TRANSITION",
+            message=f"Cannot transition handoff state from '{current_state}' to '{target_state}'.",
+            status_code=400,
+        )
 
 
 def get_handoff_lifecycle_state(conversation: Conversation) -> str:
     """Returns the authoritative HumanHandoffState from conversation metadata or derives it."""
-    meta = conversation.metadata_ or {}
+    meta = getattr(conversation, "metadata_", {}) or getattr(conversation, "meta_data", {}) or {}
     if "handoff_state" in meta and meta["handoff_state"]:
         return meta["handoff_state"]
 
@@ -129,16 +132,25 @@ def sync_handoff_with_conversation_status(
     target_handoff_state: str,
 ) -> str:
     """
-    Validates handoff transition, sets conversation.metadata_['handoff_state'],
+    Validates handoff transition, sets conversation metadata or flag,
     and synchronizes Conversation.status deterministically.
     """
     current_handoff = get_handoff_lifecycle_state(conversation)
     validate_handoff_state_transition(current_handoff, target_handoff_state)
 
     target_enum = HumanHandoffState(target_handoff_state)
-    meta = dict(conversation.metadata_ or {})
+    meta = dict(getattr(conversation, "metadata_", {}) or getattr(conversation, "meta_data", {}) or {})
     meta["handoff_state"] = target_enum.value
-    conversation.metadata_ = meta
+    if hasattr(conversation, "metadata_"):
+        conversation.metadata_ = meta
+    elif hasattr(conversation, "meta_data"):
+        conversation.meta_data = meta
+
+    conversation.human_handoff = target_enum in (
+        HumanHandoffState.AI_HANDOFF_REQUESTED,
+        HumanHandoffState.HUMAN_ASSIGNED,
+        HumanHandoffState.HUMAN_IN_PROGRESS,
+    )
 
     # Synchronize Conversation.status
     mapped_conv_status = HANDOFF_TO_CONVERSATION_STATUS_MAP.get(target_enum)

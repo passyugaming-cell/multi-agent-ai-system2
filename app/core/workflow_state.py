@@ -59,7 +59,11 @@ def validate_workflow_execution_transition(current_status: str, target_status: s
     try:
         curr_enum = WorkflowExecutionStatus(current_status)
     except ValueError:
-        curr_enum = None
+        raise AppException(
+            code="INVALID_WORKFLOW_STATE_TRANSITION",
+            message=f"Unknown current workflow execution status: '{current_status}'.",
+            status_code=400,
+        )
 
     try:
         target_enum = WorkflowExecutionStatus(target_status)
@@ -70,16 +74,15 @@ def validate_workflow_execution_transition(current_status: str, target_status: s
             status_code=400,
         )
 
-    if curr_enum:
-        allowed = ALLOWED_WORKFLOW_EXECUTION_TRANSITIONS.get(curr_enum, set())
-        if target_enum not in allowed:
-            logger.warning(
-                "Rejected invalid workflow execution transition: '%s' -> '%s'",
-                current_status,
-                target_status,
-            )
-            raise AppException(
-                code="INVALID_WORKFLOW_STATE_TRANSITION",
-                message=f"Cannot transition workflow execution status from '{current_status}' to '{target_status}'.",
-                status_code=400,
-            )
+    allowed = ALLOWED_WORKFLOW_EXECUTION_TRANSITIONS.get(curr_enum, set())
+    if target_enum not in allowed:
+        logger.warning(
+            "Rejected invalid workflow execution transition: '%s' -> '%s'",
+            current_status,
+            target_status,
+        )
+        raise AppException(
+            code="INVALID_WORKFLOW_STATE_TRANSITION",
+            message=f"Cannot transition workflow execution status from '{current_status}' to '{target_status}'.",
+            status_code=400,
+        )

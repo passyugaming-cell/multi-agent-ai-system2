@@ -65,7 +65,11 @@ def validate_task_status_transition(current_status: str, target_status: str) -> 
     try:
         curr_enum = TaskStatus(current_status)
     except ValueError:
-        curr_enum = None
+        raise AppException(
+            code="INVALID_TASK_STATE_TRANSITION",
+            message=f"Unknown current task status: '{current_status}'.",
+            status_code=400,
+        )
 
     try:
         target_enum = TaskStatus(target_status)
@@ -76,19 +80,18 @@ def validate_task_status_transition(current_status: str, target_status: str) -> 
             status_code=400,
         )
 
-    if curr_enum:
-        allowed = ALLOWED_TASK_TRANSITIONS.get(curr_enum, set())
-        if target_enum not in allowed:
-            logger.warning(
-                "Rejected invalid task state transition: '%s' -> '%s'",
-                current_status,
-                target_status,
-            )
-            raise AppException(
-                code="INVALID_TASK_STATE_TRANSITION",
-                message=f"Cannot transition task status from '{current_status}' to '{target_status}'.",
-                status_code=400,
-            )
+    allowed = ALLOWED_TASK_TRANSITIONS.get(curr_enum, set())
+    if target_enum not in allowed:
+        logger.warning(
+            "Rejected invalid task state transition: '%s' -> '%s'",
+            current_status,
+            target_status,
+        )
+        raise AppException(
+            code="INVALID_TASK_STATE_TRANSITION",
+            message=f"Cannot transition task status from '{current_status}' to '{target_status}'.",
+            status_code=400,
+        )
 
 
 def apply_task_status_transition(task: Task, target_status: str) -> None:

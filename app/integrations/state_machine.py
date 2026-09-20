@@ -82,7 +82,11 @@ def validate_integration_connection_transition(current_status: str, target_statu
     try:
         curr_enum = IntegrationConnectionStatus(current_status)
     except ValueError:
-        curr_enum = None
+        raise AppException(
+            code="INVALID_INTEGRATION_STATE_TRANSITION",
+            message=f"Unknown current integration connection status: '{current_status}'.",
+            status_code=400,
+        )
 
     try:
         target_enum = IntegrationConnectionStatus(target_status)
@@ -93,16 +97,15 @@ def validate_integration_connection_transition(current_status: str, target_statu
             status_code=400,
         )
 
-    if curr_enum:
-        allowed = ALLOWED_INTEGRATION_TRANSITIONS.get(curr_enum, set())
-        if target_enum not in allowed:
-            logger.warning(
-                "Rejected invalid integration connection transition: '%s' -> '%s'",
-                current_status,
-                target_status,
-            )
-            raise AppException(
-                code="INVALID_INTEGRATION_STATE_TRANSITION",
-                message=f"Cannot transition integration connection status from '{current_status}' to '{target_status}'.",
-                status_code=400,
-            )
+    allowed = ALLOWED_INTEGRATION_TRANSITIONS.get(curr_enum, set())
+    if target_enum not in allowed:
+        logger.warning(
+            "Rejected invalid integration connection transition: '%s' -> '%s'",
+            current_status,
+            target_status,
+        )
+        raise AppException(
+            code="INVALID_INTEGRATION_STATE_TRANSITION",
+            message=f"Cannot transition integration connection status from '{current_status}' to '{target_status}'.",
+            status_code=400,
+        )

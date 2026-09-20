@@ -15,7 +15,6 @@ from app.tenants.provisioning.validators import TenantValidatorEngine
 from app.tenants.provisioning.readiness import ReadinessCalculator
 from app.tenants.provisioning.exceptions import ChecklistRequirementError, ReadinessValidationError
 from app.integrations.service import IntegrationService
-from app.integrations.state_machine import validate_integration_connection_transition
 from app.integrations.events import publish_integration_event
 from app.integrations.registry import integration_registry
 from app.integrations.exceptions import PermissionDeniedError, IntegrationError, ConnectionNotFoundError
@@ -405,7 +404,6 @@ class OnboardingService:
         )
 
         if is_healthy:
-            validate_integration_connection_transition(connection.status, "ACTIVE")
             connection.status = "ACTIVE"
             connection.last_success_at = utc_now()
             connection.error_message = None
@@ -416,7 +414,6 @@ class OnboardingService:
                 payload={"connection_id": str(connection_id), "status": "ACTIVE"},
             )
         else:
-            validate_integration_connection_transition(connection.status, "ERROR")
             connection.status = "ERROR"
             connection.last_error_at = utc_now()
             connection.error_message = "WhatsApp health check verification failed"

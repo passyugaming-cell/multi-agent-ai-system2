@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.events.schemas import EventSchema
-from app.core.workflow_state import validate_workflow_execution_transition
 from app.core.workflows.conditions import ConditionEvaluator
 from app.core.workflows.actions import ActionExecutor, ActionResult, get_action_risk_level, RiskLevel
 from app.core.authority.schemas import ActionBinding
@@ -156,20 +155,17 @@ class WorkflowEngine:
         # Max execution time timeout check
         max_time = workflow.max_execution_time or settings.WORKFLOW_TIMEOUT_SECONDS
         if started_at and (now - started_at).total_seconds() > max_time:
-            validate_workflow_execution_transition(execution.status, "TIMED_OUT")
             execution.status = "TIMED_OUT"
             execution.failed_at = now
             execution.error = f"Workflow execution timed out after exceeding max_execution_time ({max_time}s)."
             self._record_history(execution, "WORKFLOW_TIMED_OUT", error=execution.error)
             return
 
-        validate_workflow_execution_transition(execution.status, "RUNNING")
         execution.status = "RUNNING"
 
         # Loop protection: check max steps
         max_steps = workflow.max_steps or settings.WORKFLOW_MAX_STEPS
         if execution.current_step >= max_steps:
-            validate_workflow_execution_transition(execution.status, "BLOCKED")
             execution.status = "BLOCKED"
             execution.failed_at = now
             execution.error = f"Loop protection triggered: exceeded maximum allowed steps ({max_steps})."
@@ -187,7 +183,6 @@ class WorkflowEngine:
         )
 
         if not condition_passed:
-            validate_workflow_execution_transition(execution.status, "COMPLETED")
             execution.status = "COMPLETED"
             execution.completed_at = now
             execution.result = {"condition_met": False, "message": "Workflow completed safely because trigger conditions were not met."}
@@ -236,14 +231,12 @@ class WorkflowEngine:
                     },
                 )
                 self.session.add(approval)
-                validate_workflow_execution_transition(execution.status, "WAITING_APPROVAL")
                 execution.status = "WAITING_APPROVAL"
                 self._record_history(execution, "APPROVAL_REQUESTED", result=approval_data)
                 return  # Pause execution
 
             if res.is_delayed:
-                validate_workflow_execution_transition(execution.status, "WAITING_RETRY")
-                execution.status = "WAITING_RETRY"
+                execution.status = "PENDING"
                 execution.next_retry_at = now + timedelta(seconds=res.delay_seconds)
                 self._record_history(execution, "DELAY_INITIATED", result={"seconds": res.delay_seconds})
                 return
@@ -252,13 +245,11 @@ class WorkflowEngine:
                 # Retry logic
                 if execution.retry_count < execution.max_retries:
                     execution.retry_count += 1
-                    validate_workflow_execution_transition(execution.status, "WAITING_RETRY")
                     execution.status = "WAITING_RETRY"
                     execution.next_retry_at = now + timedelta(seconds=2 ** execution.retry_count)
                     self._record_history(execution, "STEP_FAILED_RETRYING", error=res.error)
                     return
                 else:
-                    validate_workflow_execution_transition(execution.status, "FAILED")
                     execution.status = "FAILED"
                     execution.failed_at = now
                     execution.error = res.error
@@ -271,7 +262,6 @@ class WorkflowEngine:
             execution.current_step += 1
 
         # All actions completed successfully
-        validate_workflow_execution_transition(execution.status, "COMPLETED")
         execution.status = "COMPLETED"
         execution.completed_at = now
         execution.result = {"status": "success", "final_context": execution.context}

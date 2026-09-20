@@ -6,7 +6,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models.workflow import Task, WorkflowExecution
 from app.core.exceptions import AppError
-from app.core.task_state import apply_task_status_transition, validate_task_status_transition, ALLOWED_TASK_TRANSITIONS as VALID_TASK_TRANSITIONS
+
+
+VALID_TASK_TRANSITIONS = {
+    "CREATED": {"ASSIGNED", "IN_PROGRESS", "WAITING_APPROVAL", "WAITING_DATA", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
+    "ASSIGNED": {"IN_PROGRESS", "WAITING_APPROVAL", "WAITING_DATA", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
+    "IN_PROGRESS": {"WAITING_DATA", "WAITING_APPROVAL", "COMPLETED", "FAILED", "BLOCKED", "CANCELLED"},
+    "WAITING_DATA": {"IN_PROGRESS", "CANCELLED"},
+    "WAITING_APPROVAL": {"IN_PROGRESS", "CANCELLED"},
+    "COMPLETED": set(),  # Terminal
+    "FAILED": set(),     # Terminal
+    "BLOCKED": {"IN_PROGRESS", "CANCELLED"},
+    "CANCELLED": set(),  # Terminal
+}
 
 
 class TaskService:
@@ -77,10 +89,22 @@ class TaskService:
         error: str | None = None,
     ) -> Task:
         task = await self.get_task(tenant_id, task_id)
-        apply_task_status_transition(task, new_status)
+        current_status = task.status
 
-        if result:
+        allowed_next = VALID_TASK_TRANSITIONS.get(current_status, set())
+        if new_status not in allowed_next:
+            raise AppError(
+                f"Invalid task status transition from '{current_status}' to '{new_status}'",
+                status_code=400,
+            )
+
+        task.status = new_status
+        if new_status == "IN_PROGRESS" and not task.started_at:
+            task.started_at = datetime.now(timezone.utc)
+        elif new_status == "COMPLETED":
+            task.completed_at = datetime.now(timezone.utc)
             task.result = result
+
         if error:
             task.error = error
 
@@ -92,7 +116,7 @@ class TaskService:
         task = await self.get_task(tenant_id, task_id)
         task.assigned_to = assigned_to
         if task.status == "CREATED":
-            apply_task_status_transition(task, "ASSIGNED")
+            task.status = "ASSIGNED"
         await self.session.commit()
         await self.session.refresh(task)
         return task
