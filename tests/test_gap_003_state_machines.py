@@ -609,3 +609,47 @@ async def test_s006_disconnect_integration_validation(db_session: AsyncSession, 
         allow_internal=True,
     )
     assert disc_conn.status == "DISCONNECTED"
+
+
+@pytest.mark.asyncio
+async def test_callsites_use_canonical_state_machine_validators(db_session: AsyncSession, tenant_a: Tenant):
+    """Verifies that service call-sites enforce canonical state machine transition rules."""
+    from app.core.tasks.service import TaskService
+    from app.integrations.service import IntegrationService
+    from app.integrations.exceptions import InvalidStateTransitionError
+
+    task_svc = TaskService(db_session)
+    task = await task_svc.create_task(
+        tenant_id=tenant_a.id,
+        title="Call-site test task",
+    )
+    assert task.status == "CREATED"
+
+    # TaskService: CREATED -> WAITING_DATA is invalid and raises AppException from validate_task_status_transition
+    with pytest.raises(AppException) as exc_info:
+        await task_svc.update_status(tenant_a.id, task.id, "WAITING_DATA")
+    assert exc_info.value.code == "INVALID_TASK_STATE_TRANSITION"
+
+    # IntegrationService: DISCONNECTED -> ACTIVE is invalid
+    from app.database.models.integrations import Integration, IntegrationConnection
+    integ = Integration(
+        integration_key=f"callsite_key_{uuid.uuid4().hex[:6]}",
+        provider_key="whatsapp_cloud_api",
+        display_name="Callsite Integration",
+        category="messaging",
+    )
+    db_session.add(integ)
+    await db_session.flush()
+
+    disconn = IntegrationConnection(
+        tenant_id=tenant_a.id,
+        integration_id=integ.id,
+        provider_key="whatsapp_cloud_api",
+        status="DISCONNECTED",
+    )
+    db_session.add(disconn)
+    await db_session.commit()
+
+    integ_svc = IntegrationService(db_session)
+    with pytest.raises(InvalidStateTransitionError):
+        integ_svc._validate_transition("DISCONNECTED", "ACTIVE")

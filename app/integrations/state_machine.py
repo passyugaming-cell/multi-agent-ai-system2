@@ -36,7 +36,9 @@ ALLOWED_INTEGRATION_TRANSITIONS: dict[IntegrationConnectionStatus, Set[Integrati
         IntegrationConnectionStatus.DISCONNECTED,
     },
     IntegrationConnectionStatus.ACTIVE: {
+        IntegrationConnectionStatus.CONNECTING,
         IntegrationConnectionStatus.RECONNECTING,
+        IntegrationConnectionStatus.CONNECTED,
         IntegrationConnectionStatus.ERROR,
         IntegrationConnectionStatus.EXPIRED,
         IntegrationConnectionStatus.REVOKED,

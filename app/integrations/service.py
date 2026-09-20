@@ -36,20 +36,10 @@ from app.integrations.permissions import (
     MANAGE_CREDENTIALS,
     EXECUTE_INTEGRATION,
 )
+from app.integrations.state_machine import validate_integration_connection_transition
+from app.core.exceptions import AppException
 
 logger = logging.getLogger(__name__)
-
-VALID_TRANSITIONS = {
-    "DISCONNECTED": {"CONNECTING", "DISABLED"},
-    "CONNECTING": {"CONNECTED", "ERROR", "DISCONNECTED"},
-    "CONNECTED": {"ACTIVE", "ERROR", "RECONNECTING", "DISCONNECTED", "EXPIRED", "REVOKED", "DISABLED"},
-    "ACTIVE": {"CONNECTED", "CONNECTING", "ERROR", "RECONNECTING", "DISCONNECTED", "EXPIRED", "REVOKED", "DISABLED"},
-    "ERROR": {"RECONNECTING", "DISCONNECTED", "CONNECTED", "DISABLED"},
-    "RECONNECTING": {"CONNECTED", "ACTIVE", "ERROR", "DISCONNECTED"},
-    "EXPIRED": {"RECONNECTING", "DISCONNECTED", "DISABLED"},
-    "REVOKED": {"DISCONNECTED", "DISABLED"},
-    "DISABLED": {"DISCONNECTED", "CONNECTED"},
-}
 
 
 class IntegrationService:
@@ -590,8 +580,9 @@ class IntegrationService:
         return conn
 
     def _validate_transition(self, current_status: str, target_status: str) -> None:
-        allowed = VALID_TRANSITIONS.get(current_status, set())
-        if target_status not in allowed and current_status != target_status:
+        try:
+            validate_integration_connection_transition(current_status, target_status)
+        except AppException:
             raise InvalidStateTransitionError(current_status, target_status)
 
     def _handle_integrity_error(self, exc: IntegrityError, external_account_id: str | None) -> None:
