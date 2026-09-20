@@ -21,10 +21,15 @@ class CredentialNotFoundError(IntegrationError):
         super().__init__(f"Credentials not found for connection: {connection_id}")
 
 
-class InvalidStateTransitionError(IntegrationError):
+from app.core.exceptions import AppException
+
+
+class InvalidStateTransitionError(IntegrationError, AppException):
     """Raised when an invalid lifecycle state transition is attempted."""
     def __init__(self, current_status: str, target_status: str):
-        super().__init__(f"Invalid connection status transition from {current_status} to {target_status}")
+        msg = f"Invalid connection status transition from {current_status} to {target_status}"
+        IntegrationError.__init__(self, msg)
+        AppException.__init__(self, code="INVALID_INTEGRATION_STATE_TRANSITION", message=msg, status_code=400)
 
 
 class CredentialSecurityError(IntegrationError):

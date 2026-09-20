@@ -612,11 +612,97 @@ async def test_s006_disconnect_integration_validation(db_session: AsyncSession, 
 
 
 @pytest.mark.asyncio
-async def test_callsites_use_canonical_state_machine_validators(db_session: AsyncSession, tenant_a: Tenant):
-    """Verifies that service call-sites enforce canonical state machine transition rules."""
+async def test_workflow_engine_public_mutation_path_rejects_invalid_transition(db_session: AsyncSession, tenant_a: Tenant):
+    """A. WorkflowEngine: Verifies public run_execution_pipeline rejects invalid transitions using canonical validator."""
+    from app.core.workflows.engine import WorkflowEngine
+    from app.database.models.workflow import WorkflowExecution, WorkflowConfiguration
+
+    wf_config = WorkflowConfiguration(
+        tenant_id=tenant_a.id,
+        key=f"wf_key_{uuid.uuid4().hex[:6]}",
+        name="Test Workflow",
+        trigger_type="test.event",
+        is_active=True,
+    )
+    db_session.add(wf_config)
+    await db_session.flush()
+
+    # WorkflowExecution in unknown/invalid current state
+    execution = WorkflowExecution(
+        tenant_id=tenant_a.id,
+        workflow_id=wf_config.id,
+        event_id=f"evt_{uuid.uuid4().hex[:8]}",
+        status="UNKNOWN_STATE",
+        current_step=0,
+        max_retries=3,
+        context={},
+    )
+    db_session.add(execution)
+    await db_session.commit()
+
+    engine = WorkflowEngine(db_session)
+    with pytest.raises(AppException) as exc_info:
+        await engine.run_execution_pipeline(execution, wf_config)
+
+    assert exc_info.value.code == "INVALID_WORKFLOW_STATE_TRANSITION"
+    assert execution.status == "UNKNOWN_STATE"
+
+
+@pytest.mark.asyncio
+async def test_approval_service_public_mutation_path_rejects_invalid_workflow_transition(db_session: AsyncSession, tenant_a: Tenant):
+    """B. ApprovalService: Verifies cancel/reject reject invalid WorkflowExecution transitions via canonical validator."""
+    from app.core.approvals.service import ApprovalService
+    from app.database.models.workflow import Approval, WorkflowExecution
+    from app.core.context import set_actor_context, reset_actor_context, AuthenticatedActor
+
+    requester_id = uuid.uuid4()
+    execution = WorkflowExecution(
+        tenant_id=tenant_a.id,
+        workflow_id=uuid.uuid4(),
+        event_id=f"evt_{uuid.uuid4().hex[:8]}",
+        status="COMPLETED",  # Terminal state! Transition COMPLETED -> CANCELLED is invalid.
+        current_step=0,
+        max_retries=3,
+        context={},
+    )
+    db_session.add(execution)
+    await db_session.flush()
+
+    approval = Approval(
+        tenant_id=tenant_a.id,
+        workflow_execution_id=execution.id,
+        requested_by=str(requester_id),
+        action_type="update_order",
+        target="ord_123",
+        reason="Testing approval cancellation",
+        risk_level="LOW",
+        status="PENDING",
+    )
+    db_session.add(approval)
+    await db_session.commit()
+
+    actor = AuthenticatedActor(
+        user_id=requester_id,
+        tenant_id=tenant_a.id,
+        role="owner",
+        permissions={"business.write"},
+    )
+    token = set_actor_context(actor)
+    try:
+        svc = ApprovalService(db_session)
+        with pytest.raises(AppException) as exc_info:
+            await svc.cancel(tenant_a.id, approval.id)
+
+        assert exc_info.value.code == "INVALID_WORKFLOW_STATE_TRANSITION"
+        assert execution.status == "COMPLETED"
+    finally:
+        reset_actor_context(token)
+
+
+@pytest.mark.asyncio
+async def test_task_service_public_mutation_path_rejects_invalid_transition(db_session: AsyncSession, tenant_a: Tenant):
+    """C. TaskService: Verifies update_status rejects invalid task transitions via canonical validator."""
     from app.core.tasks.service import TaskService
-    from app.integrations.service import IntegrationService
-    from app.integrations.exceptions import InvalidStateTransitionError
 
     task_svc = TaskService(db_session)
     task = await task_svc.create_task(
@@ -625,17 +711,25 @@ async def test_callsites_use_canonical_state_machine_validators(db_session: Asyn
     )
     assert task.status == "CREATED"
 
-    # TaskService: CREATED -> WAITING_DATA is invalid and raises AppException from validate_task_status_transition
-    with pytest.raises(AppException) as exc_info:
+    # CREATED -> WAITING_DATA is invalid and raises AppError (code="INVALID_TASK_STATE_TRANSITION")
+    with pytest.raises(AppError) as exc_info:
         await task_svc.update_status(tenant_a.id, task.id, "WAITING_DATA")
-    assert exc_info.value.code == "INVALID_TASK_STATE_TRANSITION"
 
-    # IntegrationService: DISCONNECTED -> ACTIVE is invalid
+    assert exc_info.value.code == "INVALID_TASK_STATE_TRANSITION"
+    assert task.status == "CREATED"
+
+
+@pytest.mark.asyncio
+async def test_integration_service_public_mutation_path_rejects_invalid_transition(db_session: AsyncSession, tenant_a: Tenant):
+    """D. IntegrationService: Verifies disconnect_integration rejects invalid transitions via canonical validator without private wrappers."""
+    from app.integrations.service import IntegrationService
     from app.database.models.integrations import Integration, IntegrationConnection
+    from app.integrations.exceptions import InvalidStateTransitionError
+
     integ = Integration(
-        integration_key=f"callsite_key_{uuid.uuid4().hex[:6]}",
+        integration_key=f"public_key_{uuid.uuid4().hex[:6]}",
         provider_key="whatsapp_cloud_api",
-        display_name="Callsite Integration",
+        display_name="Public Integration Test",
         category="messaging",
     )
     db_session.add(integ)
@@ -645,11 +739,20 @@ async def test_callsites_use_canonical_state_machine_validators(db_session: Asyn
         tenant_id=tenant_a.id,
         integration_id=integ.id,
         provider_key="whatsapp_cloud_api",
-        status="DISCONNECTED",
+        status="UNKNOWN_STATE",
     )
     db_session.add(disconn)
     await db_session.commit()
 
     integ_svc = IntegrationService(db_session)
-    with pytest.raises(InvalidStateTransitionError):
-        integ_svc._validate_transition("DISCONNECTED", "ACTIVE")
+
+    # Calling public mutation method disconnect_integration on connection in UNKNOWN_STATE (UNKNOWN_STATE -> DISCONNECTED is invalid)
+    with pytest.raises((InvalidStateTransitionError, AppException)) as exc_info:
+        await integ_svc.disconnect_integration(
+            tenant_id=tenant_a.id,
+            connection_id=disconn.id,
+            allow_internal=True,
+        )
+
+    assert exc_info.value.code == "INVALID_INTEGRATION_STATE_TRANSITION"
+    assert disconn.status == "UNKNOWN_STATE"

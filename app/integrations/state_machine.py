@@ -2,6 +2,7 @@ import logging
 from enum import Enum
 from typing import Set
 from app.core.exceptions import AppException
+from app.integrations.exceptions import InvalidStateTransitionError
 
 logger = logging.getLogger(__name__)
 
@@ -84,20 +85,12 @@ def validate_integration_connection_transition(current_status: str, target_statu
     try:
         curr_enum = IntegrationConnectionStatus(current_status)
     except ValueError:
-        raise AppException(
-            code="INVALID_INTEGRATION_STATE_TRANSITION",
-            message=f"Unknown current integration connection status: '{current_status}'.",
-            status_code=400,
-        )
+        raise InvalidStateTransitionError(current_status, target_status)
 
     try:
         target_enum = IntegrationConnectionStatus(target_status)
     except ValueError:
-        raise AppException(
-            code="INVALID_INTEGRATION_STATE_TRANSITION",
-            message=f"Unknown target integration connection status: '{target_status}'.",
-            status_code=400,
-        )
+        raise InvalidStateTransitionError(current_status, target_status)
 
     allowed = ALLOWED_INTEGRATION_TRANSITIONS.get(curr_enum, set())
     if target_enum not in allowed:
@@ -106,8 +99,4 @@ def validate_integration_connection_transition(current_status: str, target_statu
             current_status,
             target_status,
         )
-        raise AppException(
-            code="INVALID_INTEGRATION_STATE_TRANSITION",
-            message=f"Cannot transition integration connection status from '{current_status}' to '{target_status}'.",
-            status_code=400,
-        )
+        raise InvalidStateTransitionError(current_status, target_status)
