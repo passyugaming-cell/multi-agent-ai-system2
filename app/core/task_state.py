@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Set, Any
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, AppError
 from app.database.models.workflow import Task
 
 logger = logging.getLogger(__name__)
@@ -87,9 +87,9 @@ def validate_task_status_transition(current_status: str, target_status: str) -> 
             current_status,
             target_status,
         )
-        raise AppException(
+        raise AppError(
+            message=f"Invalid task status transition from '{current_status}' to '{target_status}'.",
             code="INVALID_TASK_STATE_TRANSITION",
-            message=f"Cannot transition task status from '{current_status}' to '{target_status}'.",
             status_code=400,
         )
 
